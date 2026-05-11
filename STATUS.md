@@ -1,133 +1,112 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-11 17:40
+> 最后更新：2026-05-11 21:45（命令行测试后）
 
 ---
 
-## 用户测试反馈 (2026-05-11 — 待分析)
+## 已修复（本轮 2026-05-11）
 
-### UX-1: 聊天页面缺少模型切换控件
-
-**状态**: 待验证
-
-前端声称已实现模型选择器（ChatView.vue），但用户实际看到的下拉菜单不存在。
-需要确认 DOM 渲染、WS 请求链路。
-
----
-
-### UX-2: web_search 工具调用 10+ 分钟无响应
-
-**状态**: 待排查
-
-查询"今天的实时金价" → agent 调用 web_search → 无后续 turn，长时间阻塞。
-
-可能：
-- web_search HTTP 请求无超时
-- agent loop 卡在 `await handler.dispatch()` 等待工具结果
-- 工具内部异常未被 yield（沉没了）
-
----
-
-### UX-3: 微信/钉钉/飞书扫码接入
-
-**状态**: 待排查
-
-- 微信：`HTTPSConnection Pool` 错误。用户确认微信接入二维码在其他应用中可正常显示。需要检查 iLink API 请求参数、参数加密等
-- 钉钉/飞书：扫码成功后 Client ID/Secret 应自动填入。poll_qrcode_status 返回 token 后需写入 config 中的对应字段
-- 微信：bot_token 扫码后自动填入同理
-
----
-
-### UX-4: 输入框 UI + 发送按钮锁定
-
-**状态**: 待修复
-
-1. 大框套小框：`.input-area` + `.input-wrapper` 双层容器，CSS 收敛不完全
-2. 发送按钮在 agent 响应期间 disabled，用户无法发送新消息或打断当前对话
-
-需要：
-- 彻底重构为单层输入容器
-- 允许随时发送（取消/打断当前请求）
-- 或添加取消按钮
-
----
-
-### UX-5: 技能页面状态 + 应用按钮无反应
-
-**状态**: 待排查
-
-1. 技能仓库 29 个预置技能 — 仅显示名称，无状态标识（可用/需安装依赖/待激活）
-2. 自生技能中，"上下文感知记忆"、"工具链式调用"、"分析面板"、"多模态输入输出" — 仅"分析面板"显示已应用
-3. 其余三个点击"应用"按钮无反应，状态不变
-
----
-
-### BUG-2: 部分 Agent 回复在聊天页面不显示
-
-**状态**: 已定位根因
-
-**现象**: Agent 对话记忆完整（"刚才说了什么"能正确回忆），但聊天页面中部分回复不可见。
-
-**根因**: `useWebSocket.ts` 的 `done` 处理分支在 `content=""` 时空推不可见消息，
-同时清除 `streamingContent`，导致之前 Turn 流式输出的文本永久丢失。
-
-**场景重现**:
-```
-Turn 1: LLM → content="我需要了解..." + tool_call=wechat_search
-        → llm_output(streaming) → tool_call → tool_result
-        → streamingContent 有文本，但未保存到 messages
-
-Turn 2: LLM → content=""（空） + tool_calls=[]
-        → done(content="") → messages.push({role:'assistant', content:''})
-        → streamingContent = ''（Turn 1 的内容被清除）
-        → 用户看到：仅 tool 卡片，无任何回复文本
-```
-
-**修复** (`useWebSocket.ts` done 分支):
-```typescript
-// 之前
-messages.value.push({ role: 'assistant', content: p.content || '' })
-
-// 修复：done 为空时回退到已累积的 streamingContent
-const finalContent = p.content || streamingContent.value || ''
-messages.value.push({ role: 'assistant', content: finalContent })
-```
-
----
-
-### BUG-1: 智谱 API 认证失败 vs 讯飞成功
-
-**状态**: 待定位根因
-
-用户选择智谱 → AuthenticationError，切换讯飞星辰 → 成功。之前的分析方向被用户否定。
-需要实际发送请求对比差异，查看完整错误日志。
-
----
-
-## 已知未解决
-
-- **OV4** (ask_user → GUI 确认) — 代码已实现但 UI 端未测试
-- ChatView.vue 修改较大（~750 行），文件复杂
-- GUI 日志中的 `Property "currentDepth"` 等 Vue 警告已修复（未启动验证）
-- preload.js 缺失问题已修复（vite.config.ts ESLint fix）
-
----
-
-## 已解决
-
-| # | 日期 | 问题 | 修复 |
+| # | 问题 | 修复 | 文件 |
 |---|------|------|------|
-| 1 | 05-11 | preload.js not found → Electron 黑屏 | vite.config.ts 添加 preload 入口 |
-| 2 | 05-11 | FileView currentDepth → Vue warn | 统一为 `depth` |
-| 3 | 05-11 | LLM key 保存后不生效 | LLMClient.reconfigure() + management.py 联动 |
-| 4 | 05-11 | 通道禁用时 QR 登录报 "Unknown channel" | app.py 注册所有通道 |
-| 5 | 05-11 | Thinking (Turn N) 卡住 | done 事件中清理 statusText |
-| 6 | 05-11 | data_dir 乱码 | 修复为 E:/GenericAgent/data |
-| 7 | 05-11 | 端口冲突（双 Python 进程） | 由 Electron 统一 spawn，不再手动启动 Python |
-| 8 | 05-11 | UX-1 模型选择器不显示 | ChatView.vue `modelList.length`→`Object.keys(modelList).length` |
-| 9 | 05-11 | UX-2 Agent 10分钟超时 | AsyncOpenAI timeout=60s + wechat 工具 stub handler |
-| 10 | 05-11 | BUG-1 models dict 数据迁移 | save_config 自动从 model.* 迁移到 models[provider] |
-| 11 | 05-11 | UX-3 钉钉飞书QR码裂图 | qrcode 库生成 base64 PNG 替代 OAuth URL |
-| 12 | 05-11 | UX-4 输入框+取消按钮 | 单层CSS + stop 按钮 + stop_chat 端点 |
-| 13 | 05-11 | UX-5 技能页按钮/状态 | @click handler + apply_evolution 端点 + 状态徽章 |
-| 14 | 05-11 | BUG-2 部分回复不显示 | done 为空时回退 streamingContent |
+| 1 | preload.js 缺失 → Electron 黑屏 | vite.config.ts 添加 preload 入口 | `vite.config.ts` |
+| 2 | FileView `currentDepth` 未定义 | `currentDepth` → `depth` | `FileView.vue` |
+| 3 | LLM API Key 保存后不生效 | `LLMClient.reconfigure()` + `save_config` 联动 | `client.py`, `management.py` |
+| 4 | 通道禁用时 QR 登录报错 | `app.py` 始终注册所有通道适配器 | `app.py` |
+| 5 | `done` 事件不清 `statusText` → "Thinking" 卡住 | `statusText.value = ''` | `useWebSocket.ts` |
+| 6 | data_dir 乱码 | 修复为 `E:/GenericAgent/data` | config |
+| 7 | 端口冲突（双 Python 进程） | Electron 统一 spawn Python | — |
+| 8 | 聊天页模型选择器不可见 | `modelList.length` → `Object.keys(modelList).length` + WS 连接后重试 | `ChatView.vue` |
+| 9 | Agent 10 分钟超时 | `httpx.AsyncClient(timeout=30s)` + `asyncio.wait_for(90s)` | `client.py`, `loop.py` |
+| 10 | 429 静默失败 | `_friendly_error()` 中文错误提示 | `loop.py` |
+| 11 | 部分 Agent 回复不显示（BUG-2） | `done` 为空时回退 `streamingContent` | `useWebSocket.ts` |
+| 12 | 模型配置数据迁移空洞 | `save_config` 自动从 `model.*` 迁入 `models[provider]` | `management.py` |
+| 13 | 钉钉/飞书 QR 码显示为裂图 | `qrcode` 库生成 base64 PNG data URI | `dingtalk.py`, `feishu.py` |
+| 14 | 技能页"应用"按钮无反应 | `@click` 绑定 + `apply_evolution` 端点 | `SkillView.vue`, `management.py` |
+| 15 | wechat_search 无 handler → "Unknown tool" | stub handler 返回可恢复错误 | `tools.py` |
+| 16 | 输入框 CSS 双框 | 玻璃效果合并到单层 `.input-wrapper` | `ChatView.vue` |
+| 17 | Agent 运行中无法中止 | stop 按钮 + `stop_chat` 端点 | `ChatView.vue`, `management.py` |
+
+---
+
+## 待修复
+
+### P1 — `excel_xlsx` 工具 `rows` 参数类型错误
+
+**发现**: 命令行测试中 LLM 3 次调用 `excel_xlsx` 全部失败，错误为 `Value must be a list...Supplied value is <class 'str'>`。
+LLM 传入的 `rows` 是字符串而非 list。agent 随后降级到 `code_run` 自行生成，6 轮后才完成。
+
+**修复**: `extended_tools.py:do_excel_xlsx` 增加参数类型转换——如果 `rows` 是 str，尝试 `json.loads()` 或按行 split。
+
+**文件**: `oaa/agent/extended_tools.py`
+
+---
+
+### P2 — `_friendly_error` 误将 Xunfei 引擎错误归类为 Auth 错误
+
+**发现**: Xunfei 返回 `APIError: EngineInternalError:error / InvalidParamError (10012)` 时，
+`_friendly_error` 匹配不到已知模式，fallback 到 `"API Key 无效或已过期"`——完全错误的提示。
+
+**修复**: 增加 `APIError` 和 `EngineInternalError` 匹配，返回 "模型服务内部错误，请重试或切换模型"。
+
+**文件**: `oaa/agent/loop.py:_friendly_error()`
+
+---
+
+### P2 — 前端 Vue 3 `v-model` 与 browser tool `fill` 不兼容
+
+**发现**: `/qa` 测试中 `$B fill` 和 `nativeInputValueSetter` 均无法触发 Vue 3 的 textarea `v-model`
+更新，导致 send 按钮始终 disabled。聊天消息始终需通过 JS 直接操作 WS 发送。
+
+**修复**: 无通用修复（是 browser automation tool 与 Vue 3 的已知兼容问题）。Q&A 测试改用 `$B js` 直接操作 WS。
+
+---
+
+### P3 — Zhipu API 间歇性超时
+
+**发现**: 同一 `glm-4.7-flash` 请求有时 1.2s 快速返回（1305 限流），有时 15s+ ReadTimeout。
+httpx 同步客户端的 DNS/SSL 解析在 Windows 上可能阻塞 event loop。
+
+**当前方案**: 切换模型厂商（Xunfei 正常）。
+
+---
+
+### P3 — Xunfei 非流式模式返回空 content
+
+**发现**: `stream=False` 时 `choices[0].message.content` 为空字符串（len=0），`stream=True` 时正常。
+Agent 默认使用流式模式，不受影响。
+
+---
+
+### P3 — Xunfei Anthropic 端点需要单独 API Key
+
+**发现**: `https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic` 返回 401 "HMAC signature cannot be verified"。
+OpenAI 兼容端点的 Key（`id:secret` 格式）不适用于 Anthropic 端点。
+
+---
+
+### P4 — 聊天输入框 Vue 3 `v-model` + browse tool fill 不兼容
+
+**发现**: `$B fill` 使用 `element.value = text` + `dispatchEvent('input')` 无法触发 Vue 3 `<textarea v-model>` 的响应式更新。
+`$B type` 导致文本重复（原有内容 + 新输入叠加）。native value setter + input/change 事件均无效。
+
+**影响**: QA 自动化测试无法通过 UI 发送消息，需绕过 UI 直接操作 WebSocket。
+
+---
+
+### P4 — 技能仓库技能状态依赖后端数据
+
+**发现**: fallback 数据中 29 个技能的状态标签（可用/已安装/待激活）是硬编码值。
+后端 `get_skills` 返回的实际 `loaded`/`tools_count`/`knowledge_count` 数据尚需验证是否正确反映真实技能状态。
+
+---
+
+## 命令行验证结果 (21:30)
+
+| 测试 | 状态 | 耗时 |
+|------|------|------|
+| Zhipu API 直连 | ⚠️ 间歇超时 | 1.2s~15s+ |
+| Xunfei API 直连 | ✅ 正常 | 4-6s |
+| Agent 简单对话 | ✅ 正常 | 3.3s |
+| Agent file_write 工具 | ✅ 正常 | 6.8s |
+| Agent excel_xlsx 工具 | ⚠️ 参数类型错误 | 62s（降级到 code_run） |
+| Agent 报价单技能 | ✅ 正确识别并追问 | 5.8s |
