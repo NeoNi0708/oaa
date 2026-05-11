@@ -1,0 +1,48 @@
+{"ts":"2026-05-11T11:25:44.704Z","cmd":"goto","args":"http://localhost:5173","origin":"about:blank","durationMs":2367,"status":"error","hasCookies":false,"mode":"launched","error":"page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:5173/\nCall log:\n\u001b[2m  - navigating to \"http://localhost:5173/\", waiting until \"domcontentloaded\"\u001b[22m\n"}
+{"ts":"2026-05-11T11:27:00.151Z","cmd":"goto","args":"http://localhost:5173","origin":"http://localhost:5173/","durationMs":165,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:27:03.848Z","cmd":"snapshot","args":"-i -a -o .gstack/qa-reports/screenshots/initial.png","origin":"http://localhost:5173/","durationMs":335,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:27:14.337Z","cmd":"console","args":"--errors","origin":"http://localhost:5173/","durationMs":1,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:27:28.688Z","cmd":"click","args":"@e6","origin":"http://localhost:5173/","durationMs":96,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:27:31.130Z","cmd":"snapshot","args":"-i -a -o .gstack/qa-reports/screenshots/settings.png","origin":"http://localhost:5173/","durationMs":69,"status":"error","hasCookies":false,"mode":"launched","error":"locator.boundingBox: Error: strict mode violation: getByRole('button', { name: '设置' }) resolved to 2 elements:\n    1) <button title=\"设置\" data-v-6dec5f19=\"\" class=\"nav-item active\">…</button> aka getByRole('button', { name: '设置', exact: true })\n    2) <button data-v-5e0b544f=\"\" class=\"oaa-btn oaa-btn…"}
+{"ts":"2026-05-11T11:27:31.409Z","cmd":"console","args":"--errors","origin":"http://localhost:5173/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:27:40.514Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":15,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:27:57.334Z","cmd":"click","args":"@e3","origin":"http://localhost:5173/","durationMs":43,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:27:59.715Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":13,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:28:08.974Z","cmd":"click","args":"@e7","origin":"http://localhost:5173/","durationMs":28,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:28:12.352Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":13,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:28:12.640Z","cmd":"console","args":"--errors","origin":"http://localhost:5173/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:28:25.173Z","cmd":"click","args":"@e2","origin":"http://localhost:5173/","durationMs":101,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:28:27.559Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":19,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:28:27.858Z","cmd":"console","args":"--errors","origin":"http://localhost:5173/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:28:37.433Z","cmd":"click","args":"@e8","origin":"http://localhost:5173/","durationMs":49,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:28:39.819Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":12,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:28:50.918Z","cmd":"click","args":"@e10","origin":"http://localhost:5173/","durationMs":32,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:28:53.300Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":12,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:28:53.583Z","cmd":"console","args":"--errors","origin":"http://localhost:5173/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:29:03.537Z","cmd":"click","args":"@e1","origin":"http://localhost:5173/","durationMs":22,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:29:05.925Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":13,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:29:14.480Z","cmd":"fill","args":"@e8 你好，请简单介绍一下你自己","origin":"http://localhost:5173/","durationMs":29,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:29:15.852Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":12,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:29:24.736Z","cmd":"click","args":"@e9","origin":"http://localhost:5173/","durationMs":56,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:29:33.140Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":14,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:29:33.420Z","cmd":"console","args":"--errors","origin":"http://localhost:5173/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:29:50.486Z","cmd":"snapshot","args":"-i -a -o .gstack/qa-reports/screenshots/chat-response.png","origin":"http://localhost:5173/","durationMs":257,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:30:19.461Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":12,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:31:46.110Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":11,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:32:02.617Z","cmd":"screenshot","args":".gstack/qa-reports/screenshots/chat-hang.png","origin":"http://localhost:5173/","durationMs":89,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:44:38.220Z","cmd":"goto","args":"http://localhost:5173","origin":"http://localhost:5173/","durationMs":131,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:44:41.600Z","cmd":"fill","args":"@e8 测试一下","origin":"http://localhost:5173/","durationMs":0,"status":"error","hasCookies":false,"mode":"launched","error":"Ref @e8 not found. Run 'snapshot' to get fresh refs."}
+{"ts":"2026-05-11T11:44:42.948Z","cmd":"click","args":"@e9","origin":"http://localhost:5173/","durationMs":0,"status":"error","hasCookies":false,"mode":"launched","error":"Ref @e9 not found. Run 'snapshot' to get fresh refs."}
+{"ts":"2026-05-11T11:45:06.557Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":51,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:45:16.647Z","cmd":"fill","args":"@e8 hi","origin":"http://localhost:5173/","durationMs":20,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:45:18.048Z","cmd":"click","args":"@e9","origin":"http://localhost:5173/","durationMs":61,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:45:56.419Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":14,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:45:56.703Z","cmd":"console","args":"--errors","origin":"http://localhost:5173/","durationMs":1,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:46:05.232Z","cmd":"snapshot","args":"-D","origin":"http://localhost:5173/","durationMs":11,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:46:15.565Z","cmd":"snapshot","args":"-i","origin":"http://localhost:5173/","durationMs":13,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:46:42.686Z","cmd":"snapshot","args":"-a -o .gstack/qa-reports/screenshots/chat-working.png","origin":"http://localhost:5173/","durationMs":12453,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:46:42.976Z","cmd":"js","args":"document.querySelector('.messages')?.innerText?.substring(0, 300)","origin":"http://localhost:5173/","durationMs":2,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:56:12.625Z","cmd":"goto","args":"http://localhost:5173","origin":"about:blank","durationMs":2367,"status":"error","hasCookies":false,"mode":"launched","error":"page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:5173/\nCall log:\n\u001b[2m  - navigating to \"http://localhost:5173/\", waiting until \"domcontentloaded\"\u001b[22m\n"}
+{"ts":"2026-05-11T11:56:16.005Z","cmd":"js","args":"document.querySelector('.model-selector') ? 'FOUND' : 'NOT FOUND'","origin":"chrome-error://chromewebdata/","durationMs":3,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:57:38.679Z","cmd":"goto","args":"http://localhost:5173","origin":"http://localhost:5173/","durationMs":124,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-05-11T11:57:42.084Z","cmd":"js","args":"JSON.stringify({selector: !!document.querySelector('.model-selector'), modelCount: Object.keys(window.__vue_app__ || {}).length, titleText: document.querySelector('.chat-title')?.innerText})","origin":"http://localhost:5173/","durationMs":2,"status":"ok","hasCookies":false,"mode":"launched"}

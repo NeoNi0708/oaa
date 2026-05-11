@@ -273,8 +273,20 @@ function updateActiveModelLabel() {
 
 function onDocumentClick() { showModelMenu.value = false }
 
-onMounted(() => { loadModels(); document.addEventListener('click', onDocumentClick) })
+onMounted(() => {
+  if (connected.value) { loadModels() }
+  document.addEventListener('click', onDocumentClick)
+})
 onUnmounted(() => { document.removeEventListener('click', onDocumentClick) })
+
+// Retry model loading when WebSocket connects
+let _modelWatchStop: ReturnType<typeof watch> | null = null
+_modelWatchStop = watch(connected, (val) => {
+  if (val && Object.keys(modelList.value).length === 0) {
+    loadModels()
+    if (_modelWatchStop) { _modelWatchStop(); _modelWatchStop = null }
+  }
+})
 
 function renderContent(text: string) {
   return marked.parse(text, { breaks: true })
@@ -757,16 +769,15 @@ function autoResize(e: Event) {
 .input-area {
   padding: var(--oaa-space-3) var(--oaa-space-5);
   border-top: 1px solid var(--oaa-glass-border);
-  background: rgba(30, 41, 59, 0.5);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
 }
 
 .input-wrapper {
   display: flex;
   align-items: flex-end;
   gap: var(--oaa-space-2);
-  background: var(--oaa-bg-input);
+  background: rgba(30, 41, 59, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--oaa-border-default);
   border-radius: var(--oaa-radius-lg);
   padding: var(--oaa-space-2) var(--oaa-space-2) var(--oaa-space-2) var(--oaa-space-3);

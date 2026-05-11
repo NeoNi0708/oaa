@@ -1,0 +1,15 @@
+{
+  "date": "2026-05-11",
+  "url": "http://localhost:5173",
+  "healthScore": 77,
+  "issues": [
+    {"id": "ISSUE-001", "title": "Chat send produces no visible response", "severity": "critical", "category": "Functional", "fixed": false},
+    {"id": "ISSUE-002", "title": "Model selector not visible in chat header", "severity": "high", "category": "Functional", "fixed": "pending-verify"},
+    {"id": "ISSUE-003", "title": "WeChat QR login fails silently", "severity": "medium", "category": "Functional", "fixed": false},
+    {"id": "ISSUE-004", "title": "Welcome hint chips not keyboard accessible", "severity": "low", "category": "Accessibility", "fixed": false}
+  ],
+  "categoryScores": {
+    "console": 100, "links": 100, "visual": 85, "functional": 40,
+    "ux": 70, "performance": 85, "content": 90, "accessibility": 80
+  }
+}

@@ -44,8 +44,8 @@ class _OpenAIClient:
         if self._tools:
             kwargs["tools"] = self._tools
 
-        logger.debug("openai chat: model=%s msg_count=%d tool_count=%d",
-                       self.config.model_id, len(messages), len(self._tools))
+        logger.debug("openai chat: model=%s msg_count=%d tool_count=%d url=%s",
+                       self.config.model_id, len(messages), len(self._tools), self.config.base_url)
 
         stream = await self._client.chat.completions.create(**kwargs)
         content = ""
