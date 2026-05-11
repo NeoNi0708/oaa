@@ -15,6 +15,24 @@ logger = get_logger("agent.loop")
 
 _MAX_RETRIES = 3
 _BASE_DELAY = 1.0
+_LLM_TIMEOUT = 90.0  # hard cap per LLM call, outer safety net beyond SDK timeout
+
+
+def _friendly_error(exc: Exception) -> str:
+    """Return a user-facing message for common LLM errors."""
+    name = type(exc).__name__
+    msg = str(exc)
+    if "429" in msg or "RateLimit" in name:
+        return "模型服务繁忙，请稍后重试（可尝试切换到其他模型厂商）"
+    if "401" in msg or "Authentication" in name or "Unauthorized" in msg:
+        return "API Key 无效或已过期，请在设置页面更新 Key"
+    if "404" in msg or "Not Found" in msg:
+        return "模型 ID 不存在，请在设置页面检查模型配置"
+    if "timeout" in msg.lower() or "Timeout" in name or "TimedOut" in name:
+        return "模型响应超时，请检查网络或切换模型厂商"
+    if "Connection" in name:
+        return f"无法连接到模型服务，请检查网络（{name}）"
+    return f"模型调用失败: {name}"
 
 
 class StepOutcome:
@@ -84,26 +102,33 @@ class AgentLoop:
             last_error: Exception | None = None
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
-                    response = await self.llm.chat(messages)
+                    response = await asyncio.wait_for(
+                        self.llm.chat(messages),
+                        timeout=_LLM_TIMEOUT,
+                    )
                     last_error = None
                     break
+                except asyncio.TimeoutError:
+                    last_error = TimeoutError("LLM call timed out")
+                    err_type = "TimeoutError"
                 except Exception as exc:
                     last_error = exc
                     err_type = type(exc).__name__
+                if last_error:
                     if attempt < _MAX_RETRIES:
                         delay = _BASE_DELAY * (2 ** (attempt - 1))
                         logger.warning(
                             "LLM call failed [%s] attempt %d/%d, retrying in %.1fs: %s",
-                            err_type, attempt, _MAX_RETRIES, delay, exc,
+                            err_type, attempt, _MAX_RETRIES, delay, last_error,
                         )
                         yield {"type": "status", "content": f"LLM {err_type}, 重试 ({attempt}/{_MAX_RETRIES})..."}
                         await asyncio.sleep(delay)
                     else:
                         logger.error(
                             "LLM call failed [%s] after %d attempts: %s",
-                            err_type, _MAX_RETRIES, exc,
+                            err_type, _MAX_RETRIES, last_error,
                         )
-                        yield {"type": "done", "content": f"LLM error: {err_type}"}
+                        yield {"type": "done", "content": _friendly_error(last_error)}
                         return
 
             content = (response.content or "") if response else ""
