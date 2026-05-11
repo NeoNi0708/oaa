@@ -112,16 +112,17 @@ class AgentLoop:
             last_error: Exception | None = None
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
-                    # Run LLM chat in a thread pool.
-                    # Offload future.result(timeout) to another thread so the
-                    # event loop itself never blocks.
+                    # Run LLM chat in a thread pool with a hard timeout.
+                    # concurrent.futures.Future.result(timeout) properly raises
+                    # TimeoutError, unlike asyncio.Future.result() which takes no args.
                     loop = asyncio.get_running_loop()
                     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                     with pool:
-                        chat_future = loop.run_in_executor(pool, self._sync_chat, messages)
-                        # Wait with hard timeout — run the blocking result() in a thread
+                        # Submit to thread pool → concurrent.futures.Future
+                        cfuture = pool.submit(self._sync_chat, messages)
+                        # Wait for result with timeout — run blocking call in a thread
                         response = await loop.run_in_executor(
-                            None, chat_future.result, _LLM_TIMEOUT,
+                            None, cfuture.result, _LLM_TIMEOUT,
                         )
                     last_error = None
                     break
