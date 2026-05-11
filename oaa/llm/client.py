@@ -33,7 +33,17 @@ class _OpenAIClient:
 
     def __init__(self, config: ModelConfig):
         self.config = config
-        self._client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key, timeout=60.0, max_retries=0)
+        import httpx
+        http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            limits=httpx.Limits(max_keepalive_connections=2, max_connections=10),
+        )
+        self._client = AsyncOpenAI(
+            base_url=config.base_url,
+            api_key=config.api_key,
+            http_client=http_client,
+            max_retries=0,
+        )
         self._tools: list = []
 
     def set_tools(self, tools: list):

@@ -84,6 +84,11 @@ class AnthropicClient:
         self.config = config
         self._tools: list[dict] = []
         self._anthropic_tools: list[dict] = []
+        import httpx
+        self._http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            limits=httpx.Limits(max_keepalive_connections=2, max_connections=10),
+        )
 
     def set_tools(self, tools: list):
         self._tools = tools
@@ -96,6 +101,7 @@ class AnthropicClient:
         client = anthropic.AsyncAnthropic(
             base_url=self.config.base_url.rstrip("/"),
             api_key=self.config.api_key,
+            http_client=self._http_client,
         )
 
         system_prompt, api_messages = _convert_messages_to_anthropic(messages)

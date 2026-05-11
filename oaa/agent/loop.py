@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import json
 from typing import Any, AsyncGenerator, Optional, TYPE_CHECKING
 
@@ -72,15 +71,6 @@ class AgentLoop:
             combined = combined + extra_tools
         self.llm.set_tools(combined)
 
-    def _sync_chat(self, messages: list):
-        """Run async llm.chat() in a new event loop (called from thread pool)."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(self.llm.chat(messages))
-        finally:
-            loop.close()
-
     async def run(self, user_input: str, history: list | None = None) -> AsyncGenerator[dict, None]:
         """Run agent loop. Yields intermediate result dicts, returns final response.
 
@@ -112,18 +102,10 @@ class AgentLoop:
             last_error: Exception | None = None
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
-                    # Run LLM chat in a thread pool with a hard timeout.
-                    # concurrent.futures.Future.result(timeout) properly raises
-                    # TimeoutError, unlike asyncio.Future.result() which takes no args.
-                    loop = asyncio.get_running_loop()
-                    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                    with pool:
-                        # Submit to thread pool → concurrent.futures.Future
-                        cfuture = pool.submit(self._sync_chat, messages)
-                        # Wait for result with timeout — run blocking call in a thread
-                        response = await loop.run_in_executor(
-                            None, cfuture.result, _LLM_TIMEOUT,
-                        )
+                    response = await asyncio.wait_for(
+                        self.llm.chat(messages),
+                        timeout=_LLM_TIMEOUT,
+                    )
                     last_error = None
                     break
                 except asyncio.TimeoutError:
