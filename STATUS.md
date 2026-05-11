@@ -31,6 +31,20 @@
 ## 待修复
 
 ### P1 — `excel_xlsx` 工具 `rows` 参数类型错误
+### P2 — `_friendly_error` 误归类 Xunfei 引擎错误
+### P3 — 工具按需注入 + Tool result 截断
+
+**三步走**（明天）:
+1. 条件排除 wechat 工具（未认证时不注入 schema）— ~5 行
+2. Tool result 截断（>2000 字符自动截断）— ~5 行
+3. `_friendly_error` 增加 APIError/EngineInternalError 匹配 — ~5 行
+4. `excel_xlsx` rows 参数 str→list 转换 — ~5 行
+
+**观察后再做**: step 级工具规划（需积累 evolution.stats 工具失败数据后评估）
+
+---
+
+## 待修复（原清单） 工具 `rows` 参数类型错误
 
 **发现**: 命令行测试中 LLM 3 次调用 `excel_xlsx` 全部失败，错误为 `Value must be a list...Supplied value is <class 'str'>`。
 LLM 传入的 `rows` 是字符串而非 list。agent 随后降级到 `code_run` 自行生成，6 轮后才完成。
