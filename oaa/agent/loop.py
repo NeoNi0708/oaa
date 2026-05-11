@@ -71,6 +71,14 @@ class AgentLoop:
             combined = combined + extra_tools
         self.llm.set_tools(combined)
 
+    def _sync_chat(self, messages: list):
+        """Run async llm.chat() in a new event loop (intended for asyncio.to_thread)."""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self.llm.chat(messages))
+        finally:
+            loop.close()
+
     async def run(self, user_input: str, history: list | None = None) -> AsyncGenerator[dict, None]:
         """Run agent loop. Yields intermediate result dicts, returns final response.
 
@@ -102,8 +110,11 @@ class AgentLoop:
             last_error: Exception | None = None
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
+                    # Run LLM chat in a thread pool to prevent event-loop blocking.
+                    # httpx/httpcore can block the event loop during DNS/SSL on some
+                    # platforms. Thread isolation keeps management requests responsive.
                     response = await asyncio.wait_for(
-                        self.llm.chat(messages),
+                        asyncio.to_thread(self._sync_chat, messages),
                         timeout=_LLM_TIMEOUT,
                     )
                     last_error = None
