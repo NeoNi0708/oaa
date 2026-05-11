@@ -10,7 +10,7 @@ build started...[39m
 [36m
 build started...[39m
 
-  [32m[1mVITE[22m v5.4.21[39m  [2mready in [0m[1m893[22m[2m[0m ms[22m
+  [32m[1mVITE[22m v5.4.21[39m  [2mready in [0m[1m908[22m[2m[0m ms[22m
 
   [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5173[22m/[39m
 [2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
@@ -19,24 +19,31 @@ transforming...
 [32m✓[39m 1 modules transformed.
 [32m✓[39m 1 modules transformed.
 rendering chunks...
-rendering chunks...
 computing gzip size...
+rendering chunks...
 [2mdist-electron/[22m[36mpreload.js  [39m[1m[2m0.57 kB[22m[1m[22m[2m │ gzip: 0.29 kB[22m
-[36mbuilt in 124ms.[39m
+[36mbuilt in 147ms.[39m
 computing gzip size...
 [2mdist-electron/[22m[36mmain.js  [39m[1m[2m5.45 kB[22m[1m[22m[2m │ gzip: 1.98 kB[22m
-[36mbuilt in 130ms.[39m
+[36mbuilt in 165ms.[39m
 
-[python:err] [2026-05-11 19:56:52] [INFO ] [oaa.app] OAA starting: data_dir=E:/GenericAgent/data
-[python:err] [2026-05-11 19:56:53] [INFO ] [oaa.app] Channel 'wechat' registered (disabled �� enable via Settings)
-[2026-05-11 19:56:53] [INFO ] [oaa.app] Channel 'dingtalk' registered (disabled �� enable via Settings)
-[2026-05-11 19:56:53] [INFO ] [oaa.app] Channel 'feishu' registered (disabled �� enable via Settings)
-[python:err] [2026-05-11 19:56:53] [INFO ] [oaa.app] Starting Desktop WebSocket on :9765
-[python:err] [2026-05-11 19:56:53] [INFO ] [oaa.gateway.desktop] WebSocket server started on ws://127.0.0.1:9765
-[2026-05-11 19:56:53] [INFO ] [oaa.app] Channel 'wechat' started
-[2026-05-11 19:56:53] [INFO ] [oaa.app] Channel 'dingtalk' started
-[python:err] [2026-05-11 19:56:53] [INFO ] [oaa.app] Channel 'feishu' started
-[2026-05-11 19:56:53] [INFO ] [oaa.app] Starting task scheduler...
-[2026-05-11 19:56:53] [INFO ] [oaa.app] OAA ready. Waiting for messages...
-[2026-05-11 19:56:53] [WARNING] [oaa.gateway.dingtalk] [DingTalk] Not configured �� skipping start
-[2026-05-11 19:56:53] [WARNING] [oaa.gateway.feishu] [Feishu] Not configured �� skipping start
+[python:err] [2026-05-11 21:02:17] [INFO ] [oaa.app] OAA starting: data_dir=E:/GenericAgent/data
+[python:err] [2026-05-11 21:02:18] [INFO ] [oaa.app] Channel 'wechat' registered (disabled �� enable via Settings)
+[2026-05-11 21:02:18] [INFO ] [oaa.app] Channel 'dingtalk' registered (disabled �� enable via Settings)
+[2026-05-11 21:02:18] [INFO ] [oaa.app] Channel 'feishu' registered (disabled �� enable via Settings)
+[python:err] [2026-05-11 21:02:18] [INFO ] [oaa.app] Starting Desktop WebSocket on :9765
+[python:err] [2026-05-11 21:02:18] [INFO ] [oaa.gateway.desktop] WebSocket server started on ws://127.0.0.1:9765
+[2026-05-11 21:02:18] [INFO ] [oaa.app] Channel 'wechat' started
+[2026-05-11 21:02:18] [INFO ] [oaa.app] Channel 'dingtalk' started
+[python:err] [2026-05-11 21:02:18] [INFO ] [oaa.app] Channel 'feishu' started
+[2026-05-11 21:02:18] [INFO ] [oaa.app] Starting task scheduler...
+[2026-05-11 21:02:18] [INFO ] [oaa.app] OAA ready. Waiting for messages...
+[2026-05-11 21:02:18] [WARNING] [oaa.gateway.dingtalk] [DingTalk] Not configured �� skipping start
+[2026-05-11 21:02:18] [WARNING] [oaa.gateway.feishu] [Feishu] Not configured �� skipping start
+[python:err] [2026-05-11 21:02:45] [INFO ] [oaa.gateway] Message from desktop/local_user: ��һ�仰�������Լ�...
+[2026-05-11 21:02:45] [INFO ] [oaa.agent.oaa_agent] Processing message: ��һ�仰�������Լ�...
+[python:err] Task was destroyed but it is pending!
+task: <Task pending name='Task-19' coro=<<async_generator_athrow without __name__>()>>
+[python:err] D:\Program Files\Python313\Lib\asyncio\base_events.py:750: RuntimeWarning: coroutine method 'aclose' of 'AsyncStream._iter_events' was never awaited
+  self._ready.clear()
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback

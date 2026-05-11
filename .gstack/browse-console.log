@@ -1,4 +1,2 @@
-[2026-05-11T11:57:38.624Z] [debug] [vite] connecting...
-[2026-05-11T11:57:38.636Z] [debug] [vite] connected.
-[2026-05-11T11:58:20.192Z] [debug] [vite] hot updated: /src/views/ChatView.vue
-[2026-05-11T11:59:01.117Z] [debug] [vite] hot updated: /src/views/ChatView.vue?vue&type=style&index=0&scoped=a497a79e&lang.css
+[2026-05-11T13:02:48.166Z] [log] LOG:["STATUS:Thinking (Turn 1)...","DONE[2.3s]: 您好，我是二愣，您的 AI 业务助手，可以帮您处理报价、跟单、搜客户、写邮件等外贸业务。"]
+[2026-05-11T13:04:20.330Z] [log] CHAT_TIMEOUT. LOG:["STATUS:Thinking (Turn 1)...","DONE[2.3s]: 您好，我是二愣，您的 AI 业务助手，可以帮您处理报价、跟单、搜客户、写邮件等外贸业务。"]
