@@ -1,0 +1,13 @@
+[2026-05-11 17:01:52] [INFO ] [oaa.app] OAA starting: data_dir=E:/GenericAgent/data
+[2026-05-11 17:01:53] [INFO ] [oaa.app] Channel 'wechat' registered (disabled ！ enable via Settings)
+[2026-05-11 17:01:53] [INFO ] [oaa.app] Channel 'dingtalk' registered (disabled ！ enable via Settings)
+[2026-05-11 17:01:53] [INFO ] [oaa.app] Channel 'feishu' registered (disabled ！ enable via Settings)
+[2026-05-11 17:01:53] [INFO ] [oaa.app] Starting Desktop WebSocket on :9765
+[2026-05-11 17:01:53] [INFO ] [oaa.gateway.desktop] WebSocket server started on ws://127.0.0.1:9765
+[2026-05-11 17:01:53] [INFO ] [oaa.app] Channel 'wechat' started
+[2026-05-11 17:01:53] [INFO ] [oaa.app] Channel 'dingtalk' started
+[2026-05-11 17:01:53] [INFO ] [oaa.app] Channel 'feishu' started
+[2026-05-11 17:01:53] [INFO ] [oaa.app] Starting task scheduler...
+[2026-05-11 17:01:53] [INFO ] [oaa.app] OAA ready. Waiting for messages...
+[2026-05-11 17:01:53] [WARNING] [oaa.gateway.dingtalk] [DingTalk] Not configured ！ skipping start
+[2026-05-11 17:01:53] [WARNING] [oaa.gateway.feishu] [Feishu] Not configured ！ skipping start

@@ -1,0 +1,11 @@
+pyproject.toml
+oaa/__init__.py
+oaa/__main__.py
+oaa/cli.py
+oaa/config.py
+oaa/init.py
+oaa.egg-info/PKG-INFO
+oaa.egg-info/SOURCES.txt
+oaa.egg-info/dependency_links.txt
+oaa.egg-info/requires.txt
+oaa.egg-info/top_level.txt

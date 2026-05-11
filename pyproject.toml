@@ -1,0 +1,72 @@
+# oaa/pyproject.toml
+[project]
+name = "oaa"
+version = "0.1.0"
+description = "OPC AI Assistant — Windows Desktop AI Agent for Foreign Trade"
+requires-python = ">=3.10,<3.14"
+license = { text = "MIT" }
+dependencies = [
+    # HTTP / network
+    "requests>=2.28",
+    # LLM
+    "openai>=1.0",
+    # WebSocket (desktop GUI)
+    "websockets>=14.0",
+    # Office document generation
+    "python-docx>=1.0",
+    "openpyxl>=3.1",
+    # Web scraping / HTML parsing
+    "beautifulsoup4>=4.12",
+    # Async SQLite (future async session layer)
+    "aiosqlite>=0.19",
+    # wechat-cli — local WeChat data decryption/query (invoked as subprocess)
+    "pycryptodome>=3.19",
+    "zstandard>=0.22",
+]
+
+[project.optional-dependencies]
+dingtalk = ["dingtalk-stream>=0.20"]
+feishu = ["lark-oapi>=1.0"]
+anthropic = ["anthropic>=0.40"]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 110
+exclude = [".pytest_cache", "__pycache__", "node_modules", "dist", "release"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (unused imports, etc.)
+    "W",    # pycodestyle warnings
+    "I",    # isort (import ordering)
+]
+ignore = ["E501"]  # line too long — handled by formatter
+
+[tool.ruff.lint.per-file-ignores]
+"oaa/agent/tool_schema.py" = ["E501"]
+"oaa/init.py" = ["E501"]
+"oaa/session/manager.py" = ["E501"]
+"oaa/wizard.py" = ["E501"]
+"oaa/llm/client.py" = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"

@@ -1,0 +1,367 @@
+/* ========================================================================
+   OAA Design Tokens — v2
+   Professional dark theme with warm accents + glass morphism
+   ========================================================================
+   Naming: --oaa-{category}-{property}-{variant}
+   ======================================================================== */
+
+:root {
+  /* --- Color palette --- */
+  --oaa-blue-50: #eff6ff;
+  --oaa-blue-100: #dbeafe;
+  --oaa-blue-200: #bfdbfe;
+  --oaa-blue-400: #60a5fa;
+  --oaa-blue-500: #3b82f6;
+  --oaa-blue-600: #2563eb;
+  --oaa-blue-700: #1d4ed8;
+
+  --oaa-slate-50: #f8fafc;
+  --oaa-slate-100: #f1f5f9;
+  --oaa-slate-200: #e2e8f0;
+  --oaa-slate-300: #cbd5e1;
+  --oaa-slate-400: #94a3b8;
+  --oaa-slate-500: #64748b;
+  --oaa-slate-600: #475569;
+  --oaa-slate-700: #334155;
+  --oaa-slate-800: #1e293b;
+  --oaa-slate-850: #172033;
+  --oaa-slate-900: #0f172a;
+  --oaa-slate-950: #080e1a;
+
+  --oaa-green-400: #4ade80;
+  --oaa-green-500: #22c55e;
+  --oaa-green-600: #16a34a;
+  --oaa-amber-400: #fbbf24;
+  --oaa-amber-500: #f59e0b;
+  --oaa-amber-600: #d97706;
+  --oaa-red-400: #f87171;
+  --oaa-red-500: #ef4444;
+  --oaa-purple-400: #a78bfa;
+  --oaa-purple-500: #8b5cf6;
+
+  /* --- Semantic tokens --- */
+  --oaa-primary: var(--oaa-blue-500);
+  --oaa-primary-hover: var(--oaa-blue-600);
+  --oaa-primary-active: var(--oaa-blue-700);
+  --oaa-primary-light: rgba(59, 130, 246, 0.12);
+  --oaa-primary-glow: rgba(59, 130, 246, 0.25);
+
+  --oaa-success: var(--oaa-green-500);
+  --oaa-success-glow: rgba(34, 197, 94, 0.3);
+  --oaa-warning: var(--oaa-amber-500);
+  --oaa-warning-glow: rgba(245, 158, 11, 0.25);
+  --oaa-error: var(--oaa-red-500);
+  --oaa-accent: var(--oaa-purple-400);
+
+  /* Warm complementary accent (gold/amber) — used sparingly for visual warmth */
+  --oaa-warm: var(--oaa-amber-500);
+  --oaa-warm-light: rgba(245, 158, 11, 0.12);
+  --oaa-warm-glow: rgba(245, 158, 11, 0.2);
+
+  /* --- Surfaces --- */
+  --oaa-bg-app: var(--oaa-slate-950);
+  --oaa-bg-sidebar: #080c16;
+  --oaa-bg-surface: var(--oaa-slate-800);
+  --oaa-bg-surface-hover: var(--oaa-slate-700);
+  --oaa-bg-elevated: var(--oaa-slate-700);
+  --oaa-bg-input: var(--oaa-slate-850);
+
+  /* Glass morphism */
+  --oaa-glass-bg: rgba(15, 23, 42, 0.65);
+  --oaa-glass-border: rgba(255, 255, 255, 0.06);
+  --oaa-glass-blur: 12px;
+
+  /* --- Borders --- */
+  --oaa-border-subtle: rgba(255, 255, 255, 0.06);
+  --oaa-border-default: rgba(255, 255, 255, 0.10);
+  --oaa-border-strong: rgba(255, 255, 255, 0.15);
+  --oaa-border-focus: var(--oaa-blue-500);
+  --oaa-radius-sm: 6px;
+  --oaa-radius-md: 8px;
+  --oaa-radius-lg: 12px;
+  --oaa-radius-xl: 16px;
+  --oaa-radius-full: 9999px;
+
+  /* --- Typography --- */
+  --oaa-font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --oaa-font-mono: "JetBrains Mono", "SF Mono", "Fira Code", "Cascadia Code",
+    Consolas, monospace;
+
+  /* Upgraded scale — minimum 0.75rem (12px) for Chinese readability */
+  --oaa-text-xs: 0.75rem;       /* 12px — was 0.7rem */
+  --oaa-text-sm: 0.8125rem;     /* 13px — was 0.8rem */
+  --oaa-text-base: 0.875rem;    /* 14px — was 0.9rem */
+  --oaa-text-lg: 1.0625rem;     /* 17px — was 1.05rem */
+  --oaa-text-xl: 1.25rem;       /* 20px */
+  --oaa-text-2xl: 1.5rem;       /* 24px */
+  --oaa-text-3xl: 1.875rem;     /* 30px — new */
+
+  --oaa-color-primary: var(--oaa-slate-50);
+  --oaa-color-secondary: var(--oaa-slate-400);
+  --oaa-color-muted: var(--oaa-slate-500);
+  --oaa-color-disabled: var(--oaa-slate-600);
+
+  /* --- Spacing (4px grid) --- */
+  --oaa-space-1: 4px;
+  --oaa-space-2: 8px;
+  --oaa-space-3: 12px;
+  --oaa-space-4: 16px;
+  --oaa-space-5: 20px;
+  --oaa-space-6: 24px;
+  --oaa-space-8: 32px;
+  --oaa-space-10: 40px;
+  --oaa-space-12: 48px;
+
+  /* --- Shadows --- */
+  --oaa-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --oaa-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+  --oaa-shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.6);
+  --oaa-shadow-glow: 0 0 20px var(--oaa-primary-glow);
+  --oaa-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.04);
+
+  /* --- Transitions --- */
+  --oaa-transition-fast: 0.15s ease;
+  --oaa-transition-base: 0.2s ease;
+  --oaa-transition-slow: 0.35s ease;
+  --oaa-ease-spring: 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  --oaa-ease-out-expo: 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* --- Sidebar --- */
+  --oaa-sidebar-width: 220px;
+
+  /* --- Layout --- */
+  --oaa-view-max-width: 960px;
+  --oaa-view-padding: var(--oaa-space-8);
+}
+
+/* --- Global resets --- */
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;  /* 1rem = 16px, ensures consistent scaling */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--oaa-font-sans);
+  background: var(--oaa-bg-app);
+  color: var(--oaa-color-primary);
+  line-height: 1.6;
+  overflow: hidden;
+}
+
+/* --- Subtle background texture (grid + noise) --- */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(59, 130, 246, 0.04) 0%, transparent 60%),
+    radial-gradient(ellipse at 80% 80%, rgba(245, 158, 11, 0.03) 0%, transparent 50%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* --- Scrollbar — refined --- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--oaa-slate-600);
+  border-radius: var(--oaa-radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--oaa-slate-500);
+}
+
+/* --- Focus ring — polished --- */
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--oaa-bg-app), 0 0 0 4px var(--oaa-primary);
+  border-radius: var(--oaa-radius-sm);
+}
+
+/* --- Selection --- */
+::selection {
+  background: rgba(59, 130, 246, 0.3);
+  color: #fff;
+}
+
+/* ========================================================================
+   Utility classes
+   ======================================================================== */
+
+.oaa-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--oaa-space-2);
+  padding: var(--oaa-space-2) var(--oaa-space-4);
+  border: none;
+  border-radius: var(--oaa-radius-md);
+  font-family: inherit;
+  font-size: var(--oaa-text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background var(--oaa-transition-fast),
+    transform var(--oaa-transition-fast),
+    box-shadow var(--oaa-transition-fast);
+  user-select: none;
+  white-space: nowrap;
+}
+.oaa-btn:active {
+  transform: scale(0.97);
+}
+.oaa-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.oaa-btn--primary {
+  background: var(--oaa-primary);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
+}
+.oaa-btn--primary:hover:not(:disabled) {
+  background: var(--oaa-primary-hover);
+  box-shadow: 0 4px 16px rgba(59, 130, 246, 0.35);
+  transform: translateY(-1px);
+}
+
+.oaa-btn--secondary {
+  background: var(--oaa-bg-elevated);
+  color: var(--oaa-color-secondary);
+  border: 1px solid var(--oaa-border-default);
+}
+.oaa-btn--secondary:hover:not(:disabled) {
+  background: var(--oaa-slate-600);
+  color: var(--oaa-color-primary);
+  border-color: var(--oaa-border-strong);
+}
+
+.oaa-btn--ghost {
+  background: transparent;
+  color: var(--oaa-color-secondary);
+}
+.oaa-btn--ghost:hover:not(:disabled) {
+  background: var(--oaa-primary-light);
+  color: var(--oaa-primary);
+}
+
+.oaa-btn--sm {
+  padding: var(--oaa-space-1) var(--oaa-space-3);
+  font-size: var(--oaa-text-xs);
+}
+
+/* --- Glass card variant --- */
+.oaa-glass {
+  background: var(--oaa-glass-bg);
+  border: 1px solid var(--oaa-glass-border);
+  backdrop-filter: blur(var(--oaa-glass-blur));
+  -webkit-backdrop-filter: blur(var(--oaa-glass-blur));
+}
+
+.oaa-input {
+  width: 100%;
+  padding: var(--oaa-space-2) var(--oaa-space-3);
+  background: var(--oaa-bg-input);
+  border: 1px solid var(--oaa-border-default);
+  border-radius: var(--oaa-radius-md);
+  color: var(--oaa-color-primary);
+  font-family: inherit;
+  font-size: var(--oaa-text-sm);
+  transition:
+    border-color var(--oaa-transition-fast),
+    box-shadow var(--oaa-transition-fast);
+  outline: none;
+}
+.oaa-input::placeholder {
+  color: var(--oaa-color-disabled);
+}
+.oaa-input:focus {
+  border-color: var(--oaa-border-focus);
+  box-shadow: 0 0 0 3px var(--oaa-primary-light);
+}
+
+.oaa-select {
+  composes: oaa-input;
+  appearance: none;
+  cursor: pointer;
+  padding-right: var(--oaa-space-8);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+}
+.oaa-select option {
+  background: var(--oaa-bg-surface);
+  color: var(--oaa-color-primary);
+}
+
+.oaa-card {
+  background: var(--oaa-bg-surface);
+  border: 1px solid var(--oaa-border-subtle);
+  border-radius: var(--oaa-radius-lg);
+  box-shadow: var(--oaa-shadow-card);
+  transition:
+    border-color var(--oaa-transition-base),
+    box-shadow var(--oaa-transition-base),
+    transform var(--oaa-transition-base);
+}
+.oaa-card:hover {
+  border-color: var(--oaa-border-default);
+  box-shadow: var(--oaa-shadow-md);
+  transform: translateY(-2px);
+}
+
+.oaa-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: var(--oaa-radius-full);
+  font-size: var(--oaa-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+.oaa-badge--count {
+  background: var(--oaa-primary-light);
+  color: var(--oaa-primary);
+}
+.oaa-badge--success {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--oaa-green-400);
+}
+.oaa-badge--warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--oaa-amber-400);
+}
+.oaa-badge--error {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--oaa-red-400);
+}
+.oaa-badge--accent {
+  background: rgba(139, 92, 246, 0.15);
+  color: var(--oaa-purple-400);
+}
+
+.oaa-label {
+  display: block;
+  font-size: var(--oaa-text-xs);
+  font-weight: 500;
+  color: var(--oaa-color-secondary);
+  margin-bottom: var(--oaa-space-1);
+}

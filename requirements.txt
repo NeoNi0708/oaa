@@ -1,0 +1,24 @@
+# OPA AI Assistant (OAA) — 运行时依赖
+# 安装方式: pip install -r requirements.txt
+# 生成日期: 2026-05-10
+
+# === 核心依赖 ===
+requests>=2.28,<3
+websockets>=14.0,<16
+openai>=1.0,<3
+python-docx>=1.0,<2
+openpyxl>=3.1,<4
+beautifulsoup4>=4.12,<5
+aiosqlite>=0.19,<1
+pycryptodome>=3.19,<4
+zstandard>=0.22,<1
+
+# === 可选通道依赖 ===
+# 钉钉: pip install "dingtalk-stream>=0.20"
+# 飞书: pip install "lark-oapi>=1.0"
+# Anthropic: pip install "anthropic>=0.40"
+
+# === 开发依赖 ===
+# pytest>=7.0
+# pytest-asyncio>=0.23
+# ruff>=0.8

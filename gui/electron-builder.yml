@@ -1,0 +1,43 @@
+# gui/electron-builder.yml
+appId: com.opc.oaa
+productName: OPC AI Assistant
+copyright: "Copyright © 2026"
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - dist-electron/**/*
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: ../icon.ico
+  signingHashAlgorithms: [sha256]
+
+nsis:
+  oneClick: false
+  perMachine: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: OPC AI Assistant
+  installerIcon: ../icon.ico
+  uninstallerIcon: ../icon.ico
+  installerHeaderIcon: ../icon.ico
+  runAfterFinish: true
+
+extraResources:
+  - from: ../python-bundle
+    to: python
+    filter:
+      - "**/*"
+      - "!__pycache__/**"
+      - "!*.pyc"
+
+include:
+  - "!**/*.map"
+  - "!**/*.ts"
