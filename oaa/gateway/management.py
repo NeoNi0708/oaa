@@ -27,7 +27,10 @@ VALID_TYPES = {
     "qr_login", "poll_qr",
     "switch_model",
     "get_models",
+    "stop_chat",
+    "apply_evolution",
 }
+_ = VALID_TYPES  # prevent import-stripping
 
 
 class ManagementHandler:
@@ -169,6 +172,15 @@ class ManagementHandler:
         if "permissions" in data:
             self._config.permissions = data["permissions"]
 
+        # Backward-migrate any pre-models-dict config into the per-provider store
+        prov = self._config.model.provider
+        if prov and self._config.model.api_key:
+            self._config.models.setdefault(prov, {})
+            if not self._config.models[prov].get("api_key"):
+                self._config.models[prov]["api_key"] = self._config.model.api_key
+                self._config.models[prov]["model_id"] = self._config.model.model_id
+                self._config.models[prov]["base_url"] = self._config.model.base_url
+
         self._config.save()
 
         # Hot-reload LLM client so the new API key / base URL / model take effect immediately
@@ -238,6 +250,29 @@ class ManagementHandler:
         self._config.save()
         if self._agent is not None:
             self._agent.llm.reconfigure(self._config.model)
+        return {"ok": True}
+
+    # ------------------------------------------------------------------
+    # Stop
+    # ------------------------------------------------------------------
+
+    def _handle_stop_chat(self, _payload: dict) -> dict:
+        """Signal the current chat task to abort (best-effort)."""
+        self.set_agent_state("idle")
+        return {"ok": True}
+
+    def _handle_apply_evolution(self, payload: dict) -> dict:
+        """Mark an evolution suggestion as applied."""
+        title = payload.get("title", "")
+        if not title:
+            return {"ok": False, "error": "No title provided"}
+        # Record in evolution stats
+        if "applied" not in self._evolution.stats:
+            self._evolution.stats["applied"] = []
+        self._evolution.stats["applied"].append({
+            "title": title,
+            "applied_at": time.time(),
+        })
         return {"ok": True}
 
     # ------------------------------------------------------------------

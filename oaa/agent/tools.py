@@ -170,3 +170,20 @@ class AtomicTools(BaseHandler):
         """Trigger async long-term memory consolidation."""
         logger.info("long_term_update triggered")
         return {"status": "ok", "msg": "Long-term memory update triggered"}
+
+    # --- WeChat CLI tool stubs (wechat-cli not bundled yet) ---
+
+    async def do_wechat_sessions(self, args: dict) -> dict:
+        return {"status": "error", "msg": "wechat-cli 未配置。请在设置中配置微信数据目录后重试。"}
+
+    async def do_wechat_history(self, args: dict) -> dict:
+        return {"status": "error", "msg": "wechat-cli 未配置。请在设置中配置微信数据目录后重试。"}
+
+    async def do_wechat_search(self, args: dict) -> dict:
+        return {"status": "error", "msg": "wechat-cli 未配置。请在设置中配置微信数据目录后重试。"}
+
+    async def do_wechat_contacts(self, args: dict) -> dict:
+        return {"status": "error", "msg": "wechat-cli 未配置。请在设置中配置微信数据目录后重试。"}
+
+    async def do_wechat_unread(self, args: dict) -> dict:
+        return {"status": "error", "msg": "wechat-cli 未配置。请在设置中配置微信数据目录后重试。"}

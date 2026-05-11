@@ -92,7 +92,8 @@ export function useWebSocket() {
         // Chat / streaming chunk
         switch (data.type) {
           case 'done': {
-            messages.value.push({ role: 'assistant', content: p.content || '' })
+            const finalContent = p.content || streamingContent.value || ''
+            messages.value.push({ role: 'assistant', content: finalContent })
             streaming.value = false
             streamingContent.value = ''
             statusText.value = ''

@@ -6,7 +6,7 @@
         <div class="title-row">
           <h1 class="chat-title">二愣</h1>
           <span :class="['phase-pill', agentPhase]">{{ agentPhaseLabel }}</span>
-          <div class="model-selector" v-if="modelList.length > 0">
+          <div class="model-selector" v-if="Object.keys(modelList).length > 0">
             <button class="model-btn" @click="toggleModelMenu" title="切换模型">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 10 10H12V2z"/><path d="M12 2a10 10 0 0 1 10 10h-10V2z"/></svg>
               <span class="model-label">{{ activeModelLabel }}</span>
@@ -159,7 +159,10 @@
     <!-- Input -->
     <div class="input-area">
       <div class="input-wrapper">
-        <button class="attach-btn" title="附件">
+        <button v-if="loading || streaming" class="stop-btn" @click="stopAgent" title="停止生成">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+        </button>
+        <button v-else class="attach-btn" title="附件">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
           </svg>
@@ -328,6 +331,15 @@ function scrollToBottom() {
   if (msgContainer.value) {
     msgContainer.value.scrollTop = msgContainer.value.scrollHeight
   }
+}
+
+function stopAgent() {
+  loading.value = false
+  streaming.value = false
+  streamingContent.value = ''
+  statusText.value = ''
+  // Send stop signal so backend can abort the chat task
+  sendRequest('stop_chat', {}).catch(() => {})
 }
 
 function autoResize(e: Event) {
@@ -743,20 +755,21 @@ function autoResize(e: Event) {
 
 /* --- Input area --- */
 .input-area {
-  padding: var(--oaa-space-3) var(--oaa-space-6);
+  padding: var(--oaa-space-3) var(--oaa-space-5);
   border-top: 1px solid var(--oaa-glass-border);
+  background: rgba(30, 41, 59, 0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .input-wrapper {
   display: flex;
   align-items: flex-end;
   gap: var(--oaa-space-2);
-  background: rgba(30, 41, 59, 0.8);
+  background: var(--oaa-bg-input);
   border: 1px solid var(--oaa-border-default);
   border-radius: var(--oaa-radius-lg);
   padding: var(--oaa-space-2) var(--oaa-space-2) var(--oaa-space-2) var(--oaa-space-3);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
   transition:
     border-color var(--oaa-transition-fast),
     box-shadow var(--oaa-transition-fast);
@@ -799,6 +812,31 @@ function autoResize(e: Event) {
 .attach-btn:hover {
   color: var(--oaa-color-secondary);
   background: rgba(255, 255, 255, 0.06);
+}
+
+.stop-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--oaa-radius-md);
+  background: rgba(239, 68, 68, 0.18);
+  color: var(--oaa-error);
+  cursor: pointer;
+  transition: background var(--oaa-transition-fast), transform var(--oaa-transition-fast);
+  flex-shrink: 0;
+  animation: stopPulse 1.2s ease-in-out infinite;
+}
+.stop-btn:hover {
+  background: rgba(239, 68, 68, 0.3);
+  transform: scale(1.08);
+}
+
+@keyframes stopPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.3); }
+  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
 }
 
 .send-btn {

@@ -40,6 +40,11 @@
               <div class="skill-name">{{ skill.name }}</div>
               <div class="skill-desc">{{ skill.description }}</div>
             </div>
+            <div class="skill-status">
+              <span v-if="skill.active" class="status-badge status-active">可用</span>
+              <span v-else-if="skill.toolsCount > 0" class="status-badge status-ready">已安装</span>
+              <span v-else class="status-badge status-inactive">待激活</span>
+            </div>
           </div>
         </div>
       </div>
@@ -67,7 +72,11 @@
           <div class="evo-desc">{{ item.description }}</div>
           <div class="evo-footer">
             <span class="evo-confidence">置信度: {{ item.confidence }}%</span>
-            <button class="oaa-btn oaa-btn--sm" :class="item.applied ? 'btn-applied' : 'oaa-btn--primary'">
+            <button
+              class="oaa-btn oaa-btn--sm"
+              :class="item.applied ? 'btn-applied' : 'oaa-btn--primary'"
+              @click="applyEvolution(item)"
+            >
               {{ item.applied ? '已应用' : '应用' }}
             </button>
           </div>
@@ -150,6 +159,9 @@ interface Skill {
   icon: string
   name: string
   description: string
+  active: boolean
+  toolsCount: number
+  knowledgeCount: number
 }
 
 interface SkillGroup {
@@ -175,50 +187,50 @@ const fallbackSkillGroups: SkillGroup[] = [
   {
     category: '外贸业务核心',
     skills: [
-      { icon: '🌐', name: '外贸业务综合', description: '综合处理外贸业务流程、政策咨询与方案建议' },
-      { icon: '💼', name: '业务助理', description: '协助处理日常业务事务与工作安排' },
-      { icon: '📄', name: '报价单制作', description: '快速生成专业报价单文档' },
-      { icon: '📝', name: '合同审核', description: '审核合同条款，识别风险并提供修改建议' },
-      { icon: '🤝', name: '客户支持', description: '提供客户售前售后咨询与服务' },
-      { icon: '✉', name: '邮件撰写', description: '撰写与优化外贸业务邮件' },
-      { icon: '📋', name: '询盘处理', description: '处理客户询盘，生成回复方案' },
-      { icon: '👥', name: '客户关系管理', description: '管理客户信息与跟进记录' },
-      { icon: '💰', name: '财务助理', description: '协助处理报价核算、成本分析等财务事务' },
-      { icon: '📞', name: '跟进提醒', description: '自动跟进客户与项目进度提醒' },
-      { icon: '🚚', name: '物流协调', description: '协助处理物流运输与报关事务' },
-      { icon: '📊', name: '市场分析', description: '分析行业趋势与市场数据' },
-      { icon: '🔍', name: '市场调研', description: '执行市场调研并生成调研报告' },
-      { icon: '🎯', name: '客户开发', description: '自动化客户开发与外拓流程' },
-      { icon: '🛒', name: '采购管理', description: '协助供应商筛选与采购流程管理' },
-      { icon: '🔎', name: '搜索执行', description: '执行定向搜索任务，收集信息' },
+      { icon: '🌐', name: '外贸业务综合', description: '综合处理外贸业务流程', active: true, toolsCount: 3, knowledgeCount: 5 },
+      { icon: '💼', name: '业务助理', description: '协助处理日常业务事务', active: true, toolsCount: 4, knowledgeCount: 3 },
+      { icon: '📄', name: '报价单制作', description: '快速生成专业报价单文档', active: true, toolsCount: 2, knowledgeCount: 2 },
+      { icon: '📝', name: '合同审核', description: '审核合同条款，识别风险', active: true, toolsCount: 1, knowledgeCount: 4 },
+      { icon: '🤝', name: '客户支持', description: '提供客户售前售后咨询', active: true, toolsCount: 2, knowledgeCount: 3 },
+      { icon: '✉', name: '邮件撰写', description: '撰写与优化外贸业务邮件', active: true, toolsCount: 1, knowledgeCount: 2 },
+      { icon: '📋', name: '询盘处理', description: '处理客户询盘，回复方案', active: true, toolsCount: 2, knowledgeCount: 2 },
+      { icon: '👥', name: '客户关系管理', description: '管理客户信息与跟进记录', active: false, toolsCount: 0, knowledgeCount: 2 },
+      { icon: '💰', name: '财务助理', description: '报价核算、成本分析', active: true, toolsCount: 3, knowledgeCount: 2 },
+      { icon: '📞', name: '跟进提醒', description: '自动跟进客户与项目进度', active: false, toolsCount: 0, knowledgeCount: 1 },
+      { icon: '🚚', name: '物流协调', description: '物流运输与报关事务', active: false, toolsCount: 0, knowledgeCount: 2 },
+      { icon: '📊', name: '市场分析', description: '分析行业趋势与市场数据', active: true, toolsCount: 2, knowledgeCount: 3 },
+      { icon: '🔍', name: '市场调研', description: '执行市场调研并生成报告', active: true, toolsCount: 3, knowledgeCount: 2 },
+      { icon: '🎯', name: '客户开发', description: '自动化客户开发与外拓', active: false, toolsCount: 0, knowledgeCount: 1 },
+      { icon: '🛒', name: '采购管理', description: '供应商筛选与采购流程', active: false, toolsCount: 0, knowledgeCount: 2 },
+      { icon: '🔎', name: '搜索执行', description: '定向搜索任务，收集信息', active: true, toolsCount: 1, knowledgeCount: 1 },
     ],
   },
   {
     category: '办公文档',
     skills: [
-      { icon: '📝', name: 'Word 文档', description: '生成与编辑 Word 文档' },
-      { icon: '📊', name: 'Excel 表格', description: '生成与编辑 Excel 电子表格' },
-      { icon: '📕', name: 'PDF 处理', description: '读取与处理 PDF 文件' },
+      { icon: '📝', name: 'Word 文档', description: '生成与编辑 Word 文档', active: false, toolsCount: 0, knowledgeCount: 1 },
+      { icon: '📊', name: 'Excel 表格', description: '生成与编辑 Excel 表格', active: true, toolsCount: 1, knowledgeCount: 1 },
+      { icon: '📕', name: 'PDF 处理', description: '读取与处理 PDF 文件', active: false, toolsCount: 0, knowledgeCount: 1 },
     ],
   },
   {
     category: '通信消息',
     skills: [
-      { icon: '💬', name: '微信 CLI', description: '通过命令行工具收发微信消息' },
-      { icon: '📧', name: '邮件客户端', description: '收发电子邮件' },
-      { icon: '🔌', name: 'ClawHub', description: '技能市场与插件管理' },
+      { icon: '💬', name: '微信 CLI', description: '微信本地数据查询', active: false, toolsCount: 0, knowledgeCount: 1 },
+      { icon: '📧', name: '邮件客户端', description: '收发电子邮件', active: false, toolsCount: 0, knowledgeCount: 1 },
+      { icon: '🔌', name: 'ClawHub', description: '技能市场与插件管理', active: false, toolsCount: 0, knowledgeCount: 1 },
     ],
   },
   {
     category: '系统与自进化',
     skills: [
-      { icon: '🧠', name: '自改进', description: '自动分析与优化自身行为模式' },
-      { icon: '🤖', name: '自主代理工具包', description: '提供自主决策与任务规划能力' },
-      { icon: '🔧', name: '技能创建器', description: '根据需求自动创建新技能' },
-      { icon: '💾', name: '代理记忆', description: '管理与持久化跨会话记忆' },
-      { icon: '🌐', name: '浏览器', description: '网页浏览与信息采集' },
-      { icon: '🌤', name: '天气查询', description: '查询实时天气信息' },
-      { icon: '📃', name: '摘要生成', description: '自动生成文本摘要' },
+      { icon: '🧠', name: '自改进', description: '自动分析与优化自身行为', active: false, toolsCount: 0, knowledgeCount: 1 },
+      { icon: '🤖', name: '自主代理工具包', description: '自主决策与任务规划', active: false, toolsCount: 0, knowledgeCount: 1 },
+      { icon: '🔧', name: '技能创建器', description: '根据需求自动创建新技能', active: false, toolsCount: 0, knowledgeCount: 1 },
+      { icon: '💾', name: '代理记忆', description: '管理跨会话持久化记忆', active: false, toolsCount: 0, knowledgeCount: 1 },
+      { icon: '🌐', name: '浏览器', description: '网页浏览与信息采集', active: false, toolsCount: 0, knowledgeCount: 1 },
+      { icon: '🌤', name: '天气查询', description: '查询实时天气信息', active: false, toolsCount: 0, knowledgeCount: 1 },
+      { icon: '📃', name: '摘要生成', description: '自动生成文本摘要', active: false, toolsCount: 0, knowledgeCount: 1 },
     ],
   },
 ]
@@ -300,6 +312,18 @@ interface BackendEvolutionItem {
   skip_count?: number
 }
 
+async function applyEvolution(item: EvolutionSuggestion) {
+  if (item.applied) return
+  try {
+    const resp = await sendRequest('apply_evolution', { title: item.title })
+    if (resp.ok) {
+      item.applied = true
+    }
+  } catch {
+    // Keep current state
+  }
+}
+
 onMounted(async () => {
   // Load skills from backend
   try {
@@ -312,9 +336,16 @@ onMounted(async () => {
         const cat = s.category || '未分类'
         if (!groupMap.has(cat)) groupMap.set(cat, [])
         const desc = s.tools_count > 0
-          ? `已激活 · ${s.tools_count} 工具 · ${s.knowledge_count} 知识`
-          : '待激活'
-        groupMap.get(cat)!.push({ icon: inferIcon(s.name), name: s.name, description: desc })
+          ? `${s.tools_count} 工具 · ${s.knowledge_count} 知识文档`
+          : '需安装依赖或配置'
+        groupMap.get(cat)!.push({
+          icon: inferIcon(s.name),
+          name: s.name,
+          description: desc,
+          active: s.loaded && s.tools_count > 0,
+          toolsCount: s.tools_count,
+          knowledgeCount: s.knowledge_count,
+        })
       }
       skillGroups.value = Array.from(groupMap, ([category, skills]) => ({ category, skills }))
       allSkills.value = skills
@@ -560,6 +591,31 @@ onMounted(async () => {
   color: var(--oaa-green-500);
   cursor: default;
   pointer-events: none;
+}
+
+.skill-status { flex-shrink: 0; }
+
+.status-badge {
+  display: inline-block;
+  padding: 1px 10px;
+  border-radius: var(--oaa-radius-full);
+  font-size: var(--oaa-text-xs);
+  font-weight: 500;
+}
+
+.status-active {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--oaa-green-500);
+}
+
+.status-ready {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--oaa-blue-400);
+}
+
+.status-inactive {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--oaa-color-disabled);
 }
 
 .iframe-container {

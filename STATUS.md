@@ -62,6 +62,39 @@
 
 ---
 
+### BUG-2: 部分 Agent 回复在聊天页面不显示
+
+**状态**: 已定位根因
+
+**现象**: Agent 对话记忆完整（"刚才说了什么"能正确回忆），但聊天页面中部分回复不可见。
+
+**根因**: `useWebSocket.ts` 的 `done` 处理分支在 `content=""` 时空推不可见消息，
+同时清除 `streamingContent`，导致之前 Turn 流式输出的文本永久丢失。
+
+**场景重现**:
+```
+Turn 1: LLM → content="我需要了解..." + tool_call=wechat_search
+        → llm_output(streaming) → tool_call → tool_result
+        → streamingContent 有文本，但未保存到 messages
+
+Turn 2: LLM → content=""（空） + tool_calls=[]
+        → done(content="") → messages.push({role:'assistant', content:''})
+        → streamingContent = ''（Turn 1 的内容被清除）
+        → 用户看到：仅 tool 卡片，无任何回复文本
+```
+
+**修复** (`useWebSocket.ts` done 分支):
+```typescript
+// 之前
+messages.value.push({ role: 'assistant', content: p.content || '' })
+
+// 修复：done 为空时回退到已累积的 streamingContent
+const finalContent = p.content || streamingContent.value || ''
+messages.value.push({ role: 'assistant', content: finalContent })
+```
+
+---
+
 ### BUG-1: 智谱 API 认证失败 vs 讯飞成功
 
 **状态**: 待定位根因
@@ -91,3 +124,10 @@
 | 5 | 05-11 | Thinking (Turn N) 卡住 | done 事件中清理 statusText |
 | 6 | 05-11 | data_dir 乱码 | 修复为 E:/GenericAgent/data |
 | 7 | 05-11 | 端口冲突（双 Python 进程） | 由 Electron 统一 spawn，不再手动启动 Python |
+| 8 | 05-11 | UX-1 模型选择器不显示 | ChatView.vue `modelList.length`→`Object.keys(modelList).length` |
+| 9 | 05-11 | UX-2 Agent 10分钟超时 | AsyncOpenAI timeout=60s + wechat 工具 stub handler |
+| 10 | 05-11 | BUG-1 models dict 数据迁移 | save_config 自动从 model.* 迁移到 models[provider] |
+| 11 | 05-11 | UX-3 钉钉飞书QR码裂图 | qrcode 库生成 base64 PNG 替代 OAuth URL |
+| 12 | 05-11 | UX-4 输入框+取消按钮 | 单层CSS + stop 按钮 + stop_chat 端点 |
+| 13 | 05-11 | UX-5 技能页按钮/状态 | @click handler + apply_evolution 端点 + 状态徽章 |
+| 14 | 05-11 | BUG-2 部分回复不显示 | done 为空时回退 streamingContent |

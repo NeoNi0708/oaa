@@ -66,10 +66,10 @@ class FeishuAdapter:
     # ------------------------------------------------------------------
 
     def get_qrcode(self) -> dict:
-        """Step 1: Generate a Feishu OAuth URL for QR code login (synchronous).
+        """Step 1: Generate a Feishu OAuth QR code for scan login (synchronous).
 
         Returns:
-            dict with ``qrcode_url`` (URL to render as QR code) and
+            dict with ``qrcode_url`` (base64 PNG data URI) and
             ``state`` (anti-forgery token).
         """
         redirect_uri = "oaa://feishu/callback"
@@ -80,7 +80,17 @@ class FeishuAdapter:
             f"&redirect_uri={redirect_uri}"
             f"&state={state}"
         )
-        return {"qrcode_url": auth_url, "state": state}
+        try:
+            import qrcode
+            import io
+            import base64
+            img = qrcode.make(auth_url)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+            return {"qrcode_url": data_uri, "qrcode_id": state, "state": state}
+        except ImportError:
+            return {"qrcode_url": auth_url, "state": state}
 
     async def handle_oauth_callback(self, code: str) -> dict:
         """Step 2: Exchange an OAuth authorization code for the user's identity.

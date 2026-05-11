@@ -47,6 +47,8 @@ _MANAGEMENT_TYPES = {
     "qr_login", "poll_qr",
     "get_status",
     "switch_model", "get_models",
+    "stop_chat",
+    "apply_evolution",
 }
 
 
