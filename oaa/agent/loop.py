@@ -32,6 +32,8 @@ def _friendly_error(exc: Exception) -> str:
         return "模型响应超时，请检查网络或切换模型厂商"
     if "Connection" in name:
         return f"无法连接到模型服务，请检查网络（{name}）"
+    if "APIError" in msg or "EngineInternalError" in msg or "InvalidParamError" in msg:
+        return "模型服务内部错误，请重试或切换模型"
     return f"模型调用失败: {name}"
 
 
@@ -159,9 +161,12 @@ class AgentLoop:
                     result = {"status": "error", "msg": str(exc)}
                 yield {"type": "tool_result", "name": tool_name, "result": result}
 
+                result_str = str(result)
+                if len(result_str) > 2000:
+                    result_str = result_str[:2000] + "...[truncated]"
                 tool_result_entries.append({
                     "tool_use_id": tc.id,
-                    "content": str(result),
+                    "content": result_str,
                 })
 
             # Append assistant + tool-result messages

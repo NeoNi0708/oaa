@@ -66,6 +66,11 @@ class ExtendedTools:
         except PermissionError as exc:
             return {"status": "error", "msg": str(exc)}
         rows = args.get("rows", [])
+        if isinstance(rows, str):
+            try:
+                rows = json.loads(rows)
+            except (json.JSONDecodeError, TypeError):
+                rows = [[cell] for cell in rows.split("\n") if cell.strip()]
         wb = Workbook()
         ws = wb.active
         for row in rows:

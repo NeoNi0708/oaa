@@ -63,7 +63,9 @@ class OAAAgent:
         self.atomic = AtomicTools(config.data_dir, permissions=permissions)
         self.extended = ExtendedTools(config.data_dir, permissions=permissions)
 
-        self._tools_schema = ATOMIC_TOOLS_SCHEMA + EXTENDED_TOOLS_SCHEMA + WECHAT_TOOLS_SCHEMA
+        self._tools_schema = ATOMIC_TOOLS_SCHEMA + EXTENDED_TOOLS_SCHEMA
+        if config.wechat.enabled:
+            self._tools_schema = self._tools_schema + WECHAT_TOOLS_SCHEMA
 
     def build_handler(self) -> BaseHandler:
         """Build a merged handler that exposes both atomic and extended tools."""
