@@ -100,6 +100,7 @@ class AgentLoop:
             yield {"type": "status", "content": f"Thinking (Turn {turn})..."}
 
             # Call LLM with retry + exponential backoff
+            # Only retry on timeout/connection errors — API/server errors fail immediately
             response: LLMResponse | None = None
             last_error: Exception | None = None
             for attempt in range(1, _MAX_RETRIES + 1):
@@ -116,6 +117,11 @@ class AgentLoop:
                 except Exception as exc:
                     last_error = exc
                     err_type = type(exc).__name__
+                    # API/server errors are not transient — fail immediately
+                    if "APIError" in str(exc) or "EngineInternalError" in str(exc) or "InvalidParamError" in str(exc):
+                        logger.error("LLM server error [%s], not retrying: %s", err_type, exc)
+                        yield {"type": "done", "content": _friendly_error(exc)}
+                        return
                 if last_error:
                     if attempt < _MAX_RETRIES:
                         delay = _BASE_DELAY * (2 ** (attempt - 1))

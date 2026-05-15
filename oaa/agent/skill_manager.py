@@ -1,10 +1,28 @@
 """Skill package manager -- load SKILL.md + SOP.md at runtime, switch agent persona."""
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from ..llm import LLMClient
+
+
+def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    """Parse YAML frontmatter from markdown text.
+
+    Returns (meta_dict, body_text).  Meta values are always strings.
+    Returns ({}, text) when no frontmatter is found.
+    """
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
+    if not m:
+        return {}, text
+    meta: dict[str, str] = {}
+    for line in m.group(1).splitlines():
+        if ":" in line:
+            key, _, val = line.partition(":")
+            meta[key.strip()] = val.strip().strip('"').strip("'")
+    return meta, text[m.end():]
 
 
 class SkillInfo:
@@ -21,7 +39,13 @@ class SkillInfo:
         self.sop_md: str = ""
         self.knowledge: list[str] = []
         self.tools: list[dict] = []
+        self._description: str = ""
         self._mtime_cache: dict[str, float] = {}
+
+    @property
+    def description(self) -> str:
+        """Short description from SKILL.md frontmatter, or name as fallback."""
+        return self._description or self.name
 
     def _mtime(self, file_path: Path) -> float:
         """Return mtime of *file_path* or 0 if it doesn't exist."""
@@ -49,7 +73,10 @@ class SkillInfo:
         # SKILL.md
         skill_file = skill_path / "SKILL.md"
         if self._changed("skill_md", skill_file) and skill_file.exists():
-            self.skill_md = skill_file.read_text(encoding="utf-8")
+            raw = skill_file.read_text(encoding="utf-8")
+            meta, body = _parse_frontmatter(raw)
+            self._description = meta.get("description", "")
+            self.skill_md = body
 
         # SOP.md
         sop_file = skill_path / "SOP.md"
@@ -131,7 +158,10 @@ class SkillManager:
             for skill_dir in category_dir.iterdir():
                 if not skill_dir.is_dir():
                     continue
+                if not (skill_dir / "SKILL.md").exists():
+                    continue
                 skill = SkillInfo(skill_dir.name, category, str(skill_dir))
+                skill.load()  # load description from frontmatter
                 self._skills[skill_dir.name] = skill
 
     # ------------------------------------------------------------------
@@ -162,77 +192,17 @@ class SkillManager:
         """Return every discovered skill."""
         return list(self._skills.values())
 
+    def list_with_descriptions(self) -> list[dict]:
+        """Return every skill as {name, category, description} for system prompt injection."""
+        return [
+            {"name": s.name, "category": s.category, "description": s.description}
+            for s in sorted(self._skills.values(), key=lambda x: x.name)
+        ]
+
     # ------------------------------------------------------------------
-    # Intent matching
+    # Intent matching (deprecated — kept for backward compat, always returns None)
     # ------------------------------------------------------------------
 
     def match_intent(self, user_input: str) -> Optional[SkillInfo]:
-        """Keyword-based skill matching for foreign-trade intents.
-
-        Scans *user_input* for keywords and returns the first matching skill
-        (discovered earlier via ``discover()``) or *None*.
-        """
-        keyword_map: dict[str, str] = {
-            "报价": "business-assistant",
-            "PI": "business-assistant",
-            "合同": "business-assistant",
-            "装箱单": "business-assistant",
-            "汇率": "finance",
-            "利润": "finance",
-            "FOB": "finance",
-            "CIF": "finance",
-            "Form A": "finance",
-            "原产地证": "finance",
-            "跟单": "follow-up",
-            "催货": "follow-up",
-            "交期": "follow-up",
-            "生产": "follow-up",
-            "物流": "logistics-coordination",
-            "运费": "logistics-coordination",
-            "订舱": "logistics-coordination",
-            "货代": "logistics-coordination",
-            "搜客户": "market-researcher",
-            "开发信": "market-researcher",
-            "线索": "market-researcher",
-            "潜在客户": "market-researcher",
-            "邮件": "email-writer",
-            "写邮件": "email-writer",
-            "回复": "email-writer",
-            "采购": "purchaser",
-            "询价": "purchaser",
-            "搜索": "search-execution",
-            "查一下": "search-execution",
-            "搜索一下": "search-execution",
-            "行情": "market-analyst",
-            "市场分析": "market-analyst",
-            "分析": "market-analyst",
-        }
-        for keyword, skill_name in keyword_map.items():
-            if keyword in user_input:
-                return self.get(skill_name)
-        return None
-
-    async def _llm_match_intent(self, user_input: str, llm: "LLMClient") -> Optional[SkillInfo]:
-        """LLM fallback when keyword matching yields nothing."""
-        if not self._skills:
-            return None
-        skills_list = "\n".join(
-            f"- {s.name} (分类: {s.category})"
-            for s in sorted(self._skills.values(), key=lambda x: x.name)
-        )
-        prompt = (
-            f"你是一个意图分类器。用户输入无法通过关键词匹配到任何技能。\n\n"
-            f"可用技能列表:\n{skills_list}\n\n"
-            f"用户输入: \"{user_input}\"\n\n"
-            f"请判断用户输入与哪个技能最相关，或哪个都不相关。\n"
-            f"只输出一个技能名称（不要分类），如果都不匹配则输出 \"none\"。\n"
-            f"不要输出任何其他内容。"
-        )
-        try:
-            response = await llm.chat([{"role": "user", "content": prompt}])
-            skill_name = response.content.strip()
-            if skill_name and skill_name != "none":
-                return self.get(skill_name)
-        except Exception:
-            pass
+        """Legacy keyword matching - no longer used.  Returns None."""
         return None

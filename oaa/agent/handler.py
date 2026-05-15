@@ -10,6 +10,8 @@ class BaseHandler:
     method, and returns the result.
     """
 
+    _dynamic_tools: dict[str, dict] = {}  # tool_name -> {"path": str, "schema": dict}
+
     async def dispatch(self, tool_name: str, args: dict) -> Any:
         """Look up ``do_{tool_name}`` and call it with *args*.
 
@@ -21,3 +23,15 @@ class BaseHandler:
             method = getattr(self, method_name)
             return await method(args)
         return {"status": "error", "msg": f"Unknown tool: {tool_name}"}
+
+    def register_dynamic(self, tool_name: str, filepath: str, schema: dict):
+        """Register a dynamic tool created at runtime."""
+        self._dynamic_tools[tool_name] = {"path": filepath, "schema": schema}
+
+    def unregister_dynamic(self, tool_name: str):
+        """Remove a dynamic tool from the registry."""
+        self._dynamic_tools.pop(tool_name, None)
+
+    def get_dynamic_tool_names(self) -> list[str]:
+        """Return names of all registered dynamic tools."""
+        return list(self._dynamic_tools.keys())

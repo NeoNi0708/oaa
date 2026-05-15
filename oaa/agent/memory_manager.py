@@ -1,0 +1,242 @@
+"""Tiered memory system — HOT (always loaded), corrections, warm/ (on-demand), cold/ (archived).
+
+Inspired by self-improving skill patterns.
+"""
+import os
+import re
+from datetime import datetime
+from pathlib import Path
+
+
+_HOT_MAX_LINES = 100
+_CORRECTIONS_MAX = 50
+
+
+class MemoryManager:
+    """Manages tiered persistent memory across sessions.
+
+    Directory layout::
+
+        <memory_dir>/
+            HOT.md              # Always loaded, ≤100 lines
+            corrections.md      # Last N corrections
+            warm/               # Topic files, loaded on demand
+            cold/               # Archived / decayed entries
+    """
+
+    def __init__(self, memory_dir: str):
+        self._dir = Path(memory_dir)
+        self._dir.mkdir(parents=True, exist_ok=True)
+        (self._dir / "warm").mkdir(exist_ok=True)
+        (self._dir / "cold").mkdir(exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # HOT memory — always loaded into system prompt
+    # ------------------------------------------------------------------
+
+    def load_hot(self) -> str:
+        """Return HOT.md content (empty string if missing)."""
+        path = self._dir / "HOT.md"
+        if path.exists():
+            return path.read_text(encoding="utf-8").strip()
+        return ""
+
+    def add_to_hot(self, entry: str) -> dict:
+        """Append a new entry to HOT.md, then compact if over limit.
+
+        *entry* should be a single line or short paragraph describing
+        a user preference, rule, or learned pattern.
+        """
+        if not entry.strip():
+            return {"status": "error", "msg": "Empty entry"}
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        line = f"- [{timestamp}] {entry.strip()}\n"
+
+        path = self._dir / "HOT.md"
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + line, encoding="utf-8")
+
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) > _HOT_MAX_LINES:
+            self.compact_hot()
+
+        return {"status": "success", "line_count": len(line)}
+
+    def compact_hot(self):
+        """Demote older entries from HOT.md to a dated warm/ file.
+
+        Keeps the most recent ``_HOT_MAX_LINES // 2`` lines in HOT.md;
+        the rest are moved to ``warm/hot-archive-<date>.md``.
+        """
+        path = self._dir / "HOT.md"
+        if not path.exists():
+            return
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) <= _HOT_MAX_LINES:
+            return
+
+        keep = lines[: _HOT_MAX_LINES // 2 * -1]
+        demote = lines[_HOT_MAX_LINES // 2 * -1 :]
+
+        # Save kept lines back to HOT.md
+        path.write_text("\n".join(keep) + "\n", encoding="utf-8")
+
+        # Archive demoted lines to warm/
+        date_str = datetime.now().strftime("%Y%m%d")
+        archive_path = self._dir / "warm" / f"hot-archive-{date_str}.md"
+        existing = archive_path.read_text(encoding="utf-8") if archive_path.exists() else ""
+        archive_path.write_text(
+            existing + f"# Archived from HOT on {date_str}\n" + "\n".join(demote) + "\n",
+            encoding="utf-8",
+        )
+
+    # ------------------------------------------------------------------
+    # Corrections — user feedback learning
+    # ------------------------------------------------------------------
+
+    def load_recent_corrections(self, limit: int = 5) -> list[dict]:
+        """Return the most recent *limit* corrections."""
+        entries = self._parse_corrections()
+        return entries[-limit:]
+
+    def add_correction(self, context: str, lesson: str) -> dict:
+        """Log a user correction.
+
+        *context* describes what the user said / what was being done.
+        *lesson* is what should be done differently next time.
+        """
+        if not context or not lesson:
+            return {"status": "error", "msg": "context and lesson are required"}
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        entry = (
+            f"\n## {timestamp}: {context}\n"
+            f"- **Lesson**: {lesson}\n"
+        )
+
+        path = self._dir / "corrections.md"
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + entry, encoding="utf-8")
+
+        # Trim to _CORRECTIONS_MAX
+        entries = self._parse_corrections()
+        if len(entries) > _CORRECTIONS_MAX:
+            trimmed = entries[-_CORRECTIONS_MAX:]
+            self._write_corrections(trimmed)
+
+        # Auto-promote: if same correction appears 3+ times, add to HOT
+        similar = [e for e in self._parse_corrections() if e["lesson"] == lesson]
+        if len(similar) >= 3:
+            self.add_to_hot(f"[Auto-promoted from corrections] {lesson}")
+
+        return {"status": "success"}
+
+    def _parse_corrections(self) -> list[dict]:
+        """Parse corrections.md into list of {timestamp, context, lesson}."""
+        path = self._dir / "corrections.md"
+        if not path.exists():
+            return []
+        text = path.read_text(encoding="utf-8")
+        entries = []
+        for block in re.split(r"\n## ", text):
+            if not block.strip():
+                continue
+            lines = block.strip().split("\n")
+            header = lines[0].strip()
+            lesson = ""
+            for l in lines:
+                if l.startswith("- **Lesson**"):
+                    lesson = l.split(":", 1)[-1].strip()
+            # Extract timestamp from header format: "2026-05-15 14:30: context"
+            ts = header
+            context = header
+            # Try to parse timestamp prefix
+            m = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}):\s*(.*)", header)
+            if m:
+                ts = m.group(1)
+                context = m.group(2)
+            entries.append({"timestamp": ts, "context": context, "lesson": lesson})
+        return entries
+
+    def _write_corrections(self, entries: list[dict]):
+        """Overwrite corrections.md with the given entries."""
+        path = self._dir / "corrections.md"
+        parts = []
+        for e in entries:
+            parts.append(
+                f"## {e['timestamp']}: {e['context']}\n"
+                f"- **Lesson**: {e['lesson']}\n"
+            )
+        path.write_text("\n".join(parts), encoding="utf-8")
+
+    # ------------------------------------------------------------------
+    # Warm memory — on demand
+    # ------------------------------------------------------------------
+
+    def list_warm_topics(self) -> list[str]:
+        """Return filenames (without .md) of warm memory files."""
+        warm_dir = self._dir / "warm"
+        return sorted(
+            f.stem for f in warm_dir.iterdir() if f.suffix == ".md"
+        )
+
+    def load_warm(self, topic: str) -> str:
+        """Return content of a warm memory topic file."""
+        path = self._dir / "warm" / f"{topic}.md"
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        return ""
+
+    # ------------------------------------------------------------------
+    # Recall — search across all tiers
+    # ------------------------------------------------------------------
+
+    def search(self, query: str) -> dict:
+        """Search HOT.md + corrections.md + warm/ for *query*.
+
+        Returns matches grouped by tier.
+        """
+        q = query.lower()
+        result: dict[str, list[str]] = {"hot": [], "corrections": [], "warm": []}
+
+        hot = self.load_hot()
+        for line in hot.split("\n"):
+            if q in line.lower():
+                result["hot"].append(line.strip())
+
+        corrections = (self._dir / "corrections.md")
+        if corrections.exists():
+            for line in corrections.read_text(encoding="utf-8").split("\n"):
+                if q in line.lower():
+                    result["corrections"].append(line.strip())
+
+        for topic in self.list_warm_topics():
+            content = self.load_warm(topic)
+            if q in content.lower():
+                result["warm"].append(f"[{topic}] {content.strip()[:100]}")
+
+        return {"status": "success", "matches": result, "query": query}
+
+    # ------------------------------------------------------------------
+    # System prompt fragment
+    # ------------------------------------------------------------------
+
+    def build_memory_prompt(self) -> str:
+        """Build the memory section for system prompt injection."""
+        parts = []
+
+        hot = self.load_hot()
+        if hot:
+            parts.append("# 持久记忆（HOT）\n\n以下是从过往交互中学习到的关于用户偏好和规则的信息：\n\n" + hot)
+        else:
+            parts.append("# 持久记忆（HOT）\n\n暂无已学习的用户偏好。")
+
+        corrections = self.load_recent_corrections(5)
+        if corrections:
+            lines = []
+            for c in corrections:
+                lines.append(f"- {c['context']} → {c['lesson']}")
+            parts.append("# 最近修正记录\n\n" + "\n".join(lines))
+
+        return "\n\n".join(parts)

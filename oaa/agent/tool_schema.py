@@ -85,11 +85,11 @@ ATOMIC_TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "update_working_checkpoint",
-            "description": "Save key info to working memory (survives across turns)",
+            "description": "Save a user preference, rule, or key fact to persistent HOT memory. Automatically compacted when full. Survives across restarts and sessions.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "key_info": {"type": "string", "description": "Key information to remember"},
+                    "key_info": {"type": "string", "description": "User preference, rule, or key information to remember"},
                 },
                 "required": ["key_info"],
             }
@@ -98,17 +98,45 @@ ATOMIC_TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "start_long_term_update",
-            "description": "Trigger async long-term memory consolidation",
+            "name": "correction_log",
+            "description": "Log a user correction so the model remembers next time. Call when user says '不对', '不是', '你错了', '我告诉过你', or otherwise corrects you.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "memories": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Memories or patterns to consolidate",
-                    },
+                    "context": {"type": "string", "description": "What the user said / what was being discussed"},
+                    "lesson": {"type": "string", "description": "What to do differently next time"},
                 },
+                "required": ["context", "lesson"],
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_recall",
+            "description": "Search across all memory tiers (HOT + corrections + warm) for a keyword. Use when user asks '还记得吗', '我之前说过', or you need to find past learnings.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keyword or phrase to search for"},
+                },
+                "required": ["query"],
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "self_reflect",
+            "description": "After completing significant work, reflect on what went well and what could be improved. Call at the end of multi-step tasks to log lessons learned.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "context": {"type": "string", "description": "What task was completed"},
+                    "reflection": {"type": "string", "description": "What could be better"},
+                    "lesson": {"type": "string", "description": "What to do differently next time (optional)"},
+                },
+                "required": ["context", "reflection"],
             }
         }
     },
@@ -149,6 +177,22 @@ WECHAT_TOOLS_SCHEMA = [
         "description": "Get unread WeChat sessions",
         "parameters": {"type": "object", "properties": {
             "limit": {"type": "integer", "default": 20}}}
+    }},
+    {"type": "function", "function": {
+        "name": "wechat_send_text",
+        "description": "Proactively send a WeChat text message to a contact (wxid or name). Requires WeChat bot to be logged in.",
+        "parameters": {"type": "object", "properties": {
+            "to": {"type": "string", "description": "Recipient wxid (preferred) or name"},
+            "text": {"type": "string", "description": "Message text content"},
+        }, "required": ["to", "text"]}
+    }},
+    {"type": "function", "function": {
+        "name": "wechat_send_typing",
+        "description": "Show or hide '对方正在输入...' typing indicator for a WeChat contact",
+        "parameters": {"type": "object", "properties": {
+            "to": {"type": "string", "description": "Contact wxid"},
+            "status": {"type": "integer", "enum": [1, 0], "description": "1 = show typing, 0 = hide typing", "default": 1},
+        }, "required": ["to"]}
     }},
 ]
 
@@ -240,5 +284,369 @@ EXTENDED_TOOLS_SCHEMA = [
                 "required": ["rows"],
             }
         }
+    },
+    {"type": "function", "function": {
+        "name": "tool_create",
+        "description": "Create a new tool at runtime by providing Python code. After creation, the tool can be called like any built-in tool. The code must define an async def execute(args: dict) -> dict function.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Tool name"},
+            "code": {"type": "string", "description": "Python source code (must define async def execute(args: dict) -> dict)"},
+            "description": {"type": "string", "description": "Tool description"},
+            "parameters": {"type": "object", "description": "JSON schema for parameters"},
+        }, "required": ["name", "code"]}
+    }},
+    {"type": "function", "function": {
+        "name": "tool_delete",
+        "description": "Delete a dynamically created tool",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Tool name to delete"},
+        }, "required": ["name"]}
+    }},
+    {"type": "function", "function": {
+        "name": "tool_list",
+        "description": "List all dynamically created tools",
+        "parameters": {"type": "object", "properties": {}}
+    }},
+    {"type": "function", "function": {
+        "name": "skill_load",
+        "description": "Load a skill's detailed instructions (SKILL.md + SOP.md + knowledge) by name. Use when the current task matches one of the available skills listed in the system prompt.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Skill name to load"},
+        }, "required": ["name"]}
+    }},
+]
+
+FEISHU_TOOLS_SCHEMA = [
+    {"type": "function", "function": {
+        "name": "feishu_send_message",
+        "description": "Send a Feishu message to a chat (oc_xxx) or user (ou_xxx); use --to for chat or --user for user",
+        "parameters": {"type": "object", "properties": {
+            "to": {"type": "string", "description": "Chat ID (oc_xxx) to send to"},
+            "user": {"type": "string", "description": "User open_id (ou_xxx) to send to"},
+            "text": {"type": "string", "description": "Message text content"},
+        }, "anyOf": [{"required": ["to", "text"]}, {"required": ["user", "text"]}]}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_search_user",
+        "description": "Search Feishu users by keyword (name, email, etc.)",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Search keyword (name, email, etc.)"},
+            "limit": {"type": "integer", "default": 20},
+        }, "required": ["query"]}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_get_user",
+        "description": "Get Feishu user info (omit user_id for self)",
+        "parameters": {"type": "object", "properties": {
+            "user_id": {"type": "string", "description": "Open ID to look up (empty = self)"},
+        }}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_calendar_agenda",
+        "description": "View calendar agenda for today or a date range",
+        "parameters": {"type": "object", "properties": {
+            "start": {"type": "string", "description": "Start time ISO 8601 (default: today start)"},
+            "end": {"type": "string", "description": "End time ISO 8601 (default: end of start day)"},
+        }}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_calendar_create",
+        "description": "Create a calendar event and optionally invite attendees",
+        "parameters": {"type": "object", "properties": {
+            "summary": {"type": "string", "description": "Event title"},
+            "start": {"type": "string", "description": "Start time ISO 8601"},
+            "end": {"type": "string", "description": "End time ISO 8601"},
+            "description": {"type": "string", "description": "Event description"},
+            "attendees": {"type": "array", "items": {"type": "string"}, "description": "Attendee open_ids"},
+        }, "required": ["summary", "start", "end"]}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_drive_search",
+        "description": "Search files in Feishu Drive",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Search keyword"},
+            "limit": {"type": "integer", "default": 20},
+        }}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_doc_fetch",
+        "description": "Fetch document content by document token",
+        "parameters": {"type": "object", "properties": {
+            "token": {"type": "string", "description": "Document token (from URL or doc search)"},
+        }, "required": ["token"]}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_doc_create",
+        "description": "Create a new Feishu document",
+        "parameters": {"type": "object", "properties": {
+            "title": {"type": "string", "description": "Document title"},
+            "content": {"type": "string", "description": "Initial content (optional)"},
+        }, "required": ["title"]}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_doc_search",
+        "description": "Search documents by keyword",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Search keyword"},
+        }, "required": ["query"]}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_sheets_read",
+        "description": "Read spreadsheet cell values",
+        "parameters": {"type": "object", "properties": {
+            "spreadsheet_token": {"type": "string", "description": "Spreadsheet token"},
+            "range": {"type": "string", "description": "Range like 'Sheet1!A1:C10' (optional)"},
+        }, "required": ["spreadsheet_token"]}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_sheets_create",
+        "description": "Create a new spreadsheet",
+        "parameters": {"type": "object", "properties": {
+            "title": {"type": "string", "description": "Spreadsheet title"},
+        }, "required": ["title"]}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_base_records",
+        "description": "List records in a bitable table",
+        "parameters": {"type": "object", "properties": {
+            "base_token": {"type": "string", "description": "Base (bitable) token"},
+            "table_id": {"type": "string", "description": "Table ID (starts with tbl)"},
+            "limit": {"type": "integer", "default": 100, "description": "Max records"},
+        }, "required": ["base_token", "table_id"]}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_task_list",
+        "description": "List Feishu tasks",
+        "parameters": {"type": "object", "properties": {
+            "limit": {"type": "integer", "default": 50},
+        }}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_wiki_search",
+        "description": "Search wiki spaces and nodes (uses drive search)",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Search keyword"},
+        }}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_chat_search",
+        "description": "Search visible group chats by name keyword",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Chat name keyword"},
+        }, "required": ["query"]}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_chat_messages",
+        "description": "List recent messages in a Feishu chat",
+        "parameters": {"type": "object", "properties": {
+            "chat_id": {"type": "string", "description": "Chat ID (oc_xxx)"},
+            "limit": {"type": "integer", "default": 20},
+        }, "required": ["chat_id"]}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_drive_upload",
+        "description": "Upload a local file to Feishu Drive",
+        "parameters": {"type": "object", "properties": {
+            "local_path": {"type": "string", "description": "Local file path to upload"},
+            "folder_token": {"type": "string", "description": "Optional target folder token"},
+        }, "required": ["local_path"]}
+    }},
+]
+
+DINGTALK_TOOLS_SCHEMA = [
+    {"type": "function", "function": {
+        "name": "dingtalk_send_message",
+        "description": "Send a DingTalk message to a user by userId",
+        "parameters": {"type": "object", "properties": {
+            "user_id": {"type": "string", "description": "DingTalk userId of the recipient"},
+            "text": {"type": "string", "description": "Message text content (Markdown supported)"},
+            "title": {"type": "string", "description": "Message title (required by DingTalk API)"},
+        }, "required": ["user_id", "text"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_send_group_message",
+        "description": "Send a DingTalk message to a group conversation",
+        "parameters": {"type": "object", "properties": {
+            "group_id": {"type": "string", "description": "Group openConversationId"},
+            "text": {"type": "string", "description": "Message text content (Markdown supported)"},
+            "title": {"type": "string", "description": "Message title (required by DingTalk API)"},
+        }, "required": ["group_id", "text"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_search_user",
+        "description": "Search DingTalk users by keyword (name, etc.)",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Search keyword (name, phone, etc.)"},
+        }, "required": ["query"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_user_info",
+        "description": "Get DingTalk user info (omit user_id for self; comma-separate for batch)",
+        "parameters": {"type": "object", "properties": {
+            "user_id": {"type": "string", "description": "User ID(s), comma-separated (empty = self)"},
+        }}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_chat_search",
+        "description": "Search DingTalk group conversations by name",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Conversation name keyword"},
+        }, "required": ["query"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_chat_list",
+        "description": "List DingTalk top conversations",
+        "parameters": {"type": "object", "properties": {
+            "limit": {"type": "integer", "default": 20},
+        }}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_chat_history",
+        "description": "List recent messages in a DingTalk group conversation",
+        "parameters": {"type": "object", "properties": {
+            "group_id": {"type": "string", "description": "Group openConversationId"},
+            "limit": {"type": "integer", "default": 20},
+        }, "required": ["group_id"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_chat_unread",
+        "description": "List unread DingTalk conversations",
+        "parameters": {"type": "object", "properties": {
+            "limit": {"type": "integer", "default": 20},
+        }}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_calendar_list",
+        "description": "List DingTalk calendar events",
+        "parameters": {"type": "object", "properties": {
+            "limit": {"type": "integer", "default": 50},
+        }}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_calendar_create",
+        "description": "Create a DingTalk calendar event and optionally invite attendees",
+        "parameters": {"type": "object", "properties": {
+            "summary": {"type": "string", "description": "Event title"},
+            "start_time": {"type": "string", "description": "Start time ISO 8601"},
+            "end_time": {"type": "string", "description": "End time ISO 8601"},
+            "description": {"type": "string", "description": "Event description"},
+            "attendees": {"type": "array", "items": {"type": "string"}, "description": "Attendee userIds"},
+        }, "required": ["summary", "start_time", "end_time"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_todo_list",
+        "description": "List DingTalk todo tasks",
+        "parameters": {"type": "object", "properties": {
+            "limit": {"type": "integer", "default": 50},
+        }}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_todo_create",
+        "description": "Create a DingTalk todo task and optionally assign to others",
+        "parameters": {"type": "object", "properties": {
+            "subject": {"type": "string", "description": "Task title"},
+            "description": {"type": "string", "description": "Task description"},
+            "due_time": {"type": "string", "description": "Due time ISO 8601"},
+            "executor_ids": {"type": "array", "items": {"type": "string"}, "description": "Executor userIds"},
+        }, "required": ["subject"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_doc_search",
+        "description": "Search DingTalk documents by keyword",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Search keyword"},
+            "limit": {"type": "integer", "default": 20},
+        }, "required": ["query"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_doc_read",
+        "description": "Read a DingTalk document by node ID",
+        "parameters": {"type": "object", "properties": {
+            "doc_id": {"type": "string", "description": "Document node ID"},
+        }, "required": ["doc_id"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_doc_create",
+        "description": "Create a new DingTalk document",
+        "parameters": {"type": "object", "properties": {
+            "title": {"type": "string", "description": "Document title"},
+            "content": {"type": "string", "description": "Initial content"},
+        }, "required": ["title"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_drive_list",
+        "description": "List files in DingTalk Drive (root if parent_id is empty)",
+        "parameters": {"type": "object", "properties": {
+            "parent_id": {"type": "string", "description": "Optional parent folder ID (empty = root)"},
+            "limit": {"type": "integer", "default": 50},
+        }}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_wiki_search",
+        "description": "Search DingTalk wiki by keyword",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Search keyword"},
+            "limit": {"type": "integer", "default": 20},
+        }, "required": ["query"]}
+    }},
+]
+
+MCP_TOOLS_SCHEMA = [
+    {"type": "function", "function": {
+        "name": "mcp_install",
+        "description": "Install an MCP server npm package and register it for use",
+        "parameters": {"type": "object", "properties": {
+            "package": {"type": "string", "description": "npm package name (e.g. '@anthropic-ai/mcp-playwright')"},
+            "name": {"type": "string", "description": "Config name (defaults to package name)"},
+            "version": {"type": "string", "description": "Version (default: latest)"},
+            "command": {"type": "string", "description": "Command to run (default: npx)"},
+            "args": {"type": "array", "items": {"type": "string"}, "description": "Command arguments"},
+            "env": {"type": "object", "description": "Environment variables for the server"},
+        }, "required": ["package"]}
+    }},
+    {"type": "function", "function": {
+        "name": "mcp_list",
+        "description": "List installed/configured MCP servers",
+        "parameters": {"type": "object", "properties": {}}
+    }},
+    {"type": "function", "function": {
+        "name": "mcp_remove",
+        "description": "Remove an MCP server configuration",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "MCP server name to remove"},
+        }, "required": ["name"]}
+    }},
+]
+
+BROWSER_TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_scan",
+            "description": "Fetch a web page URL and return simplified text content. Use for reading any web page.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to fetch (with or without https://)"},
+                    "timeout": {"type": "integer", "description": "Request timeout in seconds", "default": 10},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web and return top results with title, snippet, and URL",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query string"},
+                    "timeout": {"type": "integer", "description": "Request timeout in seconds", "default": 10},
+                },
+                "required": ["query"],
+            },
+        },
     },
 ]

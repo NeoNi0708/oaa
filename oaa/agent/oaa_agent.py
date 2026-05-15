@@ -8,35 +8,46 @@ from ..evolution.engine import EvolutionEngine
 from ..init import ensure_data_dir, load_identity
 from ..llm import LLMClient
 from ..logging_config import get_logger
+from .browser_tools import BrowserTools
 from .extended_tools import ExtendedTools
 from .handler import BaseHandler
 from .loop import AgentLoop
-from .skill_manager import SkillInfo, SkillManager
-from .tool_schema import ATOMIC_TOOLS_SCHEMA, EXTENDED_TOOLS_SCHEMA, WECHAT_TOOLS_SCHEMA
+from .memory_manager import MemoryManager
+from .skill_manager import SkillManager
+from .tool_schema import ATOMIC_TOOLS_SCHEMA, BROWSER_TOOLS_SCHEMA, DINGTALK_TOOLS_SCHEMA, EXTENDED_TOOLS_SCHEMA, FEISHU_TOOLS_SCHEMA, MCP_TOOLS_SCHEMA, WECHAT_TOOLS_SCHEMA
 from .tools import AtomicTools
 
 logger = get_logger("agent.oaa_agent")
 
 
 class _MergedHandler(BaseHandler):
-    """Dynamic handler that dispatches tool calls to both AtomicTools and ExtendedTools.
+    """Dynamic handler that dispatches tool calls to AtomicTools, ExtendedTools,
+    BrowserTools, and runtime-created dynamic tools.
 
     Uses ``__getattr__`` to delegate ``do_<name>`` lookups to the correct
-    backend, so both sets of tools are available through a single handler
-    instance consumed by ``AgentLoop``.
+    backend, so all tools are available through a single handler instance
+    consumed by ``AgentLoop``.
     """
 
-    def __init__(self, atomic: AtomicTools, extended: ExtendedTools):
+    def __init__(self, atomic: AtomicTools, extended: ExtendedTools, browser: BrowserTools):
         self._atomic = atomic
         self._extended = extended
+        self._browser = browser
 
     def __getattr__(self, name: str):
         if not name.startswith("do_"):
             raise AttributeError(name)
+        # Check hardcoded tool backends
         if hasattr(self._atomic, name):
             return getattr(self._atomic, name)
         if hasattr(self._extended, name):
             return getattr(self._extended, name)
+        if hasattr(self._browser, name):
+            return getattr(self._browser, name)
+        # Fall back to dynamic tools
+        tool_name = name[3:]  # strip "do_"
+        if tool_name in self._dynamic_tools:
+            return lambda args: self._extended._run_dynamic_tool(tool_name, args)
         raise AttributeError(name)
 
 
@@ -46,13 +57,16 @@ class OAAAgent:
     """
 
     def __init__(self, config: AppConfig, permissions: Optional[PermissionsManager] = None,
-                 evolution: Optional[EvolutionEngine] = None):
+                 evolution: Optional[EvolutionEngine] = None, wechat_adapter=None):
         ensure_data_dir(config.data_dir)
 
         self.config = config
         self.identity: dict = load_identity(config.data_dir)
         self.permissions = permissions
         self.evolution = evolution
+
+        # Tiered memory system (HOT + corrections + warm/ + cold/)
+        self.memory = MemoryManager(os.path.join(config.data_dir, "memory"))
 
         self.llm = LLMClient(config.model)
 
@@ -61,24 +75,37 @@ class OAAAgent:
         self.skill_mgr.discover()
 
         self.atomic = AtomicTools(config.data_dir, permissions=permissions)
-        self.extended = ExtendedTools(config.data_dir, permissions=permissions)
+        self.atomic.set_memory_manager(self.memory)
+        self.extended = ExtendedTools(config.data_dir, permissions=permissions, wechat_adapter=wechat_adapter)
+        self.extended.set_skill_manager(self.skill_mgr)
+        self.browser = BrowserTools()
 
-        self._tools_schema = ATOMIC_TOOLS_SCHEMA + EXTENDED_TOOLS_SCHEMA
-        if config.wechat.enabled:
+        self._tools_schema = ATOMIC_TOOLS_SCHEMA + EXTENDED_TOOLS_SCHEMA + BROWSER_TOOLS_SCHEMA + MCP_TOOLS_SCHEMA
+        if config.wechat.enabled and config.wechat.iLink_token:
             self._tools_schema = self._tools_schema + WECHAT_TOOLS_SCHEMA
+        if config.feishu.enabled and config.feishu.app_id:
+            self._tools_schema = self._tools_schema + FEISHU_TOOLS_SCHEMA
+        if config.dingtalk.enabled and config.dingtalk.client_id:
+            self._tools_schema = self._tools_schema + DINGTALK_TOOLS_SCHEMA
 
     def build_handler(self) -> BaseHandler:
-        """Build a merged handler that exposes both atomic and extended tools."""
-        return _MergedHandler(self.atomic, self.extended)
+        """Build a merged handler that exposes atomic, extended, and browser tools."""
+        handler = _MergedHandler(self.atomic, self.extended, self.browser)
+        # Pre-load dynamic tools from manifest (survive restarts)
+        manifest = self.extended._load_dynamic_manifest()
+        for tool_name, entry in manifest.items():
+            handler.register_dynamic(tool_name, entry.get("path", ""), entry.get("parameters", {}))
+        return handler
 
     def build_system_prompt(self, skill_name: str = "") -> str:
-        """Build a system prompt from identity data and optional skill context."""
+        """Build a system prompt from identity data, tools awareness, and optional skill context."""
         if skill_name:
             skill = self.skill_mgr.get(skill_name)
             if skill and skill.skill_md:
-                return skill.build_system_prompt(self.identity)
+                base = skill.build_system_prompt(self.identity)
+                return self._inject_tools_awareness(base)
 
-        return self._identity_only_prompt()
+        return self._inject_tools_awareness(self._identity_only_prompt())
 
     def _identity_only_prompt(self) -> str:
         """Fallback system prompt assembled from identity files only."""
@@ -91,13 +118,85 @@ class OAAAgent:
         ]
         return "\n\n".join(p.strip() for p in parts if p.strip())
 
+    def _build_skill_listing(self) -> str:
+        """Build a formatted list of available skills with descriptions."""
+        skills = self.skill_mgr.list_with_descriptions()
+        if not skills:
+            return "(无)"
+        lines = []
+        for s in skills:
+            desc = s["description"]
+            if len(desc) > 80:
+                desc = desc[:77] + "..."
+            lines.append(f"- `{s['name']}`（{s['category']}）— {desc}")
+        return "\n".join(lines)
+
+    def _inject_tools_awareness(self, base_prompt: str) -> str:
+        """Inject current date, available tools, skill listing, and critical usage rules."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y年%m月%d日")
+
+        tool_list = []
+        for t in self._tools_schema:
+            name = t["function"]["name"]
+            desc = t["function"].get("description", "")
+            tool_list.append(f"- `{name}`: {desc}")
+
+        skill_listing = self._build_skill_listing()
+
+        awareness = f"""\
+# 重要：当前日期与工具使用规则
+
+**当前日期是 {today}**。你的训练数据截止于较早时间，不包含今日的实时信息。
+
+## 强制规则
+
+1. **任何涉及实时数据、当前信息、最新动态的问题，必须调用 web_search 或 web_scan**
+2. **禁止使用训练数据回答关于"今天"、"现在"、"当前"、"最新"的问题**
+3. **搜索结果可能不精确时，用 web_scan 直接访问具体网页获取详细内容**
+4. **复杂多步骤任务先用 plan_create 制定计划，再逐步执行**
+5. **查询天气、电影排片、股票价格、新闻事件等实时信息必须上网搜索，不准凭记忆回答**
+
+## 可用工具
+
+{chr(10).join(tool_list)}
+
+## 可用技能
+
+当遇到以下领域的任务时，调用 `skill_load("技能名称")` 加载对应技能的详细操作指南。
+加载后技能会提供专业知识、SOP 流程和注意事项。如果没有列出匹配的技能，直接用现有工具完成任务即可。
+
+{skill_listing}
+
+## 回复风格
+
+- 执行工具时直接调用，不需要"我来帮你"、"让我试试"之类的铺垫
+- 工具调用细节（参数、返回值）会自动显示，不需要你复述
+- 多步任务只汇报进度节点（工具名+完成状态），不展示中间数据
+- 全部完成后用 1-2 句话总结结果即可
+
+## 你是一个外贸业务 AI 助手
+
+联轴器出口业务。使用 file_write 保存文件到 workspace 目录。使用 excel_xlsx 创建表格。
+复杂任务可调用 code_run 执行 Python 脚本辅助处理。"""
+
+        result = base_prompt + "\n\n" + awareness
+
+        # Inject tiered memory (HOT + recent corrections)
+        memory_prompt = self.memory.build_memory_prompt()
+        result += "\n\n" + memory_prompt
+
+        return result
+
     async def process_message(self, user_input: str, history: list | None = None) -> AsyncGenerator[dict, None]:
         """Process a single user message through the full agent pipeline.
 
-        1. Intent matching → skill switching
-        2. System prompt construction (identity + skill context)
-        3. Handler assembly (atomic + extended tools)
-        4. Agent loop execution (LLM ↔ tool calls, streaming yielded chunks)
+        1. System prompt construction (identity + skill listing)
+        2. Handler assembly (atomic + extended tools)
+        3. Agent loop execution (LLM ↔ tool calls, streaming yielded chunks)
+
+        The model may call skill_load() at any time to retrieve detailed
+        instructions for a specific skill — no pre-matching needed.
 
         Args:
             user_input: The user's message text.
@@ -109,35 +208,19 @@ class OAAAgent:
         """
         logger.info("Processing message: %s...", user_input[:80])
 
-        # Step 1: Intent matching & skill switching
-        matched_skill: Optional[SkillInfo] = self.skill_mgr.match_intent(user_input)
-        if not matched_skill:
-            # LLM fallback when keyword matching fails
-            matched_skill = await self.skill_mgr._llm_match_intent(user_input, self.llm)
-        skill_name = ""
-        extra_tools: Optional[list] = None
+        # Step 1: System prompt (always uses identity-only, model selects skill)
+        system_prompt = self.build_system_prompt()
 
-        if matched_skill:
-            loaded = self.skill_mgr.switch_to(matched_skill.name)
-            if loaded:
-                skill_name = loaded.name
-                logger.info("Skill activated: %s", skill_name)
-                if loaded.tools:
-                    extra_tools = loaded.tools
-
-        # Step 2: System prompt
-        system_prompt = self.build_system_prompt(skill_name)
-
-        # Step 3: Handler
+        # Step 2: Handler
         handler = self.build_handler()
 
-        # Step 4: Agent loop
+        # Step 3: Agent loop
         loop = AgentLoop(
             llm=self.llm,
             handler=handler,
             tools_schema=self._tools_schema,
         )
-        loop.set_skill_context(system_prompt, extra_tools)
+        loop.set_skill_context(system_prompt)
 
         trajectory: list[dict] = []
         final_result = ""
@@ -150,8 +233,6 @@ class OAAAgent:
 
         # Record evolution data
         if self.evolution:
-            if skill_name:
-                self.evolution.record_skill_usage(skill_name)
-                self.evolution.record_trajectory(
-                    skill_name, user_input, trajectory, final_result,
-                )
+            self.evolution.record_trajectory(
+                "default", user_input, trajectory, final_result,
+            )
