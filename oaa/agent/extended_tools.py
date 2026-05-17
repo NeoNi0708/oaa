@@ -19,7 +19,8 @@ class ExtendedTools:
     """Extended tools: email, word, excel, skill tools, planner."""
 
     def __init__(self, data_dir: str, permissions: Optional["PermissionsManager"] = None,
-                 wechat_adapter: Any = None):
+                 wechat_adapter: Any = None,
+                 dingtalk_client_id: str = "", dingtalk_client_secret: str = ""):
         self.data_dir = data_dir
         self.permissions = permissions
         self._wechat_adapter = wechat_adapter
@@ -30,11 +31,36 @@ class ExtendedTools:
         from ..gateway.adapters.feishu_cli import FeishuCLI
         self.feishu = FeishuCLI()
         from ..gateway.adapters.dingtalk_cli import DingTalkCLI
-        self.dingtalk = DingTalkCLI()
+        self.dingtalk = DingTalkCLI(
+            client_id=dingtalk_client_id,
+            client_secret=dingtalk_client_secret,
+        )
 
     def set_wechat_adapter(self, adapter: Any):
         """Inject the active WeChat iLink adapter for proactive sending."""
         self._wechat_adapter = adapter
+
+    def set_dingtalk_adapter(self, adapter: Any):
+        """Share the DingTalk adapter's authenticated DingTalkCLI instance.
+
+        The adapter's ``_dws_cli`` may hold device-auth state from the QR
+        login flow.  Sharing the instance lets ExtendedTools domain tools
+        (chat, doc, calendar, …) reuse the same auth session instead of
+        creating an unauthenticated clone.
+        """
+        if adapter and hasattr(adapter, '_dws_cli'):
+            self.dingtalk = adapter._dws_cli
+
+    def set_feishu_adapter(self, adapter: Any):
+        """Share the Feishu adapter's configured FeishuCLI instance.
+
+        The adapter's ``_lark_cli`` holds the app credentials (App ID/Secret)
+        configured during the QR login flow.  Sharing the instance ensures
+        ExtendedTools domain tools use the same credentials instead of an
+        unconfigured clone.
+        """
+        if adapter and hasattr(adapter, '_lark_cli'):
+            self.feishu = adapter._lark_cli
 
     def set_skill_manager(self, mgr: "SkillManager"):
         """Inject SkillManager reference for skill_load tool."""
@@ -401,6 +427,91 @@ class ExtendedTools:
             result["knowledge"] = skill.knowledge
         return result
 
+    async def do_skill_create(self, args: dict) -> dict:
+        """Create a new skill scaffold with SKILL.md template.
+
+        Creates a skill directory with proper frontmatter and optional
+        resource directories (scripts/, references/, assets/).
+        """
+        name = args.get("name", "")
+        description = args.get("description", "")
+        resources = args.get("resources", "")
+        path = args.get("path", "")
+
+        if not name or not description:
+            return {"status": "error", "msg": "name and description are required"}
+
+        # Validate/normalize name
+        import re
+        normalized = name.strip().lower()
+        normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
+        normalized = normalized.strip("-")
+        if not normalized:
+            return {"status": "error", "msg": "Invalid skill name after normalization"}
+        if len(normalized) > 64:
+            return {"status": "error", "msg": f"Skill name too long: {len(normalized)} > 64"}
+
+        # Determine target directory
+        if not path:
+            path = os.path.join(self.data_dir, "skills", "user_evolved")
+        target = os.path.join(path, normalized)
+        if os.path.exists(target):
+            return {"status": "error", "msg": f"Skill directory already exists: {target}"}
+
+        # Create directory structure
+        try:
+            os.makedirs(target, exist_ok=False)
+        except OSError as exc:
+            return {"status": "error", "msg": f"Cannot create directory: {exc}"}
+
+        # Write SKILL.md from template
+        title = " ".join(word.capitalize() for word in normalized.split("-"))
+        skill_md = f"""---
+name: {normalized}
+description: {description}
+---
+
+# {title}
+
+## Overview
+
+[TODO: Describe what this skill does and when to use it]
+
+## Usage
+
+[TODO: Add instructions, examples, and workflows]
+
+## Resources (optional)
+
+Delete this section if no resources are required.
+
+- **scripts/** — Executable code for automation
+- **references/** — Documentation loaded on demand
+- **assets/** — Output templates and resources
+"""
+        skill_path = os.path.join(target, "SKILL.md")
+        with open(skill_path, "w", encoding="utf-8") as f:
+            f.write(skill_md)
+
+        # Create optional resource directories
+        if resources:
+            allowed = {"scripts", "references", "assets"}
+            for r in resources.split(","):
+                r = r.strip()
+                if r in allowed:
+                    os.makedirs(os.path.join(target, r), exist_ok=True)
+
+        # Trigger skill manager refresh
+        if self._skill_mgr:
+            self._skill_mgr.discover()
+
+        return {
+            "status": "success",
+            "msg": f"Skill '{normalized}' created at {target}",
+            "path": target,
+            "skill_name": normalized,
+        }
+
     async def do_wechat_sessions(self, args: dict) -> dict:
         """Get recent WeChat session list."""
         limit = args.get("limit", 20)
@@ -729,4 +840,100 @@ class ExtendedTools:
         query = args.get("query", "")
         limit = args.get("limit", 20)
         result = await self.dingtalk.wiki_search(query, limit=limit)
+        return {"status": "success", "data": result}
+
+    # ------------------------------------------------------------------
+    # DingTalk Sheet tools
+    # ------------------------------------------------------------------
+
+    async def do_dingtalk_sheet_info(self, args: dict) -> dict:
+        """Get DingTalk sheet info."""
+        workbook_id = args.get("workbook_id", "")
+        sheet_id = args.get("sheet_id", "")
+        if not workbook_id:
+            return {"status": "error", "msg": "workbook_id is required"}
+        result = await self.dingtalk.sheet_info(workbook_id, sheet_id)
+        return {"status": "success", "data": result}
+
+    async def do_dingtalk_sheet_create(self, args: dict) -> dict:
+        """Create a DingTalk spreadsheet."""
+        title = args.get("title", "")
+        if not title:
+            return {"status": "error", "msg": "title is required"}
+        result = await self.dingtalk.sheet_create(title)
+        return {"status": "success", "data": result}
+
+    async def do_dingtalk_sheet_list(self, args: dict) -> dict:
+        """List worksheets in a DingTalk spreadsheet."""
+        node = args.get("node", "")
+        if not node:
+            return {"status": "error", "msg": "node is required"}
+        result = await self.dingtalk.sheet_list(node)
+        return {"status": "success", "data": result}
+
+    async def do_dingtalk_sheet_append(self, args: dict) -> dict:
+        """Append rows to a DingTalk worksheet."""
+        node = args.get("node", "")
+        sheet_id = args.get("sheet_id", "")
+        values = args.get("values", "")
+        if not node or not sheet_id or not values:
+            return {"status": "error", "msg": "node, sheet_id, and values are required"}
+        result = await self.dingtalk.sheet_append(node, sheet_id, values)
+        return {"status": "success", "data": result}
+
+    async def do_dingtalk_sheet_read(self, args: dict) -> dict:
+        """Read cell values from a DingTalk worksheet."""
+        node = args.get("node", "")
+        sheet_id = args.get("sheet_id", "")
+        range_str = args.get("range", "")
+        if not node or not sheet_id:
+            return {"status": "error", "msg": "node and sheet_id are required"}
+        result = await self.dingtalk.sheet_read(node, sheet_id, range_str)
+        return {"status": "success", "data": result}
+
+    # ------------------------------------------------------------------
+    # DingTalk AITable (多维表) tools
+    # ------------------------------------------------------------------
+
+    async def do_dingtalk_base_create(self, args: dict) -> dict:
+        """Create a DingTalk AI table base (多维表)."""
+        name = args.get("name", "")
+        if not name:
+            return {"status": "error", "msg": "name is required"}
+        result = await self.dingtalk.aitable_base_create(name)
+        return {"status": "success", "data": result}
+
+    async def do_dingtalk_base_list(self, args: dict) -> dict:
+        """List DingTalk AI table bases."""
+        limit = args.get("limit", 20)
+        result = await self.dingtalk.aitable_base_list(limit=limit)
+        return {"status": "success", "data": result}
+
+    async def do_dingtalk_table_create(self, args: dict) -> dict:
+        """Create a data table in a DingTalk AI table base."""
+        base_id = args.get("base_id", "")
+        name = args.get("name", "")
+        if not base_id or not name:
+            return {"status": "error", "msg": "base_id and name are required"}
+        result = await self.dingtalk.aitable_table_create(base_id, name)
+        return {"status": "success", "data": result}
+
+    async def do_dingtalk_record_create(self, args: dict) -> dict:
+        """Add records to a DingTalk AI table."""
+        base_id = args.get("base_id", "")
+        table_id = args.get("table_id", "")
+        records = args.get("records", "")
+        if not base_id or not table_id or not records:
+            return {"status": "error", "msg": "base_id, table_id, and records are required"}
+        result = await self.dingtalk.aitable_record_create(base_id, table_id, records)
+        return {"status": "success", "data": result}
+
+    async def do_dingtalk_record_query(self, args: dict) -> dict:
+        """Query records from a DingTalk AI table."""
+        base_id = args.get("base_id", "")
+        table_id = args.get("table_id", "")
+        limit = args.get("limit", 100)
+        if not base_id or not table_id:
+            return {"status": "error", "msg": "base_id and table_id are required"}
+        result = await self.dingtalk.aitable_record_query(base_id, table_id, limit)
         return {"status": "success", "data": result}

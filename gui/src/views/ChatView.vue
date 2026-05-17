@@ -6,15 +6,15 @@
         <div class="title-row">
           <h1 class="chat-title">二愣</h1>
           <span :class="['phase-pill', agentPhase]">{{ agentPhaseLabel }}</span>
-          <div class="model-selector" v-if="Object.keys(modelList).length > 0">
-            <button class="model-btn" @click="toggleModelMenu" title="切换模型">
+          <div class="model-selector" v-if="Object.keys(filteredModelList).length > 0">
+            <button class="model-btn" @click.stop="toggleModelMenu" title="切换模型">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 10 10H12V2z"/><path d="M12 2a10 10 0 0 1 10 10h-10V2z"/></svg>
               <span class="model-label">{{ activeModelLabel }}</span>
               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
             </button>
             <div v-if="showModelMenu" class="model-menu" @click.stop>
               <div
-                v-for="(mdl, prov) in modelList"
+                v-for="(mdl, prov) in filteredModelList"
                 :key="prov"
                 :class="['model-item', { active: prov === activeProvider }]"
                 @click="switchModel(prov)"
@@ -85,20 +85,11 @@
       <div v-for="(msg, i) in messages" :key="i" :class="['msg-row', msg.role]">
         <div class="msg-avatar">
           <span v-if="msg.role === 'assistant'" class="avatar-bot">二</span>
-          <span v-else-if="msg.role === 'tool'" class="avatar-tool">工</span>
           <span v-else class="avatar-user">恒</span>
         </div>
         <div class="msg-content">
           <div class="msg-sender">{{ roleLabel(msg) }}</div>
-          <div v-if="msg.role === 'tool'" class="msg-tool-bubble">
-            <div class="tool-header">{{ msg.name || 'Tool' }}</div>
-            <div v-if="msg.result" class="tool-result" v-html="renderContent(msg.result)"></div>
-            <div v-else class="tool-calling">
-              <span class="tool-spinner"></span>
-              Calling {{ msg.name }}...
-            </div>
-          </div>
-          <div v-else class="msg-bubble" v-html="renderContent(msg.content)"></div>
+          <div class="msg-bubble" v-html="renderContent(msg.content)"></div>
         </div>
       </div>
 
@@ -158,40 +149,40 @@
 
     <!-- Input -->
     <div class="input-area">
-      <div class="input-wrapper">
-        <button v-if="loading || streaming" class="stop-btn" @click="stopAgent" title="停止生成">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
-        </button>
-        <button v-else class="attach-btn" title="附件">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
-          </svg>
-        </button>
-        <textarea
-          v-model="input"
-          @keydown.enter.prevent="sendMsg"
-          placeholder="输入消息，Enter 发送"
-          rows="1"
-          class="input-field"
-          @input="autoResize"
-        ></textarea>
-        <button
-          class="send-btn"
-          @click="sendMsg"
-          :disabled="!input.trim() || !connected"
-          title="发送"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
-          </svg>
-        </button>
-      </div>
+      <button class="attach-btn" @click="triggerAttach" title="附件">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+        </svg>
+      </button>
+      <button v-if="loading || streaming" class="stop-btn" @click="stopAgent" title="停止生成">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+        <span class="stop-label">停止</span>
+      </button>
+      <input ref="fileInput" type="file" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv,.json,.py,.js,.ts,.vue,.html,.css,.md" @change="handleFiles" style="display:none" />
+      <textarea
+        v-model="input"
+        @keydown.enter.prevent="sendMsg"
+        placeholder="输入消息，Enter 发送"
+        rows="1"
+        class="input-field"
+        @input="autoResize"
+      ></textarea>
+      <button
+        class="send-btn"
+        @click="sendMsg"
+        :disabled="!input.trim() || !connected"
+        title="发送"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+        </svg>
+      </button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
 import { marked } from 'marked'
 import { useWebSocket, type ChatMessage } from '../composables/useWebSocket'
 import { useAgentStatus } from '../composables/useAgentStatus'
@@ -222,12 +213,88 @@ const { phase: agentPhase, phaseLabel: agentPhaseLabel, chatCount, formatUptime 
 const input = ref('')
 const loading = ref(false)
 const msgContainer = ref<HTMLElement | null>(null)
+const fileInput = ref<HTMLInputElement | null>(null)
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024  // 10 MB
+
+function triggerAttach() {
+  fileInput.value?.click()
+}
+
+async function handleFiles(e: Event) {
+  const target = e.target as HTMLInputElement
+  const files = target.files
+  if (!files || files.length === 0) return
+
+  const parts: string[] = []
+  for (const file of Array.from(files)) {
+    if (file.size > MAX_FILE_SIZE) {
+      parts.push(`[文件: ${file.name} (超过 10MB 限制，已跳过)]`)
+      continue
+    }
+    const base64 = await fileToBase64(file)
+    if (file.type.startsWith('image/')) {
+      parts.push(`[图片: ${file.name}](data:${file.type};base64,${base64})`)
+    } else {
+      const text = await readFileAsText(file).catch(() => '')
+      if (text) {
+        parts.push(`[文件: ${file.name}]\n\`\`\`\n${text.slice(0, 50000)}\n\`\`\``)
+      } else {
+        parts.push(`[文件: ${file.name}](data:${file.type || 'application/octet-stream'};base64,${base64})`)
+      }
+    }
+  }
+  target.value = ''  // reset so same file can be re-selected
+
+  if (parts.length === 0) return
+
+  // Prepend to input or send directly
+  const text = parts.join('\n\n')
+  if (input.value.trim()) {
+    input.value += '\n\n' + text
+  } else {
+    input.value = text
+  }
+  sendMsg()
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result as string
+      resolve(result.split(',')[1] || '')
+    }
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
+function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = reject
+    reader.readAsText(file)
+  })
+}
 
 // Model switching
 const modelList = ref<Record<string, ModelInfo>>({})
 const activeProvider = ref('')
 const showModelMenu = ref(false)
 const activeModelLabel = ref('')
+
+const filteredModelList = computed(() => {
+  const result: Record<string, ModelInfo> = {}
+  for (const [prov, info] of Object.entries(modelList.value)) {
+    if (info.api_key && info.model_id) result[prov] = info
+  }
+  if (activeProvider.value && !result[activeProvider.value] && modelList.value[activeProvider.value]) {
+    result[activeProvider.value] = modelList.value[activeProvider.value]
+  }
+  return result
+})
 
 function toggleModelMenu() { showModelMenu.value = !showModelMenu.value }
 
@@ -288,8 +355,10 @@ _modelWatchStop = watch(connected, (val) => {
   }
 })
 
-function renderContent(text: string) {
-  return marked.parse(text, { breaks: true })
+function renderContent(text: any) {
+  const safe = typeof text === 'string' ? text : JSON.stringify(text, null, 2)
+  return marked.parse(safe, { breaks: true })
+    .replace(/<a /g, '<a target="_blank" rel="noopener noreferrer" ')
 }
 
 function roleLabel(msg: ChatMessage) {
@@ -767,27 +836,15 @@ function autoResize(e: Event) {
 
 /* --- Input area --- */
 .input-area {
-  padding: var(--oaa-space-3) var(--oaa-space-5);
-  border-top: 1px solid var(--oaa-glass-border);
-}
-
-.input-wrapper {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: var(--oaa-space-2);
-  background: rgba(30, 41, 59, 0.7);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  margin: 0 var(--oaa-space-4) var(--oaa-space-3);
+  padding: var(--oaa-space-1) var(--oaa-space-3);
   border: 1px solid var(--oaa-border-default);
   border-radius: var(--oaa-radius-lg);
-  padding: var(--oaa-space-2) var(--oaa-space-2) var(--oaa-space-2) var(--oaa-space-3);
-  transition:
-    border-color var(--oaa-transition-fast),
-    box-shadow var(--oaa-transition-fast);
-}
-.input-wrapper:focus-within {
-  border-color: var(--oaa-border-focus);
-  box-shadow: 0 0 0 3px var(--oaa-primary-light), 0 0 20px rgba(59, 130, 246, 0.08);
+  background: rgba(30, 41, 59, 0.35);
+  min-height: 44px;
 }
 
 .input-field {
@@ -797,10 +854,12 @@ function autoResize(e: Event) {
   color: var(--oaa-color-primary);
   font-family: inherit;
   font-size: var(--oaa-text-sm);
-  line-height: 1.5;
+  line-height: 1.3;
+  padding: 0;
   resize: none;
   outline: none;
   max-height: 160px;
+  align-self: center;
 }
 .input-field::placeholder {
   color: var(--oaa-color-disabled);
@@ -826,10 +885,10 @@ function autoResize(e: Event) {
 }
 
 .stop-btn {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 32px;
+  gap: var(--oaa-space-1);
+  padding: 0 var(--oaa-space-3);
   height: 32px;
   border: none;
   border-radius: var(--oaa-radius-md);
@@ -839,10 +898,15 @@ function autoResize(e: Event) {
   transition: background var(--oaa-transition-fast), transform var(--oaa-transition-fast);
   flex-shrink: 0;
   animation: stopPulse 1.2s ease-in-out infinite;
+  font-size: var(--oaa-text-xs);
+  font-weight: 500;
+  white-space: nowrap;
 }
 .stop-btn:hover {
   background: rgba(239, 68, 68, 0.3);
-  transform: scale(1.08);
+}
+.stop-label {
+  line-height: 1;
 }
 
 @keyframes stopPulse {
@@ -915,70 +979,6 @@ function autoResize(e: Event) {
 @keyframes statusPulse {
   0%, 100% { opacity: 0.4; }
   50% { opacity: 1; }
-}
-
-/* --- Tool message styling --- */
-.msg-row.tool {
-  align-self: center;
-  max-width: 90%;
-}
-
-.avatar-tool {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: var(--oaa-radius-md);
-  font-size: var(--oaa-text-sm);
-  font-weight: 700;
-  background: var(--oaa-warning);
-  color: #fff;
-}
-
-.msg-tool-bubble {
-  border: 1px solid var(--oaa-border-subtle);
-  border-radius: var(--oaa-radius-md);
-  overflow: hidden;
-  font-size: var(--oaa-text-sm);
-}
-
-.tool-header {
-  padding: var(--oaa-space-1) var(--oaa-space-3);
-  background: var(--oaa-bg-input);
-  color: var(--oaa-color-muted);
-  font-family: var(--oaa-font-mono);
-  font-size: var(--oaa-text-xs);
-  border-bottom: 1px solid var(--oaa-border-subtle);
-}
-
-.tool-result {
-  padding: var(--oaa-space-3) var(--oaa-space-4);
-  background: var(--oaa-bg-surface);
-  color: var(--oaa-color-secondary);
-  line-height: 1.5;
-}
-
-.tool-calling {
-  display: flex;
-  align-items: center;
-  gap: var(--oaa-space-2);
-  padding: var(--oaa-space-2) var(--oaa-space-3);
-  background: var(--oaa-bg-surface);
-  color: var(--oaa-color-muted);
-}
-
-.tool-spinner {
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--oaa-border-subtle);
-  border-top-color: var(--oaa-primary);
-  border-radius: 50%;
-  animation: spin 0.6s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
 }
 
 /* --- Streaming bubble --- */

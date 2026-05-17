@@ -314,6 +314,16 @@ EXTENDED_TOOLS_SCHEMA = [
             "name": {"type": "string", "description": "Skill name to load"},
         }, "required": ["name"]}
     }},
+    {"type": "function", "function": {
+        "name": "skill_create",
+        "description": "Create a new skill scaffold with SKILL.md template. Useful when the user asks to create a new skill for a recurring task pattern.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Skill name (lowercase, hyphen-separated)"},
+            "description": {"type": "string", "description": "Short description for YAML frontmatter"},
+            "resources": {"type": "string", "description": "Optional: comma-separated resource dirs (scripts,references,assets)"},
+            "path": {"type": "string", "description": "Optional: output directory (defaults to skills dir)"},
+        }, "required": ["name", "description"]}
+    }},
 ]
 
 FEISHU_TOOLS_SCHEMA = [
@@ -588,6 +598,86 @@ DINGTALK_TOOLS_SCHEMA = [
             "query": {"type": "string", "description": "Search keyword"},
             "limit": {"type": "integer", "default": 20},
         }, "required": ["query"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_sheet_info",
+        "description": "Get DingTalk sheet info (workbook metadata and sheets list)",
+        "parameters": {"type": "object", "properties": {
+            "workbook_id": {"type": "string", "description": "Sheet node ID / URL"},
+            "sheet_id": {"type": "string", "description": "Optional sheet ID or name"},
+        }, "required": ["workbook_id"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_sheet_create",
+        "description": "Create a new DingTalk spreadsheet",
+        "parameters": {"type": "object", "properties": {
+            "title": {"type": "string", "description": "Spreadsheet name"},
+        }, "required": ["title"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_sheet_list",
+        "description": "List all worksheets in a DingTalk spreadsheet",
+        "parameters": {"type": "object", "properties": {
+            "node": {"type": "string", "description": "Sheet node ID or URL"},
+        }, "required": ["node"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_sheet_append",
+        "description": "Append rows to a DingTalk worksheet",
+        "parameters": {"type": "object", "properties": {
+            "node": {"type": "string", "description": "Sheet node ID or URL"},
+            "sheet_id": {"type": "string", "description": "Sheet ID or name"},
+            "values": {"type": "string", "description": "2D JSON array of values, e.g. '[['a','b'],['c','d']]'"},
+        }, "required": ["node", "sheet_id", "values"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_sheet_read",
+        "description": "Read cell values from a DingTalk worksheet",
+        "parameters": {"type": "object", "properties": {
+            "node": {"type": "string", "description": "Sheet node ID or URL"},
+            "sheet_id": {"type": "string", "description": "Sheet ID or name"},
+            "range": {"type": "string", "description": "Range like 'A1:C10' (optional)"},
+        }, "required": ["node", "sheet_id"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_base_create",
+        "description": "Create a DingTalk AI table base (多维表)",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Base name"},
+        }, "required": ["name"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_base_list",
+        "description": "List DingTalk AI table bases",
+        "parameters": {"type": "object", "properties": {
+            "limit": {"type": "integer", "default": 20},
+        }}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_table_create",
+        "description": "Create a data table in a DingTalk AI table base",
+        "parameters": {"type": "object", "properties": {
+            "base_id": {"type": "string", "description": "Base ID"},
+            "name": {"type": "string", "description": "Table name"},
+        }, "required": ["base_id", "name"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_record_create",
+        "description": "Add records to a DingTalk AI table",
+        "parameters": {"type": "object", "properties": {
+            "base_id": {"type": "string", "description": "Base ID"},
+            "table_id": {"type": "string", "description": "Table ID"},
+            "records": {"type": "string", "description": "JSON array of records"},
+        }, "required": ["base_id", "table_id", "records"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_record_query",
+        "description": "Query records from a DingTalk AI table",
+        "parameters": {"type": "object", "properties": {
+            "base_id": {"type": "string", "description": "Base ID"},
+            "table_id": {"type": "string", "description": "Table ID"},
+            "limit": {"type": "integer", "default": 100},
+        }, "required": ["base_id", "table_id"]}
     }},
 ]
 
