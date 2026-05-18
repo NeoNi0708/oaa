@@ -1,6 +1,6 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-18（P0 Phase 1-3 全部完成，闭环计划已验证）
+> 最后更新：2026-05-18（P0 闭环全部完成 + evolution-self_improve 深度集成）
 
 ---
 
@@ -420,12 +420,12 @@ IdleInspector 只做模式检测和提案，不做决定。`code_exec` 出错时
 | 68 | 钉钉适配器 | 适配器已实现（Stream SDK 接收 + REST 发送 + QR 登录），更新 GUI 交互 | `dingtalk.py`, `ConnectionsView.vue` |
 | 69 | 飞书适配器 | 适配器已实现（WS 事件订阅 + REST 发送 + QR 登录），更新 GUI 交互 | `feishu.py`, `ConnectionsView.vue` |
 
-### P2 — 待验证
+### P2 — 已验证（C1/C2 已完成）
 
-| # | 问题 | 说明 |
-|---|------|------|
-| 70 | 技能进化 | `EvolutionEngine` 是否正常工作 |
-| 71 | 自生技能 | `SkillManager` 动态加载能力 |
+| # | 问题 | 说明 | 状态 |
+|---|------|------|------|
+| 70 | 技能进化 | `EvolutionEngine` 统计面板 + 自优化建议闭环 | ✅ GUI 面板已展示，IdleInspector 串联 |
+| 71 | 自生技能 | `SkillManager` 动态加载可视化 | ✅ 详情面板 + 搜索 + 加载按钮完善 |
 
 ### P3 — 已知限制
 
@@ -549,3 +549,45 @@ IdleInspector 只做模式检测和提案，不做决定。`code_exec` 出错时
 
 所有 14 个原子工具已完成 @agent_tool 迁移，对应 schema 从 tool_schema.py 移除（auto-gen）。
 还原留 2 个复杂工具的 legacy schema 和 4 个 WeChat stub（无需迁移）。
+
+---
+
+## 本次会话（2026-05-18 续）— A2/A3 + C1/C2 + evolution 深度集成
+
+### A2：_exec_runner 子进程超时看门狗
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `_exec_runner.py` | +threading timeout | 新增 `--timeout N` 参数，线程级看门狗，超时后 `sys.exit(1)` |
+| `tools.py` | 传递 timeout | `do_code_exec` 调用时传入 `--timeout` 参数与调用方一致 |
+
+### A3：LLM 摘要式消息压缩
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `loop.py` | `_compact_messages` → async + `_summarize_with_llm` | 首次压缩时 LLM 生成中文摘要注入为 system 消息，保留对话上下文 |
+
+### C1：进化引擎统计面板
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `SkillView.vue` | +演化统计仪表盘 | 4 个 stat 卡片（使用次数/固化技能/SOP执行/待处理建议）+ 使用排行条形图 + 已固化技能列表 |
+
+### C2：技能详情面板 + 搜索
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `SkillView.vue` | +搜索框 + 可展开详情 | 实时搜索过滤、点击展开详情面板（工具/知识/SKILL.md/SOP.md 三个标签页）、加载按钮 |
+| `management.py` | +`get_skill_detail` + `switch_skill` | 后端新 handler：返回完整技能信息、切换当前技能 |
+
+### 进化引擎 + self_improve 深度集成
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `engine.py` | +`get_auto_refinements()` | 结构化提案：SOP 步骤跳过检测（≥3 次 → self_improve 移除）、技能使用里程碑（5 的倍数 → code_exec 优化分析） |
+| `idle_inspector.py` | +evolution 注入 + 4 阶段检查 | Phase 1 到期任务 → Phase 2 进化引擎 SOP/技能优化 → Phase 3 工具失败自修复 → Phase 4 修正模式自我提示词更新 |
+| `idle_inspector.py` | `_check_tool_failures` 增强 | 按工具名映射到源代码文件（tools.py/extended_tools.py），生成精确的 `read_own_source` → `self_improve` → 清 pycache → `reload_module` 修复链 |
+| `idle_inspector.py` | +`_check_correction_patterns` | 检测 Repeated Correction（同 lesson ≥2 次），生成 `modify_own_prompt` 提案，将规则写入 agents 段 |
+| `oaa_agent.py` | evolution → IdleInspector | 将 evolution 实例注入 constructor，使所有进化数据对检查器可见 |
+
+**流程闭环**：进化引擎记录使用模式 → IdleInspector 空闲时识别优化点 → 生成结构化提案 → LLM 自选 `self_improve`/`modify_own_prompt`/`code_exec` 执行 → 验证生效 → 记录到 memory 供后续学习
