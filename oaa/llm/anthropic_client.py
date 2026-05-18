@@ -13,6 +13,7 @@ class AnthropicResponse:
     content: str = ""
     tool_calls: list = field(default_factory=list)
     thinking: str = ""
+    finish_reason: str = ""
 
 
 def _openai_tool_to_anthropic(tool: dict) -> dict:
@@ -122,6 +123,7 @@ class AnthropicClient:
         text_content = ""
         tool_use_blocks: dict[int, dict] = {}
         thinking_content = ""
+        stop_reason = ""
 
         async with client.messages.stream(**kwargs) as stream:
             async for event in stream:
@@ -143,6 +145,9 @@ class AnthropicClient:
                             "name": event.content_block.name,
                             "arguments": "",
                         }
+                elif event.type == "message_delta":
+                    if event.delta.stop_reason:
+                        stop_reason = event.delta.stop_reason
 
         from .client import ToolCall, ToolCallFunction
         result_tool_calls = []
@@ -153,10 +158,11 @@ class AnthropicClient:
                 function=ToolCallFunction(name=tb["name"], arguments=tb["arguments"]),
             ))
 
-        logger.debug("anthropic chat done: text_len=%d tool_calls=%d",
-                       len(text_content), len(result_tool_calls))
+        logger.debug("anthropic chat done: text_len=%d tool_calls=%d stop_reason=%s",
+                       len(text_content), len(result_tool_calls), stop_reason)
         return AnthropicResponse(
             content=text_content,
             tool_calls=result_tool_calls,
             thinking=thinking_content,
+            finish_reason=stop_reason,
         )

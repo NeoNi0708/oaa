@@ -26,6 +26,7 @@ class LLMResponse:
     content: str = ""
     tool_calls: list = field(default_factory=list)
     thinking: str = ""
+    finish_reason: str = ""  # "stop" | "length" | "tool_calls" | "content_filter" | "end_turn" | "max_tokens"
 
 
 class _OpenAIClient:
@@ -33,13 +34,16 @@ class _OpenAIClient:
 
     def __init__(self, config: ModelConfig):
         self.config = config
+        base_url = config.base_url.rstrip("/")
+        if base_url.endswith("/chat/completions"):
+            base_url = base_url[:-len("/chat/completions")]
         import httpx
         http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
             limits=httpx.Limits(max_keepalive_connections=2, max_connections=10),
         )
         self._client = AsyncOpenAI(
-            base_url=config.base_url,
+            base_url=base_url,
             api_key=config.api_key,
             http_client=http_client,
             max_retries=0,
@@ -53,18 +57,25 @@ class _OpenAIClient:
         kwargs: dict = {"model": self.config.model_id, "messages": messages, "stream": True}
         if self._tools:
             kwargs["tools"] = self._tools
+        if self.config.max_tokens:
+            kwargs["max_tokens"] = self.config.max_tokens
 
-        logger.debug("openai chat: model=%s msg_count=%d tool_count=%d url=%s",
-                       self.config.model_id, len(messages), len(self._tools), self.config.base_url)
+        logger.debug("openai chat: model=%s msg_count=%d tool_count=%d max_tokens=%d url=%s",
+                       self.config.model_id, len(messages), len(self._tools),
+                       self.config.max_tokens, self.config.base_url)
 
         stream = await self._client.chat.completions.create(**kwargs)
         content = ""
         tool_calls: dict[int, dict] = {}
         thinking = ""
+        finish_reason = ""
 
         async for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
             if not delta:
+                # Capture finish_reason from the last choice (non-delta chunk)
+                if chunk.choices and chunk.choices[0].finish_reason:
+                    finish_reason = chunk.choices[0].finish_reason
                 continue
             if delta.content:
                 content += delta.content
@@ -81,6 +92,9 @@ class _OpenAIClient:
                         tool_calls[idx]["function"]["name"] = tc.function.name
                     if tc.function.arguments:
                         tool_calls[idx]["function"]["arguments"] += tc.function.arguments
+            # Capture finish_reason if present on this chunk
+            if chunk.choices and chunk.choices[0].finish_reason:
+                finish_reason = chunk.choices[0].finish_reason
 
         result_tool_calls = []
         for idx in sorted(tool_calls):
@@ -90,8 +104,9 @@ class _OpenAIClient:
                 function=ToolCallFunction(name=tc["function"]["name"], arguments=tc["function"]["arguments"]),
             ))
 
-        logger.debug("openai chat done: text_len=%d tool_calls=%d", len(content), len(result_tool_calls))
-        return LLMResponse(content=content, tool_calls=result_tool_calls, thinking=thinking)
+        logger.debug("openai chat done: text_len=%d tool_calls=%d finish_reason=%s",
+                       len(content), len(result_tool_calls), finish_reason)
+        return LLMResponse(content=content, tool_calls=result_tool_calls, thinking=thinking, finish_reason=finish_reason)
 
 
 class LLMClient:
@@ -125,4 +140,5 @@ class LLMClient:
             content=response.content,
             tool_calls=response.tool_calls,
             thinking=response.thinking,
+            finish_reason=response.finish_reason if hasattr(response, "finish_reason") else "",
         )

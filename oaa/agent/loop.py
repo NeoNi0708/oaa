@@ -16,6 +16,7 @@ logger = get_logger("agent.loop")
 _MAX_RETRIES = 3
 _BASE_DELAY = 1.0
 _LLM_TIMEOUT = 90.0  # hard cap per LLM call, outer safety net beyond SDK timeout
+_MAX_CONTINUATIONS = 5  # max auto-continuation turns for truncated responses
 
 
 def _friendly_error(exc: Exception) -> str:
@@ -58,12 +59,16 @@ class AgentLoop:
         handler: "BaseHandler",
         tools_schema: list,
         max_turns: int = 70,
+        memory_mgr=None,
     ):
         self.llm = llm
         self.handler = handler
         self.tools_schema = tools_schema
         self.max_turns = max_turns
+        self._memory_mgr = memory_mgr
         self._system_prompt = "You are OAA Agent."
+        self._last_llm_content = ""
+        self._continuation_count = 0
 
     def set_skill_context(self, system_prompt: str, extra_tools: Optional[list] = None):
         """Set system prompt and optionally add skill-specific tools."""
@@ -144,9 +149,28 @@ class AgentLoop:
 
             if content:
                 yield {"type": "llm_output", "content": content}
+                self._last_llm_content = content
+
+            # Auto-continuation: if response was truncated (max_tokens hit) with no tool calls,
+            # re-prompt the LLM to continue from where it left off
+            if not tool_calls and response.finish_reason in ("length", "max_tokens"):
+                if self._continuation_count < _MAX_CONTINUATIONS:
+                    self._continuation_count += 1
+                    logger.info("Response truncated (turn %d), auto-continuing (%d/%d)",
+                                turn, self._continuation_count, _MAX_CONTINUATIONS)
+                    messages.append({
+                        "role": "user",
+                        "content": "【系统提示：你的回复在输出时被截断，请从上次中断处继续完成，不要重复已经输出的内容】"
+                    })
+                    yield {"type": "status", "content": f"输出被截断，正在继续({self._continuation_count}/{_MAX_CONTINUATIONS})..."}
+                    continue
+                else:
+                    logger.warning("Response truncated, max continuations reached")
+                    content += "\n\n[已达到连续续写上限，回复可能不完整]"
 
             if not tool_calls:
-                yield {"type": "done", "content": content}
+                final_content = content or self._last_llm_content or ""
+                yield {"type": "done", "content": final_content}
                 return
 
             # Execute tools and yield results
@@ -162,14 +186,23 @@ class AgentLoop:
                 yield {"type": "tool_call", "name": tool_name, "args": args}
                 try:
                     result = await self.handler.dispatch(tool_name, args)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
                     logger.error("Tool %s failed: %s", tool_name, exc)
                     result = {"status": "error", "msg": str(exc)}
                 yield {"type": "tool_result", "name": tool_name, "result": result}
 
+                # Record tool failures for self-diagnosis
+                if isinstance(result, dict) and result.get("status") == "error" and self._memory_mgr:
+                    try:
+                        self._memory_mgr.add_tool_failure(tool_name, args, str(result.get("msg", "")))
+                    except Exception as rec_err:
+                        logger.warning("Failed to record tool failure: %s", rec_err)
+
                 result_str = str(result)
-                if len(result_str) > 2000:
-                    result_str = result_str[:2000] + "...[truncated]"
+                if len(result_str) > 8000:
+                    result_str = result_str[:8000] + "...[truncated]"
                 tool_result_entries.append({
                     "tool_use_id": tc.id,
                     "content": result_str,

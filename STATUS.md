@@ -1,6 +1,6 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-18（修复 A3 空泡：取消任务静默退出 + 前端 streaming/loading 状态修正）
+> 最后更新：2026-05-18（A3 空泡 + 输出截断自动续写 + 代码审查 已提交）
 
 ---
 
@@ -157,15 +157,6 @@
 ---
 
 ## 待修复
-
-### 本轮修复（输出截断续写）
-
-| # | 问题 | 涉及文件 | 修复 |
-|---|------|---------|------|
-| A3 | 空聊天气泡（agent 假死） | `desktop.py`, `useWebSocket.ts`, `ChatView.vue` | ⑤ 后端 `CancelledError` 检查 `_chat_tasks` 是否已被替换 — 被消息替换时静默退出（stop_chat 仍发送正常 done）⑥ `send()` 重置 `streamingContent` 防止新旧内容混淆 ⑦ 移除 `watch(streaming)` loading 控制系统，避免取消任务时 loading 被错误关闭 |
-| — | 输出截断自动续写 | `loop.py`, `client.py`, `anthropic_client.py` | 新增 `finish_reason` 追踪 → `response.finish_reason in ("length","max_tokens")` → 自动追加续写提示（最多 5 次）→ `_MAX_CONTINUATIONS` 常量的完整链路。tool 结果截断上限从 2000→8000 字符。 |
-
----
 
 ### P0 — 闭环补全计划（OAA v2）
 
@@ -407,6 +398,12 @@ IdleInspector 只做模式检测和提案，不做决定。`code_exec` 出错时
 | A3 | 空聊天气泡（agent 假死） — 新消息替换旧任务时，后端发空 done 导致前端 loading 被错误关闭、streaming 与旧任务残留混合 | `desktop.py`, `useWebSocket.ts`, `ChatView.vue` | ⑤ `CancelledError` 检查 `_chat_tasks` 是否已被替换 → 被替换时静默退出（stop_chat 仍发送 done）⑥ `send()` 重置 `streamingContent` 防止内容混淆 ⑦ 移除 `watch(streaming)` 激进的 loading 控制 |
 | — | stop_chat 取消 task 后仍调用 management handler 设 idle 状态（双重设置） | `desktop.py` | `_handle_management` 中 stop_chat 分支提前 return |
 | — | 已知：快速换消息时 streaming 气泡有短暂间隙 | — | `send()` 清空 `streamingContent` 后到新任务首块到达前视觉空白 < 500ms，用户刚发消息注意力不在等待，可接受 |
+
+### 输出截断自动续写（2026-05-18）
+
+| # | 问题 | 涉及文件 | 修复 |
+|---|------|---------|------|
+| — | 输出截断自动续写 | `loop.py`, `client.py`, `anthropic_client.py` | `LLMResponse.finish_reason` 字段，OpenAI stream 和 Anthropic message_delta 分别捕获 → `loop.run()` 检测 `finish_reason in ("length","max_tokens")` 且无 tool_calls 时自动追加续写提示（最多 5 次），`_last_llm_content` 兜底空 content 场景。tool 结果截断 2000→8000 字符。 |
 
 ### 命令行验证通过（2026-05-13 01:00）
 
