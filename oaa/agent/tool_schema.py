@@ -155,13 +155,16 @@ EXTENDED_TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "word_doc",
-            "description": "Generate a Word document",
+            "description": "Generate a Word (.docx) document with headings, tables, paragraphs, and styles. Prefer named styles over direct formatting. Supports: #/##/### headings, * bullets, > quotes, tables, page orientation, margins.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Output path relative to workspace"},
-                    "title": {"type": "string", "description": "Document title"},
-                    "content": {"type": "string", "description": "Document content (paragraphs separated by newlines)"},
+                    "title": {"type": "string", "description": "Document title (document heading, level 0)"},
+                    "content": {"type": "string", "description": "Document content. Prefix lines: '# ' heading1, '## ' heading2, '### ' heading3, '* ' or '- ' bullet, '> ' quote. Plain text = normal paragraph."},
+                    "tables": {"type": "array", "description": "Optional list of table specs, each with 'headers' (list of strings) and 'rows' (list of lists)", "items": {"type": "object"}},
+                    "page_orientation": {"type": "string", "enum": ["portrait", "landscape"], "description": "Page orientation (default portrait)"},
+                    "margins": {"type": "object", "description": "Page margins in inches, e.g. {'top': 1, 'bottom': 1, 'left': 1.25, 'right': 1.25}"},
                 },
                 "required": ["title", "content"],
             }
@@ -171,12 +174,17 @@ EXTENDED_TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "excel_xlsx",
-            "description": "Generate an Excel spreadsheet",
+            "description": "Generate an Excel (.xlsx) spreadsheet with multiple sheets, formulas, column widths, and header styling. Important: store long IDs/phone numbers/ZIP codes as text to prevent Excel from mangling them (use text_columns). Write formulas into cells rather than hardcoding results.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Output path relative to workspace"},
-                    "rows": {"type": "array", "items": {"type": "array"}, "description": "Rows of data"},
+                    "rows": {"type": "array", "items": {"type": "array"}, "description": "Rows of data. Each row is an array of cell values."},
+                    "sheet_name": {"type": "string", "description": "Sheet name (default: Sheet1)"},
+                    "formulas": {"type": "array", "description": "List of formula specs: [{'cell': 'A1', 'formula': '=SUM(B1:B10)'}]", "items": {"type": "object"}},
+                    "column_widths": {"type": "object", "description": "Column widths map, e.g. {'A': 15, 'B': 20}"},
+                    "header_row": {"type": "boolean", "description": "If true, first row gets bold header styling with blue fill"},
+                    "text_columns": {"type": "array", "items": {"type": "integer"}, "description": "0-based column indices to force as text (for IDs, phone numbers, leading zeros)"},
                 },
                 "required": ["rows"],
             }

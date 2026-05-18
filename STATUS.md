@@ -591,3 +591,34 @@ IdleInspector 只做模式检测和提案，不做决定。`code_exec` 出错时
 | `oaa_agent.py` | evolution → IdleInspector | 将 evolution 实例注入 constructor，使所有进化数据对检查器可见 |
 
 **流程闭环**：进化引擎记录使用模式 → IdleInspector 空闲时识别优化点 → 生成结构化提案 → LLM 自选 `self_improve`/`modify_own_prompt`/`code_exec` 执行 → 验证生效 → 记录到 memory 供后续学习
+
+---
+
+## 本次会话（2026-05-18 续）— 技能去重
+
+### 技能 vs OAA 内置工具全量对比
+
+对 29 个技能逐一分析，分 3 类处置：
+
+**立即删除（OAA 完全覆盖，3 个）：**
+| 技能 | OAA 替代 | 理由 |
+|------|---------|------|
+| `agent-memory` | `MemoryManager`（HOT/corrections/warm/cold 分层记忆） | 功能完全一致 |
+| `self-improving` | `self_improve` + `correction_log` + `IdleInspector` | 自我反思/修正/学习已内建 |
+| `skill-creator` | `skill_create` 工具 | 脚手架生成已内建 |
+
+**知识吸收后删除（OAA 有基础实现，Skill 有更深领域知识，2 个）：**
+| 技能 | OAA 原有 | 增强内容 |
+|------|---------|---------|
+| `excel-xlsx` | 基础读写 | 公式支持 `formulas`、列宽 `column_widths`、表头样式 `header_row`、文本列保护 `text_columns`、自定义工作表名 `sheet_name` |
+| `word-docx` | 纯文本段落 | Markdown 式内容解析（#/##/### 标题、* 列表、> 引用）、表格 `tables`、页面方向 `page_orientation`、边距 `margins` |
+
+**保留（OAA 无对应功能，22 个）：** 16 个外贸业务核心技能、nano-pdf、bb-browser、summarize、clawhub、himalaya-email、agent-autonomy-kit
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `extended_tools.py` | `do_word_doc` 重写 | 新增 tables/headings/styles/page_setup，注入 DOCX 领域规则 docstring |
+| `extended_tools.py` | `do_excel_xlsx` 重写 | 新增 formulas/column_widths/header_row/text_columns/sheet_name，注入 Excel 领域规则 docstring |
+| `tool_schema.py` | `word_doc`+`excel_xlsx` schema 升级 | 描述从 1 行扩充到含领域规则，参数从 2-3 个扩充到 5-7 个，含枚举/类型约束 |
+
+**变更统计**：删除 5 个技能目录（3 冗余 + 2 吸收入工具），增强 2 个 OAA 工具，26 个文件无修改。
