@@ -525,3 +525,27 @@ IdleInspector 只做模式检测和提案，不做决定。`code_exec` 出错时
 |------|------|------|
 | `agent/tools.py` | +do_self_improve | 原子化自修改工具：备份 → 应用 → 验证(可选) → 成功(清pycache+重载+记录) / 失败(自动回滚) |
 | `agent/tool_schema.py` | +schema | self_improve 的 OpenAI 函数调用 schema（path/old_content/new_content/verify/description 参数） |
+
+### A1：工具迁移到 @agent_tool 装饰器
+
+| 工具 | 迁移方式 | 说明 |
+|------|---------|------|
+| `ask_user` | 显式参数 | question: str, candidates: list |
+| `update_working_checkpoint` | 显式参数 | key_info: str |
+| `correction_log` | 显式参数 | context: str, lesson: str |
+| `memory_recall` | 显式参数 | query: str |
+| `self_reflect` | 显式参数 | context: str, reflection: str, lesson: str = "" |
+| `file_write` | 显式参数 | path: str, content: str, mode: str = "overwrite" |
+| `file_patch` | 显式参数 | path: str, old_content: str, new_content: str |
+| `shell_run` | 显式参数 | command: str, timeout: int = 60, cwd: str = "" |
+| `code_run` | 显式参数 | code: str, type: str = "python", timeout: int = 15, cwd: str = "" |
+| `code_exec` | 显式参数 | code: str, timeout: int = 15 |
+| `read_own_source` | 显式参数 | path: str = "", pattern: str = "", start_line: int = 1, line_count: int = 200 |
+| `list_own_structure` | 显式参数 | path: str = "", depth: int = 2 |
+| `reload_module` | 显式参数 | module: str |
+| `rollback_change` | 显式参数 | index: int = -1 |
+| `modify_own_prompt` | 保留 legacy | 复杂多 action 逻辑，schema 仍在 tool_schema.py |
+| `self_improve` | 保留 legacy | 复杂多步骤流程，schema 仍在 tool_schema.py |
+
+所有 14 个原子工具已完成 @agent_tool 迁移，对应 schema 从 tool_schema.py 移除（auto-gen）。
+还原留 2 个复杂工具的 legacy schema 和 4 个 WeChat stub（无需迁移）。

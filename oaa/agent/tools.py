@@ -188,12 +188,15 @@ class AtomicTools(BaseHandler):
         except Exception as exc:
             logger.warning("Failed to clear pycache for %s: %s", module_name, exc)
 
-    async def do_code_run(self, args: dict) -> dict:
+    @agent_tool(
+        name="code_run",
+        description="Execute Python/PowerShell code within workspace restrictions."
+    )
+    async def do_code_run(self, code: str, type: str = "python", timeout: int = 15, cwd: str = "") -> dict:
         """Execute Python/PowerShell code within workspace restrictions."""
-        code = args.get("code") or args.get("script", "")
-        code_type = args.get("type", "python")
-        timeout = min(args.get("timeout", 15), 60)
-        cwd = self._resolve_path(args.get("cwd", "."))
+        code_type = type
+        timeout = min(timeout, 60)
+        cwd = self._resolve_path(cwd) if cwd else "."
 
         if code_type in ("python", "py"):
             with tempfile.NamedTemporaryFile(
@@ -234,7 +237,11 @@ class AtomicTools(BaseHandler):
                 except OSError:
                     pass
 
-    async def do_code_exec(self, args: dict) -> dict:
+    @agent_tool(
+        name="code_exec",
+        description="Execute Python code in-process for agent self-extension. Allows most imports but blocks shell execution (os.system, subprocess.Popen, shutil.rmtree, etc.). Includes auto-correction layer (SyntaxError fix, NameError import injection)."
+    )
+    async def do_code_exec(self, code: str, timeout: int = 15) -> dict:
         """Execute Python code in-process for agent self-extension.
 
         Allows most imports but blocks shell execution (os.system,
@@ -247,10 +254,9 @@ class AtomicTools(BaseHandler):
         - Returns ``fix_applied`` / ``original_code`` / ``fixed_code`` so the
           LLM can learn from the correction.
         """
-        code = args.get("code", "")
         if not await self._confirm("code_exec", code[:120]):
             return {"status": "error", "msg": "Code execution not permitted"}
-        timeout = min(args.get("timeout", 15), 60)
+        timeout = min(timeout, 60)
 
         if not code.strip():
             return {"status": "error", "msg": "No code provided"}
@@ -368,13 +374,15 @@ class AtomicTools(BaseHandler):
         logger.info("file_read: path=%s lines=%d", os.path.basename(path), len(lines))
         return {"status": "success", "content": content, "line_count": len(lines)}
 
-    async def do_file_write(self, args: dict) -> dict:
+    @agent_tool(
+        name="file_write",
+        description="Create or overwrite a file. Auto-backs up when editing OAA source. Supports overwrite, append, and prepend modes."
+    )
+    async def do_file_write(self, path: str, content: str, mode: str = "overwrite") -> dict:
         """Create or modify a file. Auto-backs up when editing OAA source."""
-        path = self._resolve_path(args.get("path", ""))
+        path = self._resolve_path(path)
         if not await self._confirm("file_write", path):
             return {"status": "error", "msg": "File write not permitted"}
-        content = args.get("content", "")
-        mode = args.get("mode", "overwrite")
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
         try:
@@ -404,20 +412,21 @@ class AtomicTools(BaseHandler):
             logger.error("file_write failed: %s", exc)
             return {"status": "error", "msg": str(exc)}
 
-    async def do_file_patch(self, args: dict) -> dict:
+    @agent_tool(
+        name="file_patch",
+        description="Replace unique text in a file. Auto-backs up when editing OAA source. The old_content must appear exactly once in the file."
+    )
+    async def do_file_patch(self, path: str, old_content: str, new_content: str) -> dict:
         """Replace unique text in a file. Auto-backs up when editing OAA source."""
-        path = self._resolve_path(args.get("path", ""))
+        path = self._resolve_path(path)
         if not await self._confirm("file_patch", path):
             return {"status": "error", "msg": "File patch not permitted"}
-        old = args.get("old_content", "")
-        new = args.get("new_content", "")
-
         if not os.path.exists(path):
             return {"status": "error", "msg": "File not found"}
         try:
             with open(path, "r", encoding="utf-8") as f:
                 text = f.read()
-            count = text.count(old)
+            count = text.count(old_content)
             if count == 0:
                 return {"status": "error", "msg": "old_content not found"}
             if count > 1:
@@ -429,7 +438,7 @@ class AtomicTools(BaseHandler):
                 backup_path = self._backup_file(path)
 
             with open(path, "w", encoding="utf-8") as f:
-                f.write(text.replace(old, new))
+                f.write(text.replace(old_content, new_content))
 
             if is_oaa:
                 self._record_change(path, "file_patch: replaced unique text", backup_path)
@@ -441,10 +450,14 @@ class AtomicTools(BaseHandler):
             logger.error("file_patch failed: %s", exc)
             return {"status": "error", "msg": str(exc)}
 
-    async def do_ask_user(self, args: dict) -> dict:
+    @agent_tool(
+        name="ask_user",
+        description="Interrupt for user input or decision"
+    )
+    async def do_ask_user(self, question: str, candidates: list = []) -> dict:
         """Interrupt for user input."""
         return {"status": "INTERRUPT", "intent": "HUMAN_INTERVENTION",
-                "data": {"question": args.get("question", ""), "candidates": args.get("candidates", [])}}
+                "data": {"question": question, "candidates": candidates or []}}
 
     # ------------------------------------------------------------------
     # B3: modify own prompt
@@ -655,12 +668,15 @@ class AtomicTools(BaseHandler):
         except Exception as exc:
             logger.error("Rollback failed for %s: %s", filepath, exc)
 
-    async def do_update_working_checkpoint(self, args: dict) -> dict:
+    @agent_tool(
+        name="update_working_checkpoint",
+        description="Save a user preference, rule, or key fact to persistent HOT memory. Automatically compacted when full. Survives across restarts and sessions."
+    )
+    async def do_update_working_checkpoint(self, key_info: str) -> dict:
         """Save key info to working memory (survives across restarts). Uses
         tiered HOT memory — entries are automatically compacted when HOT
         exceeds 100 lines.  Call this when you learn something about the
         user's preferences, rules, or workflow patterns."""
-        key_info = args.get("key_info", "")
         if not key_info:
             return {"status": "error", "msg": "key_info is required"}
 
@@ -679,7 +695,11 @@ class AtomicTools(BaseHandler):
             pass
         return {"status": "ok"}
 
-    async def do_correction_log(self, args: dict) -> dict:
+    @agent_tool(
+        name="correction_log",
+        description="Log a user correction so the model remembers next time. Call when user says '不对', '不是', '你错了', '我告诉过你', or otherwise corrects you."
+    )
+    async def do_correction_log(self, context: str, lesson: str) -> dict:
         """Log a user correction so the agent remembers next time.
 
         Call this when the user explicitly corrects you:
@@ -691,36 +711,38 @@ class AtomicTools(BaseHandler):
         Also call this after self-reflection when you realize your own
         output could have been better.
         """
-        context = args.get("context", "")
-        lesson = args.get("lesson", "")
         if not context or not lesson:
             return {"status": "error", "msg": "context and lesson are required"}
         if self._memory_mgr:
             return self._memory_mgr.add_correction(context, lesson)
         return {"status": "error", "msg": "Memory manager not available"}
 
-    async def do_memory_recall(self, args: dict) -> dict:
+    @agent_tool(
+        name="memory_recall",
+        description="Search across all memory tiers (HOT + corrections + warm) for a keyword. Use when user asks '还记得吗', '我之前说过', or you need to find past learnings."
+    )
+    async def do_memory_recall(self, query: str) -> dict:
         """Search across all memory tiers (HOT, corrections, warm) for a keyword.
 
         Use when you need to find something you learned earlier,
         or when the user asks "还记得...", "我之前说过...".
         """
-        query = args.get("query", "")
         if not query:
             return {"status": "error", "msg": "query is required"}
         if self._memory_mgr:
             return self._memory_mgr.search(query)
         return {"status": "error", "msg": "Memory manager not available"}
 
-    async def do_self_reflect(self, args: dict) -> dict:
+    @agent_tool(
+        name="self_reflect",
+        description="After completing significant work, reflect on what went well and what could be improved. Call at the end of multi-step tasks to log lessons learned."
+    )
+    async def do_self_reflect(self, context: str, reflection: str, lesson: str = "") -> dict:
         """After completing significant work, reflect and learn.
 
         Call this at the end of a multi-step task to log what went well
         and what could be improved next time.
         """
-        context = args.get("context", "")
-        reflection = args.get("reflection", "")
-        lesson = args.get("lesson", "")
         if not context or not reflection:
             return {"status": "error", "msg": "context and reflection are required"}
         msg = f"[Self-reflection] {context}: {reflection}"
@@ -747,21 +769,24 @@ class AtomicTools(BaseHandler):
     async def do_wechat_unread(self, args: dict) -> dict:
         return {"status": "error", "msg": "wechat-cli 未配置。请在设置中配置微信数据目录后重试。"}
 
-    async def do_shell_run(self, args: dict) -> dict:
+    @agent_tool(
+        name="shell_run",
+        description="Execute an arbitrary shell command. Use this when you need to run CLI tools, scripts, or any system command. For Python/PowerShell code use 'code_run' instead."
+    )
+    async def do_shell_run(self, command: str, timeout: int = 60, cwd: str = "") -> dict:
         """Execute an arbitrary shell command."""
-        command = args.get("command", "")
         if not command:
             return {"status": "error", "msg": "No command provided"}
         if not await self._confirm("shell_run", command[:200]):
             return {"status": "error", "msg": "Shell execution not permitted"}
-        timeout = min(args.get("timeout", 60), 300)
-        cwd = self._resolve_path(args.get("cwd", ".")) if args.get("cwd") else None
+        timeout = min(timeout, 300)
+        cwd_resolved = self._resolve_path(cwd) if cwd else None
 
-        logger.info("shell_run: command=%.200s timeout=%s cwd=%s", command, timeout, cwd)
+        logger.info("shell_run: command=%.200s timeout=%s cwd=%s", command, timeout, cwd_resolved)
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
-                cwd=cwd,
+                cwd=cwd_resolved,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -785,12 +810,12 @@ class AtomicTools(BaseHandler):
             logger.error("shell_run failed: %s", exc)
             return {"status": "error", "msg": str(exc)}
 
-    async def do_read_own_source(self, args: dict) -> dict:
+    @agent_tool(
+        name="read_own_source",
+        description="Read OAA source code files. Use when you need to understand or debug your own implementation. Provide a file path or a glob pattern."
+    )
+    async def do_read_own_source(self, path: str = "", pattern: str = "", start_line: int = 1, line_count: int = 200) -> dict:
         """Read OAA source code files, restricted to the project root."""
-        path = args.get("path", "")
-        pattern = args.get("pattern", "")
-        start_line = args.get("start_line", 1)
-        line_count = args.get("line_count", 200)
 
         if not path and not pattern:
             return {"status": "error", "msg": "path or pattern required"}
@@ -837,10 +862,14 @@ class AtomicTools(BaseHandler):
             "line_count": len(selected),
         }
 
-    async def do_list_own_structure(self, args: dict) -> dict:
+    @agent_tool(
+        name="list_own_structure",
+        description="List OAA project directory structure. Use to discover where tools, skills, and config files are located."
+    )
+    async def do_list_own_structure(self, path: str = "", depth: int = 2) -> dict:
         """List OAA project directory structure."""
-        subpath = args.get("path", "")
-        depth = min(args.get("depth", 2), 4)
+        subpath = path
+        depth = min(depth, 4)
 
         target_dir = os.path.normpath(os.path.join(OAA_ROOT, subpath))
         if not target_dir.startswith(os.path.normpath(OAA_ROOT)):
@@ -875,13 +904,17 @@ class AtomicTools(BaseHandler):
             "tree": "\n".join(tree_lines),
         }
 
-    async def do_reload_module(self, args: dict) -> dict:
+    @agent_tool(
+        name="reload_module",
+        description="Reload a Python module after source changes. Clears __pycache__ and re-imports. Only works for non-core modules (tools, extended_tools, adapter files). Core module changes (loop, handler, oaa_agent) require a restart."
+    )
+    async def do_reload_module(self, module: str) -> dict:
         """Reload a non-core Python module after source changes.
 
         Clears ``__pycache__`` then attempts ``importlib.reload()``.
         Core modules (loop, handler, oaa_agent) require a full restart.
         """
-        module_path = args.get("module", "")
+        module_path = module
         if not module_path:
             return {"status": "error", "msg": "module is required"}
 
@@ -926,9 +959,13 @@ class AtomicTools(BaseHandler):
             logger.error("Failed to reload %s: %s", mod_name, exc)
             return {"status": "error", "msg": f"重载 {mod_name} 失败: {exc}"}
 
-    async def do_rollback_change(self, args: dict) -> dict:
+    @agent_tool(
+        name="rollback_change",
+        description="List or apply a rollback of a previous self-modification. Call with no arguments to list recent changes with indexes. Call with an index to roll back a specific change."
+    )
+    async def do_rollback_change(self, index: int = -1) -> dict:
         """List recent self-modifications or roll back a specific change."""
-        index = args.get("index")
+        idx = index if index != -1 else None
 
         changelog_path = os.path.join(self.data_dir, _OAA_BACKUP_DIR, "changelog.md")
         backup_dir = os.path.join(self.data_dir, _OAA_BACKUP_DIR)
@@ -961,7 +998,7 @@ class AtomicTools(BaseHandler):
             entries.append(entry)
 
         # List mode
-        if index is None:
+        if idx is None:
             if not entries:
                 return {"status": "success", "msg": "暂无修改记录"}
             lines = ["# 自修改记录\n"]
@@ -971,16 +1008,16 @@ class AtomicTools(BaseHandler):
             return {"status": "success", "content": "\n".join(lines)}
 
         # Rollback mode
-        if index < 1 or index > len(entries):
-            return {"status": "error", "msg": f"无效索引 {index}，有效范围 1-{len(entries)}"}
+        if idx < 1 or idx > len(entries):
+            return {"status": "error", "msg": f"无效索引 {idx}，有效范围 1-{len(entries)}"}
 
-        target = entries[index - 1]
+        target = entries[idx - 1]
         if target["status"] != "active":
-            return {"status": "error", "msg": f"变更 #{index} 已被回滚或状态异常"}
+            return {"status": "error", "msg": f"变更 #{idx} 已被回滚或状态异常"}
 
         backup_rel = target["backup"]
         if backup_rel == "none" or not backup_rel:
-            return {"status": "error", "msg": f"变更 #{index} 没有备份文件，无法回滚"}
+            return {"status": "error", "msg": f"变更 #{idx} 没有备份文件，无法回滚"}
 
         backup_path = os.path.normpath(os.path.join(backup_dir, backup_rel))
         if not os.path.exists(backup_path):
@@ -993,7 +1030,7 @@ class AtomicTools(BaseHandler):
             shutil.copy2(backup_path, src_path)
             self._clear_pycache(src_path)
             # Mark as rolled back in changelog
-            self._record_change(src_path, f"回滚变更 #{index}: {target['change']}", "")
+            self._record_change(src_path, f"回滚变更 #{idx}: {target['change']}", "")
 
             from datetime import datetime
             now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -1011,7 +1048,7 @@ class AtomicTools(BaseHandler):
             with open(changelog_path, "w", encoding="utf-8") as f:
                 f.write("".join(rebuild))
 
-            return {"status": "success", "msg": f"已回滚变更 #{index} ({target['file']})"}
+            return {"status": "success", "msg": f"已回滚变更 #{idx} ({target['file']})"}
         except Exception as exc:
             logger.error("Rollback failed: %s", exc)
             return {"status": "error", "msg": f"回滚失败: {exc}"}
