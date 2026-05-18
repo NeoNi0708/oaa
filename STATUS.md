@@ -518,3 +518,10 @@ IdleInspector 只做模式检测和提案，不做决定。`code_exec` 出错时
 |------|------|------|
 | `agent/tools.py` | +do_modify_own_prompt | 新增工具：list 列出/read 查看/write 改写 identity/soul/user/agents/bootstrap 五个提示词节 |
 | `agent/tool_schema.py` | +schema | modify_own_prompt 的 OpenAI 函数调用 schema（action/section/content 参数） |
+
+### B4：self_improve 自我改进工作流
+
+| 模块 | 变更 | 说明 |
+|------|------|------|
+| `agent/tools.py` | +do_self_improve | 原子化自修改工具：备份 → 应用 → 验证(可选) → 成功(清pycache+重载+记录) / 失败(自动回滚) |
+| `agent/tool_schema.py` | +schema | self_improve 的 OpenAI 函数调用 schema（path/old_content/new_content/verify/description 参数） |

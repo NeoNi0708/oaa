@@ -527,6 +527,134 @@ class AtomicTools(BaseHandler):
 
         return {"status": "error", "msg": f"Unknown action '{action}'. Use list, read, or write."}
 
+    # ------------------------------------------------------------------
+    # B4: self_improve — atomic self-modification with verify & rollback
+    # ------------------------------------------------------------------
+
+    async def _do_reload(self, rel_path: str) -> str:
+        """Reload a Python module by its relative path (e.g. 'oaa/agent/tools.py')."""
+        mod_name = rel_path.replace("/", ".").replace("\\", ".").replace(".py", "")
+        try:
+            import importlib
+            if mod_name in sys.modules:
+                importlib.reload(sys.modules[mod_name])
+                return f"重载 {mod_name} 成功"
+            return f"{mod_name} 未加载，无需重载"
+        except Exception as exc:
+            return f"重载失败: {exc}"
+
+    async def do_self_improve(self, args: dict) -> dict:
+        """Apply a self-modification with verification and automatic rollback.
+
+        Safely patches your own source code: backs up the target file, applies
+        the change, runs an optional verification command, and either commits
+        (clear pycache + reload + changelog) or rolls back on failure.
+
+        Args:
+            path: File path relative to OAA root, e.g. 'oaa/agent/tools.py'
+            old_content: Exact unique text to replace
+            new_content: Replacement text
+            verify: Optional shell command to verify the change (e.g. 'python -m pytest tests/test_tools.py -x')
+            description: Summary of the change for the changelog
+        """
+        path = args.get("path", "")
+        old = args.get("old_content", "")
+        new = args.get("new_content", "")
+        verify_cmd = args.get("verify", "")
+        description = args.get("description", "")
+
+        if not path or not old or new is None:
+            return {"status": "error", "msg": "path, old_content, and new_content are required"}
+
+        full_path = os.path.normpath(os.path.join(OAA_ROOT, path))
+        if not full_path.startswith(OAA_ROOT):
+            return {"status": "error", "msg": "Path must be within OAA project root"}
+
+        if not os.path.exists(full_path):
+            return {"status": "error", "msg": f"File not found: {path}"}
+
+        # Permission check
+        if not await self._confirm("self_improve", f"{path}: replace unique text"):
+            return {"status": "error", "msg": "Self-improvement not permitted"}
+
+        # Backup
+        backup_path = self._backup_file(full_path)
+        if not backup_path:
+            return {"status": "error", "msg": "Backup failed — aborting"}
+
+        # Read & validate uniqueness
+        try:
+            with open(full_path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except Exception as exc:
+            return {"status": "error", "msg": f"Failed to read {path}: {exc}"}
+
+        count = text.count(old)
+        if count == 0:
+            return {"status": "error", "msg": "old_content not found in file"}
+        if count > 1:
+            return {"status": "error", "msg": f"Found {count} matches — old_content must be unique"}
+
+        # Apply
+        try:
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(text.replace(old, new))
+        except Exception as exc:
+            self._restore_backup(full_path, backup_path)
+            return {"status": "error", "msg": f"Write failed: {exc}"}
+
+        # Verification (if command provided)
+        if verify_cmd:
+            import subprocess
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    verify_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+                if proc.returncode != 0:
+                    # Rollback
+                    self._restore_backup(full_path, backup_path)
+                    out = stdout.decode("utf-8", errors="replace")[:2000]
+                    err = stderr.decode("utf-8", errors="replace")[:2000]
+                    return {
+                        "status": "error",
+                        "msg": f"Verification failed (exit {proc.returncode}) — rolled back",
+                        "verify_stdout": out,
+                        "verify_stderr": err,
+                    }
+            except asyncio.TimeoutError:
+                self._restore_backup(full_path, backup_path)
+                return {"status": "error", "msg": "Verification timed out (120s) — rolled back"}
+            except Exception as exc:
+                self._restore_backup(full_path, backup_path)
+                return {"status": "error", "msg": f"Verification error: {exc}"}
+
+        # Success: clear pycache, reload, record
+        self._clear_pycache(full_path)
+
+        rel_path = os.path.relpath(full_path, OAA_ROOT)
+        reload_msg = self._do_reload(rel_path)
+
+        desc = description or f"self_improve: replaced unique text in {path}"
+        self._record_change(full_path, desc, backup_path)
+
+        return {
+            "status": "success",
+            "msg": f"Applied to {path} and verified successfully. {reload_msg}",
+            "backup": backup_path,
+        }
+
+    def _restore_backup(self, filepath: str, backup_path: str):
+        """Restore a file from backup."""
+        try:
+            import shutil
+            shutil.copy2(backup_path, filepath)
+            logger.info("Rolled back %s from %s", filepath, backup_path)
+        except Exception as exc:
+            logger.error("Rollback failed for %s: %s", filepath, exc)
+
     async def do_update_working_checkpoint(self, args: dict) -> dict:
         """Save key info to working memory (survives across restarts). Uses
         tiered HOT memory — entries are automatically compacted when HOT

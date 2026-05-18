@@ -141,6 +141,24 @@ ATOMIC_TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "self_improve",
+            "description": "Apply a self-modification with automatic verification and rollback. Backs up the target file, applies the change, runs an optional verification command, and either commits (clear pycache + reload + changelog) or rolls back on failure.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path relative to OAA root, e.g. 'oaa/agent/tools.py'"},
+                    "old_content": {"type": "string", "description": "Exact unique text to replace"},
+                    "new_content": {"type": "string", "description": "Replacement text"},
+                    "verify": {"type": "string", "description": "Optional shell command to verify the change, e.g. 'python -m pytest tests/test_tools.py -x'"},
+                    "description": {"type": "string", "description": "Summary of the change for the changelog"},
+                },
+                "required": ["path", "old_content", "new_content"],
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "modify_own_prompt",
             "description": "Read or modify your own system prompt sections. Use 'list' to see all sections, 'read' to view a section, 'write' to replace a section's content.",
             "parameters": {
