@@ -11,13 +11,18 @@ from ..logging_config import get_logger
 from .browser_tools import BrowserTools
 from .extended_tools import ExtendedTools
 from .handler import BaseHandler
+from .idle_inspector import IdleInspector
 from .loop import AgentLoop
 from .memory_manager import MemoryManager
 from .skill_manager import SkillManager
 from .tool_schema import ATOMIC_TOOLS_SCHEMA, BROWSER_TOOLS_SCHEMA, DINGTALK_TOOLS_SCHEMA, EXTENDED_TOOLS_SCHEMA, FEISHU_TOOLS_SCHEMA, MCP_TOOLS_SCHEMA, WECHAT_TOOLS_SCHEMA
+from .tool_decorator import collect_tool_schemas
 from .tools import AtomicTools
 
 logger = get_logger("agent.oaa_agent")
+
+# OAA project root — used for self-modification tools
+OAA_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 
 class _MergedHandler(BaseHandler):
@@ -44,8 +49,12 @@ class _MergedHandler(BaseHandler):
             return getattr(self._extended, name)
         if hasattr(self._browser, name):
             return getattr(self._browser, name)
-        # Fall back to dynamic tools
+        # Check decorator registries on each backend
         tool_name = name[3:]  # strip "do_"
+        for backend in (self._atomic, self._extended, self._browser):
+            if tool_name in backend._tool_registry:
+                return backend._tool_registry[tool_name]
+        # Fall back to dynamic tools
         if tool_name in self._dynamic_tools:
             return lambda args: self._extended._run_dynamic_tool(tool_name, args)
         raise AttributeError(name)
@@ -57,16 +66,24 @@ class OAAAgent:
     """
 
     def __init__(self, config: AppConfig, permissions: Optional[PermissionsManager] = None,
-                 evolution: Optional[EvolutionEngine] = None, wechat_adapter=None):
+                 evolution: Optional[EvolutionEngine] = None, wechat_adapter=None,
+                 scheduler=None):
         ensure_data_dir(config.data_dir)
 
         self.config = config
         self.identity: dict = load_identity(config.data_dir)
         self.permissions = permissions
         self.evolution = evolution
+        self.scheduler = scheduler
 
         # Tiered memory system (HOT + corrections + warm/ + cold/)
         self.memory = MemoryManager(os.path.join(config.data_dir, "memory"))
+
+        # Idle inspector (needs memory, so initialized after MemoryManager)
+        self._idle_inspector = IdleInspector(
+            scheduler=scheduler,
+            memory_mgr=self.memory,
+        )
 
         self.llm = LLMClient(config.model)
 
@@ -76,11 +93,20 @@ class OAAAgent:
 
         self.atomic = AtomicTools(config.data_dir, permissions=permissions)
         self.atomic.set_memory_manager(self.memory)
-        self.extended = ExtendedTools(config.data_dir, permissions=permissions, wechat_adapter=wechat_adapter)
+        self.extended = ExtendedTools(
+            config.data_dir, permissions=permissions, wechat_adapter=wechat_adapter,
+            dingtalk_client_id=config.dingtalk.client_id,
+            dingtalk_client_secret=config.dingtalk.client_secret,
+        )
         self.extended.set_skill_manager(self.skill_mgr)
         self.browser = BrowserTools()
 
-        self._tools_schema = ATOMIC_TOOLS_SCHEMA + EXTENDED_TOOLS_SCHEMA + BROWSER_TOOLS_SCHEMA + MCP_TOOLS_SCHEMA
+        self._tools_schema = (
+            ATOMIC_TOOLS_SCHEMA + EXTENDED_TOOLS_SCHEMA + BROWSER_TOOLS_SCHEMA + MCP_TOOLS_SCHEMA
+            + collect_tool_schemas(AtomicTools)
+            + collect_tool_schemas(ExtendedTools)
+            + collect_tool_schemas(BrowserTools)
+        )
         if config.wechat.enabled and config.wechat.iLink_token:
             self._tools_schema = self._tools_schema + WECHAT_TOOLS_SCHEMA
         if config.feishu.enabled and config.feishu.app_id:
@@ -144,10 +170,26 @@ class OAAAgent:
 
         skill_listing = self._build_skill_listing()
 
+        config_path = os.path.join(self.config.data_dir, "config.json")
+
         awareness = f"""\
 # 重要：当前日期与工具使用规则
 
 **当前日期是 {today}**。你的训练数据截止于较早时间，不包含今日的实时信息。
+
+## 自身定位
+
+你的项目根目录是 {OAA_ROOT}。
+数据目录是 {self.config.data_dir}。
+
+关键目录：
+- 应用代码: {OAA_ROOT}/oaa/
+- 技能文件: {self.config.data_dir}/skills/
+- 动态工具: {self.config.data_dir}/dynamic_tools/
+- 配置文件: {config_path}
+- 持久记忆: {self.config.data_dir}/memory/
+
+需要读取自身源码时，使用 `read_own_source`。需要查看项目结构时，使用 `list_own_structure`。
 
 ## 强制规则
 
@@ -156,6 +198,7 @@ class OAAAgent:
 3. **搜索结果可能不精确时，用 web_scan 直接访问具体网页获取详细内容**
 4. **复杂多步骤任务先用 plan_create 制定计划，再逐步执行**
 5. **查询天气、电影排片、股票价格、新闻事件等实时信息必须上网搜索，不准凭记忆回答**
+6. **你有 shell_run 工具可以执行任何命令行操作，严禁要求用户打开终端或运行命令。所有交互必须在 GUI 内完成（通过聊天窗口与用户交流）。需要执行命令行时自行使用 shell_run。**
 
 ## 可用工具
 
@@ -219,6 +262,7 @@ class OAAAgent:
             llm=self.llm,
             handler=handler,
             tools_schema=self._tools_schema,
+            memory_mgr=self.memory,
         )
         loop.set_skill_context(system_prompt)
 
@@ -229,6 +273,14 @@ class OAAAgent:
                 trajectory.append({"tool": chunk["name"], "args": chunk.get("args", {})})
             elif chunk["type"] == "done":
                 final_result = chunk.get("content", "")
+                # Idle inspection: check for due tasks or improvement areas
+                if len(user_input) > 2:
+                    try:
+                        proposal = self._idle_inspector.inspect()
+                        if proposal:
+                            yield {"type": "llm_output", "content": "\n\n---\n\n" + proposal}
+                    except Exception as exc:
+                        logger.warning("Idle inspection failed: %s", exc)
             yield chunk
 
         # Record evolution data

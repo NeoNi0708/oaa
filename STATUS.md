@@ -1,6 +1,6 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-18（P0 Phase 1 完成：code_exec + 消息压缩）
+> 最后更新：2026-05-18（P0 Phase 1 + Phase 2 完成：code_exec, 消息压缩, tool装饰器, 协议自动检测）
 
 ---
 
@@ -182,6 +182,31 @@
 
 ---
 
+## 本次会话（2026-05-18 续）— P0 Phase 2
+
+### 闭环断点 2：tool_decorator — 工具注册轻量化
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `tool_decorator.py` | **新增** | `@agent_tool(name, description)` 装饰器，`inspect.signature()` 自动生成 OpenAI schema |
+| `handler.py` | +`__init_subclass__` + `dispatch` 回退 | 自动收集 `_tool_meta` 到 `_tool_registry`；`dispatch()` 先查方法再查 registry |
+| `oaa_agent.py` | `_MergedHandler.__getattr__` + registry 查询 | 新增 backend `_tool_registry` 回退链 |
+| `oaa_agent.py` | schema 组装 + `collect_tool_schemas()` | `_tools_schema` 自动包含装饰器注册的工具 schema |
+| `tools.py` | 迁移 `file_read` | `do_file_read(self, path: str, start: int = 1, count: int = 200, keyword: str = "")` 显式参数 + `@agent_tool` |
+| `tool_schema.py` | 移除 `file_read` | schema 已由装饰器自动生成 |
+
+**架构变化**：工具注册从"手动写 schema 在 `tool_schema.py` + 实现 `do_*` 在 `tools.py`"两处修改，变为"一处 `@agent_tool` 装饰器即可"。现有工具可逐步迁移，`file_read` 为示范。
+
+### 闭环断点 6：协议自动检测
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `client.py` | +`_detect_api_format()` | 内置 heuristic：`api_format` 显式设置优先 → URL 含 `anthropic.com` 则 `anthropic` → 其余默认 `openai` |
+
+**兼容性**：`api_format` 现有配置完全不受影响（显式设置优先级最高）。自动检测仅在未设置时生效。
+
+---
+
 ## 待修复
 
 ### P0 — 闭环补全计划（OAA v2）
@@ -204,16 +229,16 @@
 
 #### 闭环断点 2 — 工具注册太重
 
-| 维度 | 现状 | 目标 |
-|------|------|------|
-| 新增工具 | 4-5 处修改跨多个文件 | 1 处修改，一个文件 |
+| 维度 | 现状 | 目标 | 状态 |
+|------|------|------|------|
+| 新增工具 | 4-5 处修改跨多个文件 | 1 处修改，一个文件 | ✅ **Phase 2 完成** |
 
 工作项：
-1. 创建 `oaa/agent/tool_decorator.py` — `@agent_tool(name, description)` 装饰器
+1. ✅ **完成** 创建 `oaa/agent/tool_decorator.py` — `@agent_tool(name, description)` 装饰器
    - `inspect.signature()` 提取参数名+类型+默认值 → 自动生成 OpenAI 兼容 schema
    - 自动注册到类上的 `_tool_registry` 字典
-2. 修改 `_MergedHandler` — 在 `__getattr__` 回退前查询各 backend 的 `_tool_registry`
-3. 迁移 2-3 个现有工具作为示范（如 `file_read`, `web_search`），其余逐步迁移
+2. ✅ **完成** 修改 `_MergedHandler` — 在 `__getattr__` 回退前查询各 backend 的 `_tool_registry`
+3. ✅ **完成** 迁移 `file_read` 作为示范（显式参数签名 + @agent_tool 装饰器），其余逐步迁移
 
 #### 闭环断点 3 — 代码执行无自动纠错
 
@@ -247,23 +272,16 @@
 #### 闭环断点 6 — 协议适配需手动配置
 
 工作项：
-1. 修改 `LLMClient.__init__`，从 `api_base` URL 自动检测协议：
-   ```python
-   if "anthropic.com" in url: protocol = "anthropic"
-   elif "googleapis.com" in url: protocol = "google"
-   elif "dashscope.aliyuncs.com" in url: protocol = "aliyun"
-   elif "deepseek.com" in url: protocol = "deepseek"
-   else: protocol = "openai"
-   ```
-2. 根据 protocol 自动设置 headers、endpoint 路径、参数名（`max_tokens` vs `max_completion_tokens` vs `maxTokens`）
+1. ✅ **完成** `LLMClient._detect_api_format()` — URL 启发式检测：`api_format` 显式配置优先，其次 URL 含 `anthropic.com` 则 `anthropic`，其余默认 `openai`
+2. **待定** 协议级参数适配（`max_tokens` vs `max_completion_tokens`）— 下游客户端已有区分，当前仅需路由正确
 
 ---
 
 ### 执行顺序
 
 ```
-Phase 1（断点 1 + 4） ✅ 完成 → Phase 2（断点 2 + 6） → Phase 3（断点 3 + 5）
-                             1 天                     2 天
+Phase 1（断点 1 + 4） ✅ 完成 → Phase 2（断点 2 + 6） ✅ 完成 → Phase 3（断点 3 + 5）
+                                                             2 天
 ```
 
 Phase 1 已完成：`code_exec` 给 agent 无限扩展能力，消息压缩防止 context overflow。Phase 3 形成真正的自我改进闭环。

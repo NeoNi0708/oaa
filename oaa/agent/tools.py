@@ -10,6 +10,7 @@ from ..auth.permissions import PermissionsManager
 from ..logging_config import get_logger
 from .handler import BaseHandler
 from .path_utils import resolve_workspace_path
+from .tool_decorator import agent_tool
 
 if TYPE_CHECKING:
     from .memory_manager import MemoryManager
@@ -217,13 +218,10 @@ class AtomicTools(BaseHandler):
             except OSError:
                 pass
 
-    async def do_file_read(self, args: dict) -> dict:
+    @agent_tool(description="Read file content")
+    async def do_file_read(self, path: str, start: int = 1, count: int = 200, keyword: str = "") -> dict:
         """Read file content. Returns dict with status/content."""
-        path = self._resolve_path(args.get("path", ""))
-        start = args.get("start", 1)
-        count = args.get("count", 200)
-        keyword = args.get("keyword")
-
+        path = self._resolve_path(path)
         if not os.path.exists(path):
             return {"status": "error", "msg": "File not found"}
         if not os.path.isfile(path):

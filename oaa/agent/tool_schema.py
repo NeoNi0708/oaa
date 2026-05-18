@@ -35,23 +35,6 @@ ATOMIC_TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "file_read",
-            "description": "Read file content",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "File path (relative to workspace or absolute)"},
-                    "start": {"type": "integer", "description": "Start line (1-based)", "default": 1},
-                    "count": {"type": "integer", "default": 200},
-                    "keyword": {"type": "string", "description": "Search keyword"},
-                },
-                "required": ["path"],
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "file_write",
             "description": "Create or overwrite file",
             "parameters": {

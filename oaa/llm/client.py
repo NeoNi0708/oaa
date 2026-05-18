@@ -110,14 +110,35 @@ class _OpenAIClient:
 
 
 class LLMClient:
-    """Unified LLM client — delegates to OpenAI or Anthropic backend based on config.api_format."""
+    """Unified LLM client — delegates to OpenAI or Anthropic backend.
+
+    Protocol auto-detection::
+        1. ``api_format`` config field (if set) takes precedence.
+        2. Otherwise, ``base_url`` is inspected for known providers.
+        3. Falls back to OpenAI-compatible for everything else.
+    """
+
+    _ANTHROPIC_DOMAINS = frozenset({"anthropic.com"})
 
     def __init__(self, config: ModelConfig):
         self._config = config
         self._backend = self._build_backend()
 
+    @classmethod
+    def _detect_api_format(cls, config: ModelConfig) -> str:
+        """Detect API format from config, falling back to URL-based heuristic."""
+        if config.api_format:
+            return config.api_format
+        if not config.base_url:
+            return "openai"
+        url = config.base_url.lower()
+        for domain in cls._ANTHROPIC_DOMAINS:
+            if domain in url:
+                return "anthropic"
+        return "openai"
+
     def _build_backend(self):
-        fmt = self._config.api_format or "openai"
+        fmt = self._detect_api_format(self._config)
         if fmt == "anthropic":
             from .anthropic_client import AnthropicClient
             return AnthropicClient(self._config)
