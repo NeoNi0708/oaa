@@ -498,3 +498,16 @@ IdleInspector 只做模式检测和提案，不做决定。`code_exec` 出错时
 | 多工具工作流 | 通过 |
 | 协议研究+代码修正 | 通过 |
 | get_qrcode | 通过 |
+
+## 本次会话（续）
+
+### B2：执行自由度 — 权限模型宽松化
+
+| 模块 | 变更 | 说明 |
+|------|------|------|
+| `config.py` | +permission_level | 新增 `"auto"` / `"confirm"` / `"restrict"` 三级权限，默认 auto |
+| `auth/permissions.py` | 重构 | `DANGEROUS_OPS` 集合、`confirm_operation()` 三级分发逻辑、日志审计 |
+| `agent/tools.py` | +_confirm() | 新增 `_confirm()` 方法；`shell_run/code_exec/file_write/file_patch` 接入权限检查 |
+| `test_permissions.py` | 重写 | 覆盖 auto/confirm/restrict 三级行为、`DANGEROUS_OPS` 完整性、回调集成 |
+| `test_extended_tools.py` | 适配 | 显式指定 `permission_level: confirm` 确保测试语义正确 |
+| `oaa_agent.py` | +权限级别提示 | 系统提示词中显示当前权限级别 |

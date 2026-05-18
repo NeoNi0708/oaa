@@ -32,6 +32,7 @@ class WeChatConfig:
     enabled: bool = False
     iLink_token: str = ""        # persisted session token
     iLink_bot_id: str = ""
+    base_url: str = ""           # iLink API base URL from QR scan
     wechat_cli_path: str = ""    # path to wechat-cli
 
 
@@ -61,6 +62,7 @@ class AppConfig:
     permissions: dict = field(default_factory=lambda: {
         "blacklist_paths": [],
         "require_confirm": ["email_send", "wechat_send"],
+        "permission_level": "auto",
     })
 
     def save(self, path: str = ""):

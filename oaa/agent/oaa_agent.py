@@ -188,6 +188,7 @@ class OAAAgent:
 - 动态工具: {self.config.data_dir}/dynamic_tools/
 - 配置文件: {config_path}
 - 持久记忆: {self.config.data_dir}/memory/
+- 当前权限级别: **{self.config.permissions.get("permission_level", "auto")}**
 
 需要读取自身源码时，使用 `read_own_source`。需要查看项目结构时，使用 `list_own_structure`。
 

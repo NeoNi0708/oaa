@@ -120,6 +120,12 @@ class AtomicTools(BaseHandler):
         """Inject the tiered memory manager."""
         self._memory_mgr = mgr
 
+    async def _confirm(self, operation: str, details: str = "") -> bool:
+        """Check permission for an operation. Returns True if allowed."""
+        if self.permissions:
+            return await self.permissions.confirm_operation(operation, details)
+        return True
+
     # ------------------------------------------------------------------
     # Self-modification helpers (backup / changelog / pycache)
     # ------------------------------------------------------------------
@@ -242,6 +248,8 @@ class AtomicTools(BaseHandler):
           LLM can learn from the correction.
         """
         code = args.get("code", "")
+        if not await self._confirm("code_exec", code[:120]):
+            return {"status": "error", "msg": "Code execution not permitted"}
         timeout = min(args.get("timeout", 15), 60)
 
         if not code.strip():
@@ -363,6 +371,8 @@ class AtomicTools(BaseHandler):
     async def do_file_write(self, args: dict) -> dict:
         """Create or modify a file. Auto-backs up when editing OAA source."""
         path = self._resolve_path(args.get("path", ""))
+        if not await self._confirm("file_write", path):
+            return {"status": "error", "msg": "File write not permitted"}
         content = args.get("content", "")
         mode = args.get("mode", "overwrite")
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -397,6 +407,8 @@ class AtomicTools(BaseHandler):
     async def do_file_patch(self, args: dict) -> dict:
         """Replace unique text in a file. Auto-backs up when editing OAA source."""
         path = self._resolve_path(args.get("path", ""))
+        if not await self._confirm("file_patch", path):
+            return {"status": "error", "msg": "File patch not permitted"}
         old = args.get("old_content", "")
         new = args.get("new_content", "")
 
@@ -531,6 +543,8 @@ class AtomicTools(BaseHandler):
         command = args.get("command", "")
         if not command:
             return {"status": "error", "msg": "No command provided"}
+        if not await self._confirm("shell_run", command[:200]):
+            return {"status": "error", "msg": "Shell execution not permitted"}
         timeout = min(args.get("timeout", 60), 300)
         cwd = self._resolve_path(args.get("cwd", ".")) if args.get("cwd") else None
 

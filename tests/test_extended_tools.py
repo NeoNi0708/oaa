@@ -115,7 +115,7 @@ async def test_extended_tools_email_permission():
     from oaa.config import AppConfig
 
     with tempfile.TemporaryDirectory() as tmp:
-        config = AppConfig(data_dir=tmp, permissions={"blacklist_paths": [], "require_confirm": ["email_send"]})
+        config = AppConfig(data_dir=tmp, permissions={"permission_level": "confirm", "blacklist_paths": [], "require_confirm": ["email_send"]})
         pm = PermissionsManager(config)
         et = ExtendedTools(tmp, permissions=pm)
 
