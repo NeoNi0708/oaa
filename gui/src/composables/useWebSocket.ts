@@ -93,7 +93,9 @@ export function useWebSocket() {
         switch (data.type) {
           case 'done': {
             const finalContent = p.content || streamingContent.value || ''
-            messages.value.push({ role: 'assistant', content: finalContent })
+            if (finalContent) {
+              messages.value.push({ role: 'assistant', content: finalContent })
+            }
             streaming.value = false
             streamingContent.value = ''
             statusText.value = ''
@@ -111,21 +113,9 @@ export function useWebSocket() {
           }
           case 'tool_call': {
             currentTool.value = { name: p.name || '', args: JSON.stringify(p.args || {}) }
-            messages.value.push({
-              role: 'tool',
-              content: `Calling tool: ${p.name || ''}`,
-              name: p.name,
-              args: JSON.stringify(p.args || {}),
-            })
             break
           }
           case 'tool_result': {
-            messages.value.push({
-              role: 'tool',
-              content: p.result || '',
-              name: p.name,
-              result: p.result,
-            })
             currentTool.value = null
             break
           }
@@ -200,10 +190,12 @@ export function useWebSocket() {
 
   function send(content: string) {
     if (!ws.value || ws.value.readyState !== WebSocket.OPEN) return
-    streaming.value = false
+    // Don't reset state if still processing — backend cancels old task on new message
+    if (!streaming.value && !currentTool.value) {
+      statusText.value = ''
+    }
+    // Clear accumulated streaming content so the new task starts fresh
     streamingContent.value = ''
-    statusText.value = ''
-    currentTool.value = null
 
     messages.value.push({ role: 'user', content })
     ws.value.send(JSON.stringify({

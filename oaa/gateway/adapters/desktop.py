@@ -60,10 +60,13 @@ class DesktopAdapter:
         self.port = port
         self.gateway = None
         self._management = None          # set by app during bootstrap
+        self._worker = None              # set by app for background tasks
         self._clients = set()
         self._server = None
         # Pending user confirmations: request_id → Future[bool]
         self._pending_confirms: dict[str, asyncio.Future] = {}
+        # Active chat tasks per websocket — cancelled when new message arrives
+        self._chat_tasks: dict[int, asyncio.Task] = {}
 
     def set_management_handler(self, handler: "ManagementHandler"):
         """Register the management handler for non-chat requests."""
@@ -157,9 +160,15 @@ class DesktopAdapter:
                     await self._handle_management(websocket, data)
                     continue
 
-                # --- Chat message: run in background task ---
+                # --- Chat message: cancel old task, run in background ---
                 if msg_type == "message":
-                    asyncio.create_task(self._process_chat(websocket, data))
+                    ws_id = id(websocket)
+                    old = self._chat_tasks.pop(ws_id, None)
+                    if old and not old.done():
+                        old.cancel()
+                        logger.debug("Cancelled previous chat task for client %s", remote)
+                    task = asyncio.create_task(self._process_chat(websocket, data))
+                    self._chat_tasks[ws_id] = task
                     continue
 
         except Exception as exc:
@@ -189,12 +198,24 @@ class DesktopAdapter:
         msg_type = data.get("type", "")
         payload = data.get("payload", {})
 
+        # Intercept stop_chat — cancel the running chat task for this client,
+        # then return immediately (management handler has nothing more to do).
+        if msg_type == "stop_chat":
+            ws_id = id(websocket)
+            task = self._chat_tasks.get(ws_id)
+            if task and not task.done():
+                task.cancel()
+                logger.debug("Cancelled chat task for stop_chat (client %s)", websocket.remote_address)
+            return
+
         if self._management is None:
             await self._send_response(websocket, msg_type, request_id,
                                       {"ok": False, "error": "No management handler registered"})
             return
 
         result = self._management.handle(msg_type, payload)
+        if asyncio.iscoroutine(result):
+            result = await result
         await self._send_response(websocket, msg_type, request_id, result)
 
     @staticmethod
@@ -242,6 +263,20 @@ class DesktopAdapter:
                     self._management.set_agent_state("responding")
 
                 await self._send_chunk(websocket, chunk)
+        except asyncio.CancelledError:
+            # If this task was replaced by a new message, silently exit —
+            # the new task manages its own state.  Only send done for
+            # explicit stop_chat (where no replacement task exists).
+            ws_id = id(websocket)
+            if self._chat_tasks.get(ws_id) is not asyncio.current_task():
+                return  # replaced by newer message task
+            try:
+                await websocket.send(json.dumps({
+                    "type": "done",
+                    "payload": {"content": ""},
+                }, ensure_ascii=False))
+            except Exception:
+                pass
         except Exception as exc:
             logger.exception("Chat processing failed: %s", exc)
             if self._management:

@@ -390,17 +390,12 @@ function sendHint(text: string) {
   sendMsg()
 }
 
-// Stop loading once streaming starts or messages update
+// Loading stops when streaming starts or first assistant message appears
 watch([streaming, messages], () => {
   if (streaming.value || messages.value.length > 0) {
     loading.value = false
   }
   nextTick(() => scrollToBottom())
-})
-
-// Also stop loading on done (streaming goes false)
-watch(streaming, (s) => {
-  if (!s) loading.value = false
 })
 
 // Auto-scroll on streaming content changes

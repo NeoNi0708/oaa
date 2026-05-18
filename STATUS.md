@@ -1,6 +1,6 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-17（修复 dws CLI 12 处参数不匹配 + 新增 9 个多维表工具 + GUI 链接新窗口打开）
+> 最后更新：2026-05-18（修复 A3 空泡：取消任务静默退出 + 前端 streaming/loading 状态修正）
 
 ---
 
@@ -158,6 +158,192 @@
 
 ## 待修复
 
+### 本轮修复（输出截断续写）
+
+| # | 问题 | 涉及文件 | 修复 |
+|---|------|---------|------|
+| A3 | 空聊天气泡（agent 假死） | `desktop.py`, `useWebSocket.ts`, `ChatView.vue` | ⑤ 后端 `CancelledError` 检查 `_chat_tasks` 是否已被替换 — 被消息替换时静默退出（stop_chat 仍发送正常 done）⑥ `send()` 重置 `streamingContent` 防止新旧内容混淆 ⑦ 移除 `watch(streaming)` loading 控制系统，避免取消任务时 loading 被错误关闭 |
+| — | 输出截断自动续写 | `loop.py`, `client.py`, `anthropic_client.py` | 新增 `finish_reason` 追踪 → `response.finish_reason in ("length","max_tokens")` → 自动追加续写提示（最多 5 次）→ `_MAX_CONTINUATIONS` 常量的完整链路。tool 结果截断上限从 2000→8000 字符。 |
+
+---
+
+### P0 — 闭环补全计划（OAA v2）
+
+**核心问题**：OAA 功能模块已不少，但彼此孤立，没有形成"执行→反馈→学习→改进"的闭环。Agent 的能力上限被锁定在预设工具集内。
+
+**原则**：不改现有架构，只在断点处插入连接逻辑。
+
+#### 闭环断点 1 — 没有运行时代码执行（`loadcodex` 等价物）
+
+| 维度 | 现状 | 目标 |
+|------|------|------|
+| `code_run` | 沙箱子进程，有 timeout，拿不到返回值 | 进程内 `exec()`，捕获 `locals()` 返回值 |
+| 能力上限 | 预设工具的并集 | 任意 Python 代码可执行 |
+
+工作项：
+1. 创建 `oaa/agent/_exec_runner.py` — 安全 `exec()` 封装，限制 `builtins`（禁用 `os.system`, `subprocess`, `shutil.rmtree` 等），通过 `result` 变量约定返回值
+2. 在 `AtomicTools` 新增 `do_code_exec(args)` — 与 `code_run` 并存，`code_run` 保持沙箱模式用于不信任代码，`code_exec` 用于 agent 自我扩展
+3. schema 定义：`{code: string, timeout: int, description: "Execute Python code in-process and capture return value via 'result' variable"}`
+
+#### 闭环断点 2 — 工具注册太重
+
+| 维度 | 现状 | 目标 |
+|------|------|------|
+| 新增工具 | 4-5 处修改跨多个文件 | 1 处修改，一个文件 |
+
+工作项：
+1. 创建 `oaa/agent/tool_decorator.py` — `@agent_tool(name, description)` 装饰器
+   - `inspect.signature()` 提取参数名+类型+默认值 → 自动生成 OpenAI 兼容 schema
+   - 自动注册到类上的 `_tool_registry` 字典
+2. 修改 `_MergedHandler` — 在 `__getattr__` 回退前查询各 backend 的 `_tool_registry`
+3. 迁移 2-3 个现有工具作为示范（如 `file_read`, `web_search`），其余逐步迁移
+
+#### 闭环断点 3 — 代码执行无自动纠错
+
+工作项：
+1. 在 `do_code_exec` 中加入纠错层：
+   - `SyntaxError` → 用 `ast` 解析 + 常见修复（缩进、缺 `import`、变量名拼写）
+   - `NameError` → 自动插入 `import` 后重试
+   - `TypeError`/`ValueError` → 返回完整 traceback 给 LLM 自修复
+2. 如果修复成功，将修正后的代码也返回给 LLM 供学习
+
+#### 闭环断点 4 — 消息队列无限增长
+
+工作项：
+1. `AgentLoop.__init__` 加 `max_messages: int = 30` 参数
+2. 每轮结束后调用 `_compact_messages()`，逻辑：
+   - 保留 system prompt（第 0 条）
+   - 保留最近 N 轮完整交换
+   - 移除中间的工具调用细节（保留 assistant+tool 的轮次，但压缩 tool result 的 body）
+3. 与 MemoryManager 联动：压缩前将关键信息提取到 HOT memory
+
+#### 闭环断点 5 — 工具失败未影响 agent 行为
+
+工作项：
+1. **已完成** `_memory_mgr.add_tool_failure()` 记录（`loop.py:197`）
+2. **待完成** IdleInspector Phase 3 `_check_tool_failures()`：
+   - 按工具名分组统计，检测重复失败模式
+   - 对失败 ≥2 次的工具，生成修复建议
+   - 提示用户 → 用户确认 → agent 执行 `read_own_source` → 出方案 → `file_patch` 修复
+3. 修复后自动清除 `__pycache__` + 尝试 `reload_module`
+
+#### 闭环断点 6 — 协议适配需手动配置
+
+工作项：
+1. 修改 `LLMClient.__init__`，从 `api_base` URL 自动检测协议：
+   ```python
+   if "anthropic.com" in url: protocol = "anthropic"
+   elif "googleapis.com" in url: protocol = "google"
+   elif "dashscope.aliyuncs.com" in url: protocol = "aliyun"
+   elif "deepseek.com" in url: protocol = "deepseek"
+   else: protocol = "openai"
+   ```
+2. 根据 protocol 自动设置 headers、endpoint 路径、参数名（`max_tokens` vs `max_completion_tokens` vs `maxTokens`）
+
+---
+
+### 执行顺序
+
+```
+Phase 1（断点 1 + 4） → Phase 2（断点 2 + 6） → Phase 3（断点 3 + 5）
+    2 天                     1 天                     2 天
+```
+
+Phase 1 收益最大：`code_exec` 给 agent 无限扩展能力，消息压缩防止 context overflow。Phase 3 形成真正的自我改进闭环。
+
+---
+
+### 真正的难点
+
+功能实现本身不难。真正难的是：
+
+1. **安全与自由的平衡**：`exec()` 给了 agent 无限能力，但也给了它删文件的能力。沙箱策略需要反复调优。
+2. **LLM 对工具的使用意愿**：工具再好，LLM 不用就没用。系统提示词的写法、工具描述的清晰度、返回值的可读性，直接影响 agent 是否愿意调用 `code_exec` 而不是硬编答案。
+3. **闭环的惯性**：`tool_failure → 记录 → 检测 → 修复` 链条只要有一步断掉，闭环就失效。每一步都需要监控——failure 记录了但 IdleInspector 没触发怎么办？触发了但 agent 修复方案出错怎么办？
+4. **错误的自动修复 vs 让 LLM 自己悟**：aifix 式的自动纠错效率高，但会剥夺 LLM 从错误中学习的机会。过度纠错 = 替 agent 思考，反而阻碍自主性成长。
+
+这三个难点比代码本身更值得关注。
+
+---
+
+### OAA v2 设计原则
+
+以下原则指导所有闭环补全工作的具体实现。
+
+#### 原则 1：分层执行，不搞 all-or-nothing 安全
+
+`code_exec` 提供运行时代码执行能力，但不等于给 agent 操作系统全部权限。
+
+| 风险等级 | 工具 | 限制 | 适用场景 |
+|---------|------|------|---------|
+| L1 只读 | `code_exec`（默认） | 禁用 `os`、`subprocess`、`shutil`、`open()` 写模式 | 数据计算、格式转换、分析 |
+| L2 写文件 | `file_write` / `file_patch` | 代码不能直接写文件，通过工具写 | 保存结果、修改配置 |
+| L3 系统操作 | `shell_run` | 每次执行前用户确认 | 安装包、改系统设置 |
+
+系统提示词中明确告知 agent 边界：
+
+> `code_exec` 是只读环境，不能直接操作文件或系统。需要写文件用 `file_write`，需要执行命令用 `shell_run`。试图在 `code_exec` 中绕过限制会返回安全错误。
+
+#### 原则 2：制造"不调工具就会错"的处境
+
+LLM 天然倾向凭训练数据编答案，而不是调用工具。优化工具 description 效果有限，需要从激励层面解决。
+
+系统提示词中写规则：
+
+> 涉及当前信息的问题 → 必须调用工具获取据实回答，不能凭训练数据编造。
+> 涉及文件内容 → 必须 `file_read` 后回答。
+> 涉及计算/数据处理 → 必须 `code_exec` 执行后回答。
+> 直接凭记忆回答上述问题将被视为幻觉。
+
+同时提供 few-shot 示例：
+
+> 好的调用：用户问"计算 X" → 调 `code_exec` → 拿到返回值 → 直接输出结果。
+> 坏的响应：用户问"计算 X" → 不调工具 → 凭记忆估算 → 精度丢失 → 视为幻觉。
+
+工具返回值设计成"可直接作为答案输出"的格式，降低 LLM 加工成本。
+
+#### 原则 3：每层独立容错，链断不丢记录
+
+`tool_failure → 记录 → 检测 → 修复 → 验证` 链条中每步都可能断，但每步都必须独立容错：
+
+- **记录**：`try/except` 包住，记录失败不影响正常流程。持久化到文件，进程重启不丢失。
+- **检测**：IdleInspector 异常时 `logger.warning` 吞掉，不影响消息处理。冷却期过后自动重试，不丢 pending failure。
+- **修复**：agent 修复方案出错时，`file_patch` 自动备份 + `rollback_change` 可回滚。备份文件留存 30 天。
+- **验证**：`reload_module` 失败时提示"修改已保存但需重启生效"，不阻塞用户。
+
+IdleInspector 不是唯一入口。加 `summary` 隐式入口——用户问"最近有什么问题？"时 agent 可直接读取 `tool_failures.md` 回答。
+
+#### 原则 4：只自动修复 LLM 无法从中学习的东西
+
+代码执行出错时，不是一刀切修复或全扔给 LLM。按错误类型分层：
+
+| 错误类型 | 处理方式 | 理由 |
+|---------|---------|------|
+| `SyntaxError`（缩进/缺冒号/缺括号） | **自动修复**，返回原始代码 + 修正代码 + 差异 | 这是 token 预测的机械性遗漏，LLM 看了差异也学不到什么 |
+| `NameError`（缺 import/变量名拼错） | **自动补全** import 后重试，注明补充内容 | 同上，机械性问题 |
+| `TypeError`/`ValueError`（参数类型/值不对） | **不修复**，返回完整 traceback | 这是逻辑错误，LLM 需要看到错误自己推理 |
+| 业务逻辑错误（算错了/逻辑不对） | **不修复**，返回结果 + 期望对比 | LLM 必须自己分析哪里错了 |
+
+追踪 `code_exec` 首次成功率作为反馈指标——持续上升说明 LLM 在学习，停滞或下降说明策略需要调整。
+
+#### 原则 5：模块功能 ≠ 系统能力，闭环才是
+
+OAA 不缺模块。gateway、adapter、tool、memory、skill、MCP、evolution 都在。但模块之间没有形成"执行→反馈→学习→改进"的回路。
+
+判断一项工作是否优先级高的标准：**它是否让某个闭环少一个断点？**
+- `code_exec` → 是（agent 能自我扩展，不再锁死在预设工具集）
+- 消息压缩 → 是（防止长对话自然死亡，否则 loop 跑不完就断了）
+- IdleInspector Phase 3 → 是（tool_failure 从"死记录"变成"活反馈"）
+- 优化某个工具的 description → 否（单点优化，不断环）
+
+**每项功能实现后，必须自问：这次改动后，agent 能在无人干预的情况下比之前多走几步？如果答案是 0，这个改动不产生闭环价值。**
+
+#### 原则 6：不要替 agent 思考
+
+IdleInspector 只做模式检测和提案，不做决定。`code_exec` 出错时只返回错误，不自动重试。工具执行失败记录到 `tool_failures.md`，但不自动修复。
+
+每个环节保留给 LLM 的思考空间。系统的作用是提供信息和工具，而不是替 agent 做决策。过度自动化 = 剥夺 LLM 的学习机会 = 阻碍自主性成长。
+
 ### P1 — 已修复（2026-05-15）
 
 | # | 问题 | 修复 | 文件 |
@@ -213,6 +399,14 @@
 ---
 
 ## 已修复历史
+
+### A3 空泡修复 + 代码审查（2026-05-18）
+
+| # | 问题 | 涉及文件 | 修复 |
+|---|------|---------|------|
+| A3 | 空聊天气泡（agent 假死） — 新消息替换旧任务时，后端发空 done 导致前端 loading 被错误关闭、streaming 与旧任务残留混合 | `desktop.py`, `useWebSocket.ts`, `ChatView.vue` | ⑤ `CancelledError` 检查 `_chat_tasks` 是否已被替换 → 被替换时静默退出（stop_chat 仍发送 done）⑥ `send()` 重置 `streamingContent` 防止内容混淆 ⑦ 移除 `watch(streaming)` 激进的 loading 控制 |
+| — | stop_chat 取消 task 后仍调用 management handler 设 idle 状态（双重设置） | `desktop.py` | `_handle_management` 中 stop_chat 分支提前 return |
+| — | 已知：快速换消息时 streaming 气泡有短暂间隙 | — | `send()` 清空 `streamingContent` 后到新任务首块到达前视觉空白 < 500ms，用户刚发消息注意力不在等待，可接受 |
 
 ### 命令行验证通过（2026-05-13 01:00）
 
