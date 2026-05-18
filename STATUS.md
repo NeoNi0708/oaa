@@ -1,6 +1,6 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-18（P0 Phase 1 + Phase 2 完成：code_exec, 消息压缩, tool装饰器, 协议自动检测）
+> 最后更新：2026-05-18（P0 Phase 1-3 全部完成，闭环计划已验证）
 
 ---
 
@@ -207,6 +207,31 @@
 
 ---
 
+## 本次会话（2026-05-18 续）— P0 Phase 3
+
+### 闭环断点 3：code_exec 自动纠错
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `tools.py` | +`_fix_syntax_errors()` | 预执行语法修复：tab→空格、textwrap.dedent 移除多余缩进 |
+| `tools.py` | +`_fix_name_error()` | 后执行 NameError 修复：解析错误名 → 匹配常见模块 → 插入 import |
+| `tools.py` | `do_code_exec` 重写 | 2 次尝试循环：语法修复 → 执行 → NameError 修复 → 重执行 |
+| `tools.py` | 返回值扩展 | `fix_applied` / `original_code` / `fixed_code` 供 LLM 学习 |
+
+**修复策略**：SyntaxError → 自动修复，NameError（已知模块）→ 自动补 import，TypeError/ValueError/未知 NameError → 返回完整 traceback 给 LLM 自修复。
+
+**验证结果**：缩进修复 ✓、NameError import 补全 ✓、不可修复错误返回 traceback ✓、修复信息随返回值返回供 LLM 学习 ✓
+
+### 闭环断点 5：tool_failure 检测闭环
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `idle_inspector.py` | `_check_tool_failures` 增强 | 重复失败检测（≥2 次 → 生成修复方案），建议步骤含 `read_own_source` → `file_patch` → `__pycache__` 清除 → `reload_module` |
+
+**闭环流程**：工具执行失败 → `loop.py` 自动记录到 `tool_failures.md` → `IdleInspector.inspect()` 空闲时检测到重复失败模式 → 生成修复提案 → 用户确认 → agent 自动执行修复流水线。
+
+---
+
 ## 待修复
 
 ### P0 — 闭环补全计划（OAA v2）
@@ -242,12 +267,16 @@
 
 #### 闭环断点 3 — 代码执行无自动纠错
 
+| 维度 | 现状 | 目标 | 状态 |
+|------|------|------|------|
+| 自动纠错 | 无 | SyntaxError/NameError 自动修复 | ✅ **Phase 3 完成** |
+
 工作项：
-1. 在 `do_code_exec` 中加入纠错层：
-   - `SyntaxError` → 用 `ast` 解析 + 常见修复（缩进、缺 `import`、变量名拼写）
-   - `NameError` → 自动插入 `import` 后重试
+1. ✅ **完成** 在 `do_code_exec` 中加入纠错层：
+   - `SyntaxError` → `_fix_syntax_errors()` 用 `ast` 解析 + tab/缩进修复
+   - `NameError` → `_fix_name_error()` 自动插入 import 后重试
    - `TypeError`/`ValueError` → 返回完整 traceback 给 LLM 自修复
-2. 如果修复成功，将修正后的代码也返回给 LLM 供学习
+2. ✅ **完成** 如果修复成功，将修正后的代码（`original_code` / `fixed_code` / `fix_applied`）返回给 LLM 供学习
 
 #### 闭环断点 4 — 消息队列无限增长
 
@@ -261,13 +290,18 @@
 
 #### 闭环断点 5 — 工具失败未影响 agent 行为
 
+| 维度 | 现状 | 目标 | 状态 |
+|------|------|------|------|
+| 闭环 | 失败仅记录 | 检测 + 提案 + 修复流水线 | ✅ **Phase 3 完成** |
+
 工作项：
-1. **已完成** `_memory_mgr.add_tool_failure()` 记录（`loop.py:197`）
-2. **待完成** IdleInspector Phase 3 `_check_tool_failures()`：
+1. ✅ **已完成** `_memory_mgr.add_tool_failure()` 记录（`loop.py:197`）
+2. ✅ **已完成** IdleInspector Phase 3 `_check_tool_failures()`：
    - 按工具名分组统计，检测重复失败模式
    - 对失败 ≥2 次的工具，生成修复建议
-   - 提示用户 → 用户确认 → agent 执行 `read_own_source` → 出方案 → `file_patch` 修复
-3. 修复后自动清除 `__pycache__` + 尝试 `reload_module`
+   - 建议步骤：`read_own_source` → `file_patch` → `__pycache__` 清除 → `reload_module`
+   - 提示用户 → 用户确认 → agent 执行修复流水线
+3. ✅ **已完成** 修复提案中包含 `__pycache__` 清除 + `reload_module` 步骤指导
 
 #### 闭环断点 6 — 协议适配需手动配置
 
@@ -280,8 +314,7 @@
 ### 执行顺序
 
 ```
-Phase 1（断点 1 + 4） ✅ 完成 → Phase 2（断点 2 + 6） ✅ 完成 → Phase 3（断点 3 + 5）
-                                                             2 天
+Phase 1（断点 1 + 4） ✅ 完成 → Phase 2（断点 2 + 6） ✅ 完成 → Phase 3（断点 3 + 5） ✅ 完成
 ```
 
 Phase 1 已完成：`code_exec` 给 agent 无限扩展能力，消息压缩防止 context overflow。Phase 3 形成真正的自我改进闭环。

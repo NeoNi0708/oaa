@@ -1,9 +1,12 @@
 """Atomic tools — ported from GenericAgent ga.py. All tools as async methods."""
+import ast
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
+import textwrap
 from typing import TYPE_CHECKING, Optional
 
 from ..auth.permissions import PermissionsManager
@@ -24,6 +27,80 @@ _EXEC_RUNNER = os.path.join(os.path.dirname(__file__), "_exec_runner.py")
 OAA_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 _OAA_SOURCE_DIRS = {os.path.normpath(os.path.join(OAA_ROOT, d)) for d in ("oaa", "skills", "dynamic_tools")}
 _OAA_BACKUP_DIR = "backups"  # relative to data_dir
+
+# ---------------------------------------------------------------------------
+# code_exec auto-correction helpers
+# ---------------------------------------------------------------------------
+
+_COMMON_MODULES = frozenset({
+    "json", "os", "re", "sys", "math", "random", "datetime",
+    "collections", "itertools", "functools", "typing", "pathlib",
+    "shutil", "glob", "csv", "io", "string", "copy", "decimal",
+    "hashlib", "base64", "uuid", "pprint", " fractions",
+})
+
+
+def _fix_syntax_errors(code: str) -> tuple[str, str]:
+    """Pre-execution syntax fix — handle indentation issues common in LLM output.
+
+    Returns (fixed_code, description).
+    Returns the original code unchanged if no fix is needed.
+    """
+    # Fix 1: normalize tabs to spaces
+    lines = code.split("\n")
+    fixed = False
+    normalized = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped:
+            leading = line[:len(line) - len(stripped)]
+            norm = leading.replace("\t", "    ")
+            if norm != leading:
+                fixed = True
+            normalized.append(norm + stripped)
+        else:
+            normalized.append(line)
+
+    if fixed:
+        try:
+            ast.parse("\n".join(normalized))
+            return "\n".join(normalized), "统一缩进为空格"
+        except SyntaxError:
+            pass  # other errors remain, fall through
+
+    # Fix 2: remove accidental module-level indentation
+    try:
+        dedented = textwrap.dedent(code)
+        if dedented != code:
+            ast.parse(dedented)
+            return dedented, "移除多余缩进"
+    except SyntaxError:
+        pass
+
+    return code, ""
+
+
+def _fix_name_error(code: str, stderr: str) -> tuple[str, str]:
+    """Post-execution NameError fix — add missing import statements.
+
+    Returns (fixed_code, description).
+    Returns the original code unchanged if no fix applies.
+    """
+    m = re.search(r"NameError.*?name '(\w+)' is not defined", stderr)
+    if not m:
+        return code, ""
+
+    name = m.group(1)
+    if name not in _COMMON_MODULES:
+        return code, ""
+
+    # Don't re-insert if already imported
+    for line in code.split("\n"):
+        if re.match(rf"^\s*import\s+{name}(\s|$)", line) or re.match(rf"^\s*from\s+{name}\s+import", line):
+            return code, ""
+
+    fixed = f"import {name}\n{code}"
+    return fixed, f"自动补充 import {name}"
 
 
 class AtomicTools(BaseHandler):
@@ -157,6 +234,12 @@ class AtomicTools(BaseHandler):
         Allows most imports but blocks shell execution (os.system,
         subprocess.Popen, shutil.rmtree, etc.).  Uses the ``result``
         variable convention for return values.
+
+        Includes auto-correction layer:
+        - Pre-execution: fixes indentation issues (SyntaxError)
+        - Post-execution: adds missing import statements (NameError)
+        - Returns ``fix_applied`` / ``original_code`` / ``fixed_code`` so the
+          LLM can learn from the correction.
         """
         code = args.get("code", "")
         timeout = min(args.get("timeout", 15), 60)
@@ -164,59 +247,89 @@ class AtomicTools(BaseHandler):
         if not code.strip():
             return {"status": "error", "msg": "No code provided"}
 
-        with tempfile.NamedTemporaryFile(
-            suffix=".py", delete=False, mode="w", encoding="utf-8", dir=self.data_dir
-        ) as f:
-            f.write(code)
-            tmp_path = f.name
+        # Pre-execution syntax fix
+        original_code = code
+        code, fix_desc = _fix_syntax_errors(code)
+        all_fixes = [fix_desc] if fix_desc else []
 
-        result_file = tempfile.NamedTemporaryFile(delete=False, suffix=".json", dir=self.data_dir)
-        result_path = result_file.name
-        result_file.close()
+        # Try execution, with one re-try after NameError fix
+        for attempt in range(2):
+            with tempfile.NamedTemporaryFile(
+                suffix=".py", delete=False, mode="w", encoding="utf-8", dir=self.data_dir
+            ) as f:
+                f.write(code)
+                tmp_path = f.name
 
-        cmd = [sys.executable, "-I", "-X", "utf8", "-u", _EXEC_RUNNER, tmp_path, result_path]
+            result_file = tempfile.NamedTemporaryFile(delete=False, suffix=".json", dir=self.data_dir)
+            result_path = result_file.name
+            result_file.close()
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            cmd = [sys.executable, "-I", "-X", "utf8", "-u", _EXEC_RUNNER, tmp_path, result_path]
+
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                return {"status": "error", "msg": f"Timeout after {timeout}s"}
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    return {"status": "error", "msg": f"Timeout after {timeout}s"}
 
-            stdout_str = stdout.decode("utf-8", errors="replace") if stdout else ""
-            stderr_str = stderr.decode("utf-8", errors="replace") if stderr else ""
+                stdout_str = stdout.decode("utf-8", errors="replace") if stdout else ""
+                stderr_str = stderr.decode("utf-8", errors="replace") if stderr else ""
 
-            result_data = {}
-            try:
-                with open(result_path, "r", encoding="utf-8") as f:
-                    result_data = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                pass
+                result_data = {}
+                try:
+                    with open(result_path, "r", encoding="utf-8") as f:
+                        result_data = json.load(f)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    pass
 
-            return {
-                "status": "success" if proc.returncode == 0 else "error",
-                "result": result_data.get("result"),
-                "stdout": stdout_str[:50000] if stdout_str else "",
-                "stderr": stderr_str[:50000] if stderr_str else "",
-                "exit_code": proc.returncode,
-            }
-        except Exception as exc:
-            logger.error("code_exec failed: %s", exc)
-            return {"status": "error", "msg": str(exc)}
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            try:
-                os.unlink(result_path)
-            except OSError:
-                pass
+                base = {
+                    "result": result_data.get("result"),
+                    "stdout": stdout_str[:50000] if stdout_str else "",
+                    "stderr": stderr_str[:50000] if stderr_str else "",
+                    "exit_code": proc.returncode,
+                }
+
+                if proc.returncode == 0:
+                    base["status"] = "success"
+                    if all_fixes:
+                        base["fix_applied"] = "; ".join(all_fixes)
+                        base["original_code"] = original_code
+                        base["fixed_code"] = code
+                    return base
+
+                # Attempt NameError fix on first failure (skip for syntax-only fixes)
+                if attempt == 0:
+                    code, fix2 = _fix_name_error(code, stderr_str)
+                    if fix2:
+                        all_fixes.append(fix2)
+                        continue  # retry with fixed code
+
+                # Unfixable error — return full traceback for LLM self-repair
+                base["status"] = "error"
+                if all_fixes:
+                    base["fix_applied"] = "; ".join(all_fixes)
+                    base["original_code"] = original_code
+                    base["fixed_code"] = code
+                return base
+
+            except Exception as exc:
+                logger.error("code_exec failed: %s", exc)
+                return {"status": "error", "msg": str(exc)}
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                try:
+                    os.unlink(result_path)
+                except OSError:
+                    pass
 
     @agent_tool(description="Read file content")
     async def do_file_read(self, path: str, start: int = 1, count: int = 200, keyword: str = "") -> dict:
