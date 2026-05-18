@@ -3,6 +3,7 @@
 Handles config, tasks, skills, evolution, and channel management requests.
 Each handler receives a payload dict and returns a response dict.
 """
+import asyncio
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -23,8 +24,9 @@ VALID_TYPES = {
     "get_config", "save_config",
     "get_status",
     "get_tasks", "save_task", "delete_task", "toggle_task",
-    "get_skills", "get_evolution",
+    "get_skills", "get_skill_detail", "switch_skill", "get_evolution",
     "qr_login", "poll_qr",
+    "reconnect_channel",
     "switch_model",
     "get_models",
     "stop_chat",
@@ -43,7 +45,7 @@ class ManagementHandler:
         skill_mgr: "SkillManager",
         evolution: "EvolutionEngine",
         channel_adapters: dict,
-        agent: "OAAAgent | None" = None,   # for hot-reloading LLM config
+        agent: "OAAAgent | None" = None,
     ):
         self._config = config
         self._scheduler = scheduler
@@ -66,8 +68,8 @@ class ManagementHandler:
         if state == "thinking":
             self._chat_count += 1
 
-    def handle(self, msg_type: str, payload: dict) -> dict:
-        """Dispatch a management request. Returns a response dict."""
+    async def handle(self, msg_type: str, payload: dict) -> dict:
+        """Dispatch a management request. Returns a response dict (or coroutine)."""
         if msg_type not in VALID_TYPES:
             return {"ok": False, "error": f"Unknown management type: {msg_type}"}
 
@@ -77,7 +79,10 @@ class ManagementHandler:
             return {"ok": False, "error": f"No handler for: {msg_type}"}
 
         try:
-            return handler(payload)
+            result = handler(payload)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return result
         except Exception as exc:
             logger.exception("Management handler %s failed: %s", msg_type, exc)
             return {"ok": False, "error": str(exc)}
@@ -199,17 +204,17 @@ class ManagementHandler:
         from dataclasses import asdict
         default_urls = {
             "deepseek": "https://api.deepseek.com",
-            "volcengine": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+            "volcengine": "https://ark.cn-beijing.volces.com/api/v3",
             "tongyi": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "siliconflow": "https://api.siliconflow.cn/v1/chat/completions",
+            "siliconflow": "https://api.siliconflow.cn/v1",
             "zhipu": "https://open.bigmodel.cn/api/paas/v4",
-            "moonshot": "https://api.moonshot.cn/v1/chat/completions",
+            "moonshot": "https://api.moonshot.cn/v1",
             "baichuan": "https://api.baichuan-ai.com/v1",
-            "stepfun": "https://api.stepfun.com/v1/chat/completions",
+            "stepfun": "https://api.stepfun.com/v1",
             "minimax": "https://api.minimaxi.com/v1",
             "lingyi": "https://api.lingyiwanwu.com/v1",
             "xunfei": "https://maas-api.cn-huabei-1.xf-yun.com/v2",
-            "xiaomi": "https://api.xiaomimimo.com/v1/chat/completions",
+            "xiaomi": "https://api.xiaomimimo.com/v1",
             "openai": "https://api.openai.com/v1",
             "anthropic": "https://api.anthropic.com",
             "custom-openai": "",
@@ -343,6 +348,38 @@ class ManagementHandler:
             "total": len(skills),
         }
 
+    def _handle_get_skill_detail(self, payload: dict) -> dict:
+        """Return full detail for a single skill by name."""
+        name = payload.get("name", "")
+        if not name:
+            return {"ok": False, "error": "No skill name provided"}
+        info = self._skill_mgr.get(name)
+        if not info:
+            return {"ok": False, "error": f"Skill not found: {name}"}
+        info.load()  # ensure fresh
+        current = self._skill_mgr.get_current()
+        return {
+            "ok": True,
+            "name": info.name,
+            "category": info.category,
+            "description": info.description,
+            "skill_md": info.skill_md,
+            "sop_md": info.sop_md,
+            "tools": info.tools,
+            "knowledge": info.knowledge,
+            "is_current": current is not None and current.name == info.name,
+        }
+
+    def _handle_switch_skill(self, payload: dict) -> dict:
+        """Switch the active skill by name."""
+        name = payload.get("name", "")
+        if not name:
+            return {"ok": False, "error": "No skill name provided"}
+        info = self._skill_mgr.switch_to(name)
+        if not info:
+            return {"ok": False, "error": f"Skill not found: {name}"}
+        return {"ok": True, "current": info.name}
+
     def _handle_get_evolution(self, _payload: dict) -> dict:
         """Return evolution statistics and suggestions from EvolutionEngine."""
         suggestions = self._evolution.stats.get("suggestions", [])
@@ -361,7 +398,7 @@ class ManagementHandler:
     # QR / Channel login
     # ------------------------------------------------------------------
 
-    def _handle_qr_login(self, payload: dict) -> dict:
+    async def _handle_qr_login(self, payload: dict) -> dict:
         """Initiate QR code login for a channel (wechat/dingtalk/feishu)."""
         channel = payload.get("channel", "")
         if channel not in self._channels:
@@ -371,7 +408,25 @@ class ManagementHandler:
         if not hasattr(adapter, "get_qrcode"):
             return {"ok": False, "error": f"Channel {channel} does not support QR login"}
 
+        if channel == "dingtalk":
+            cid = payload.get("client_id", "")
+            sec = payload.get("client_secret", "")
+            if cid:
+                adapter.client_id = cid
+            if sec:
+                adapter.client_secret = sec
+        elif channel == "feishu":
+            aid = payload.get("app_id")
+            asec = payload.get("app_secret")
+            if aid is not None:
+                adapter.app_id = aid
+            if asec is not None:
+                adapter.app_secret = asec
+            logger.info("[FeishuQR] app_id=%s app_secret=%s", "SET" if aid else "EMPTY", "SET" if asec else "EMPTY")
+
         result = adapter.get_qrcode()
+        if asyncio.iscoroutine(result):
+            result = await result
         if "error" in result:
             return {"ok": False, "error": result["error"]}
 
@@ -379,10 +434,11 @@ class ManagementHandler:
             "ok": True,
             "qr_code_url": result.get("qrcode_url", ""),
             "qr_code_id": result.get("qrcode_id", ""),
+            "user_code": result.get("user_code", ""),
             "channel": channel,
         }
 
-    def _handle_poll_qr(self, payload: dict) -> dict:
+    async def _handle_poll_qr(self, payload: dict) -> dict:
         """Poll QR code scan status."""
         channel = payload.get("channel", "")
         qrcode_id = payload.get("qrcode_id", "")
@@ -395,17 +451,108 @@ class ManagementHandler:
             return {"ok": False, "error": f"Channel {channel} does not support QR polling"}
 
         result = adapter.poll_qrcode_status(qrcode_id)
-        if result.get("status") == "scanned":
-            # Save token/bot_id to config after successful scan
+        if asyncio.iscoroutine(result):
+            result = await result
+        logger.info("poll_qr channel=%s qrcode_id=%s result=%s", channel, qrcode_id[:16], result)
+        if result.get("status") == "confirmed":
             if channel == "wechat":
                 token = result.get("bot_token", "")
                 if token:
                     self._config.wechat.iLink_token = token
-                    self._config.wechat.iLink_bot_id = result.get("bot_id", self._config.wechat.iLink_bot_id)
+                    self._config.wechat.iLink_bot_id = result.get("ilink_bot_id", self._config.wechat.iLink_bot_id)
+                    self._config.wechat.base_url = result.get("base_url", self._config.wechat.base_url)
+                    self._config.wechat.enabled = True
                     self._config.save()
+                    # Update adapter instance so it can actually send/receive
+                    adapter.token = token
+                    adapter.bot_id = self._config.wechat.iLink_bot_id
+                    adapter.base_url = self._config.wechat.base_url
+                    adapter._bot._base_url = self._config.wechat.base_url
+                    # Restart polling with new credentials
+                    if hasattr(adapter, "stop_polling"):
+                        adapter.stop_polling()
+                    if hasattr(adapter, "start_polling"):
+                        asyncio.create_task(adapter.start_polling())
+            elif channel == "dingtalk":
+                self._config.dingtalk.client_id = getattr(adapter, "client_id", "")
+                self._config.dingtalk.client_secret = getattr(adapter, "client_secret", "")
+                self._config.dingtalk.enabled = True
+                self._config.save()
+                # Start the Stream client
+                if hasattr(adapter, "start") and callable(adapter.start):
+                    result_or_coro = adapter.start()
+                    if asyncio.iscoroutine(result_or_coro):
+                        asyncio.create_task(result_or_coro)
+            elif channel == "feishu":
+                self._config.feishu.app_id = getattr(adapter, "app_id", "")
+                self._config.feishu.app_secret = getattr(adapter, "app_secret", "")
+                self._config.feishu.enabled = True
+                self._config.save()
+                # Start the WebSocket event client
+                if hasattr(adapter, "start") and callable(adapter.start):
+                    result_or_coro = adapter.start()
+                    if asyncio.iscoroutine(result_or_coro):
+                        asyncio.create_task(result_or_coro)
 
         return {
             "ok": True,
             "status": result.get("status", "waiting"),
             "msg": result.get("msg", ""),
         }
+
+    def _handle_reconnect_channel(self, payload: dict) -> dict:
+        """Reconnect a channel using saved credentials (no QR scan)."""
+        channel = payload.get("channel", "")
+        if channel not in self._channels:
+            return {"ok": False, "error": f"Unknown channel: {channel}"}
+
+        adapter = self._channels[channel]
+        if channel == "wechat":
+            token = self._config.wechat.iLink_token
+            base_url = self._config.wechat.base_url
+            if not token or not base_url:
+                return {"ok": False, "error": "微信未认证，请先扫码登录"}
+            adapter.token = token
+            adapter.base_url = base_url
+            adapter.bot_id = self._config.wechat.iLink_bot_id
+            adapter._bot._base_url = base_url
+            # Restart polling with updated credentials
+            if hasattr(adapter, "stop_polling"):
+                adapter.stop_polling()
+            if hasattr(adapter, "start_polling"):
+                import asyncio
+                asyncio.create_task(adapter.start_polling())
+            return {"ok": True, "online": True, "msg": "微信已重连"}
+        elif channel == "dingtalk":
+            cid = self._config.dingtalk.client_id
+            sec = self._config.dingtalk.client_secret
+            if not cid or not sec:
+                return {"ok": False, "error": "钉钉未配置凭证"}
+            if hasattr(adapter, "client_id"):
+                adapter.client_id = cid
+            if hasattr(adapter, "client_secret"):
+                adapter.client_secret = sec
+            # Start the Stream client
+            if hasattr(adapter, "start") and callable(adapter.start):
+                result_or_coro = adapter.start()
+                if asyncio.iscoroutine(result_or_coro):
+                    asyncio.create_task(result_or_coro)
+            return {"ok": True, "online": True, "msg": "钉钉已重连"}
+        elif channel == "feishu":
+            aid = self._config.feishu.app_id
+            asec = self._config.feishu.app_secret
+            if not aid or not asec:
+                return {"ok": False, "error": "飞书未配置凭证"}
+            if hasattr(adapter, "app_id"):
+                adapter.app_id = aid
+            if hasattr(adapter, "app_secret"):
+                adapter.app_secret = asec
+            # Start the WebSocket event client
+            if hasattr(adapter, "start") and callable(adapter.start):
+                result_or_coro = adapter.start()
+                if asyncio.iscoroutine(result_or_coro):
+                    asyncio.create_task(result_or_coro)
+            return {"ok": True, "online": True, "msg": "飞书已重连"}
+        else:
+            return {"ok": False, "error": f"Channel {channel} reconnect not implemented"}
+
