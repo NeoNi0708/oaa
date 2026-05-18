@@ -511,3 +511,10 @@ IdleInspector 只做模式检测和提案，不做决定。`code_exec` 出错时
 | `test_permissions.py` | 重写 | 覆盖 auto/confirm/restrict 三级行为、`DANGEROUS_OPS` 完整性、回调集成 |
 | `test_extended_tools.py` | 适配 | 显式指定 `permission_level: confirm` 确保测试语义正确 |
 | `oaa_agent.py` | +权限级别提示 | 系统提示词中显示当前权限级别 |
+
+### B3：modify_own_prompt 工具
+
+| 模块 | 变更 | 说明 |
+|------|------|------|
+| `agent/tools.py` | +do_modify_own_prompt | 新增工具：list 列出/read 查看/write 改写 identity/soul/user/agents/bootstrap 五个提示词节 |
+| `agent/tool_schema.py` | +schema | modify_own_prompt 的 OpenAI 函数调用 schema（action/section/content 参数） |

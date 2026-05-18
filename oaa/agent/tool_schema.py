@@ -138,6 +138,22 @@ ATOMIC_TOOLS_SCHEMA = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "modify_own_prompt",
+            "description": "Read or modify your own system prompt sections. Use 'list' to see all sections, 'read' to view a section, 'write' to replace a section's content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "read", "write"], "description": "list=show sections, read=view section, write=replace section"},
+                    "section": {"type": "string", "description": "Section name: identity, soul, user, agents, bootstrap (required for read/write)"},
+                    "content": {"type": "string", "description": "New content for the section (required for write action)"},
+                },
+                "required": ["action"],
+            }
+        }
+    },
 ]
 
 SHELL_RUN_TOOL = {

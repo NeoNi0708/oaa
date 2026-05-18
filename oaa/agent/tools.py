@@ -446,6 +446,87 @@ class AtomicTools(BaseHandler):
         return {"status": "INTERRUPT", "intent": "HUMAN_INTERVENTION",
                 "data": {"question": args.get("question", ""), "candidates": args.get("candidates", [])}}
 
+    # ------------------------------------------------------------------
+    # B3: modify own prompt
+    # ------------------------------------------------------------------
+
+    _PROMPT_SECTIONS = frozenset({"identity", "soul", "user", "agents", "bootstrap"})
+
+    @agent_tool(
+        name="modify_own_prompt",
+        description="Read or modify your own system prompt sections. Sections: identity (自我介绍/人格设定), "
+                    "soul (工作哲学/原则), user (用户信息), agents (工作边界/规则), bootstrap (启动自我介绍). "
+                    "Use 'list' action to see available sections, 'read' to view a section, "
+                    "'write' to replace a section's content."
+    )
+    async def do_modify_own_prompt(self, args: dict) -> dict:
+        """Read or modify your own system prompt sections.
+
+        Sections:
+          identity  — 自我介绍 / 人格设定
+          soul      — 工作哲学 / 原则
+          user      — 用户信息
+          agents    — 工作边界 / 规则
+          bootstrap — 启动自我介绍
+
+        Actions:
+          list              — show available sections and their line counts
+          read <section>    — show full content of a section
+          write <section>   — replace a section's content
+        """
+        action = args.get("action", "list")
+        section = args.get("section", "")
+
+        memory_dir = os.path.join(self.data_dir, "memory")
+
+        def _read_file(p: str) -> str:
+            with open(p, "r", encoding="utf-8") as f:
+                return f.read()
+
+        if action == "list":
+            result = {}
+            for sec in sorted(self._PROMPT_SECTIONS):
+                path = os.path.join(memory_dir, f"{sec.upper()}.md")
+                if os.path.exists(path):
+                    text = _read_file(path)
+                    lines = len(text.strip().split("\n"))
+                    preview = text.strip().split("\n")[0] if text.strip() else "(empty)"
+                    result[sec] = {"lines": lines, "preview": preview[:80]}
+                else:
+                    result[sec] = {"lines": 0, "preview": "(not found)"}
+            return {"status": "success", "sections": result}
+
+        if action == "read":
+            if section not in self._PROMPT_SECTIONS:
+                return {"status": "error", "msg": f"Unknown section '{section}'. Available: {', '.join(sorted(self._PROMPT_SECTIONS))}"}
+            path = os.path.join(memory_dir, f"{section.upper()}.md")
+            if not os.path.exists(path):
+                return {"status": "error", "msg": f"Section file not found: {path}"}
+            content = _read_file(path)
+            return {"status": "success", "section": section, "content": content, "lines": len(content.strip().split("\n"))}
+
+        if action == "write":
+            if section not in self._PROMPT_SECTIONS:
+                return {"status": "error", "msg": f"Unknown section '{section}'. Available: {', '.join(sorted(self._PROMPT_SECTIONS))}"}
+            content = args.get("content", "")
+            if not content.strip():
+                return {"status": "error", "msg": "Content is required"}
+            path = os.path.join(memory_dir, f"{section.upper()}.md")
+            # Backup current
+            if os.path.exists(path):
+                backup_dir = os.path.join(self.data_dir, "backups")
+                os.makedirs(backup_dir, exist_ok=True)
+                backup_path = os.path.join(backup_dir, f"{section.upper()}.md.bak")
+                import shutil
+                shutil.copy2(path, backup_path)
+
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content.strip() + "\n")
+            logger.info("modify_own_prompt: section=%s lines=%d", section, len(content.strip().split("\n")))
+            return {"status": "success", "section": section, "lines": len(content.strip().split("\n"))}
+
+        return {"status": "error", "msg": f"Unknown action '{action}'. Use list, read, or write."}
+
     async def do_update_working_checkpoint(self, args: dict) -> dict:
         """Save key info to working memory (survives across restarts). Uses
         tiered HOT memory — entries are automatically compacted when HOT
