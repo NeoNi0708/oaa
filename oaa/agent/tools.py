@@ -278,7 +278,7 @@ class AtomicTools(BaseHandler):
             result_path = result_file.name
             result_file.close()
 
-            cmd = [sys.executable, "-I", "-X", "utf8", "-u", _EXEC_RUNNER, tmp_path, result_path]
+            cmd = [sys.executable, "-I", "-X", "utf8", "-u", _EXEC_RUNNER, "--timeout", str(timeout), tmp_path, result_path]
 
             try:
                 proc = await asyncio.create_subprocess_exec(

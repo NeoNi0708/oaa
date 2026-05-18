@@ -1,6 +1,6 @@
 """Exec runner — in-process Python execution for do_code_exec.
 
-Called as: python _exec_runner.py <code_file_path> <result_file_path>
+Called as: python _exec_runner.py [--timeout N] <code_file_path> <result_file_path>
 
 More permissive than _sandbox_runner.py — allows most imports but disables
 specific dangerous functions (os.system, subprocess.Popen, shutil.rmtree).
@@ -9,6 +9,7 @@ Writes the ``result`` variable as JSON to <result_file_path>.
 import builtins
 import json
 import sys
+import threading
 import traceback
 
 # ---- Dangerous-function patches (per-module) ----
@@ -56,14 +57,23 @@ _SAFE_BUILTINS: dict = {
     if k not in {"exec", "eval", "compile"}
 }
 
-# ---- Execute user code ----
+# ---- Argument parsing with optional timeout ----
 
-if len(sys.argv) < 3:
-    print("ERROR: Usage: _exec_runner.py <code_file> <result_file>", file=sys.stderr)
+_ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]  # positional args
+_timeout = 30  # default timeout seconds
+for i, a in enumerate(sys.argv[1:], 1):
+    if a == "--timeout" and i + 1 < len(sys.argv[1:]):
+        try:
+            _timeout = max(1, int(sys.argv[i + 1]))
+        except ValueError:
+            pass
+
+if len(_ARGS) < 2:
+    print(f"ERROR: Usage: _exec_runner.py [--timeout N] <code_file> <result_file>", file=sys.stderr)
     sys.exit(1)
 
-code_path = sys.argv[1]
-result_path = sys.argv[2]
+code_path = _ARGS[0]
+result_path = _ARGS[1]
 
 try:
     with open(code_path, "r", encoding="utf-8") as f:
@@ -72,20 +82,40 @@ except FileNotFoundError:
     print(f"ERROR: code file not found: {code_path}", file=sys.stderr)
     sys.exit(1)
 
-_globals: dict = {"__builtins__": _SAFE_BUILTINS, "__name__": "__exec__"}
-try:
-    exec(code, _globals)
-except SystemExit:
-    pass
-except Exception:
-    traceback.print_exc(file=sys.stderr)
+# ---- Execute user code with timeout watchdog ----
+
+_result: dict = {}
+_exc_info: list[str] = []
+
+def _run_code():
+    """Execute user code in a separate thread."""
+    _g: dict = {"__builtins__": _SAFE_BUILTINS, "__name__": "__exec__"}
+    try:
+        exec(code, _g)
+    except SystemExit:
+        pass
+    except Exception:
+        _exc_info.append(traceback.format_exc())
+        return
+
+    result_value = _g.get("result")
+    try:
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump({"result": result_value}, f, ensure_ascii=False, default=str)
+    except Exception as exc:
+        _exc_info.append(f"ERROR: failed to write result: {exc}")
+
+_thread = threading.Thread(target=_run_code, daemon=True)
+_thread.start()
+_thread.join(timeout=_timeout)
+
+if _thread.is_alive():
+    # Timeout — the code is still running.  This is a subprocess, so
+    # os._exit is safe (no cleanup needed).
+    print(f"ERROR: code execution timed out after {_timeout}s", file=sys.stderr)
     sys.exit(1)
 
-# Extract the ``result`` variable and write it as JSON
-result_value = _globals.get("result")
-try:
-    with open(result_path, "w", encoding="utf-8") as f:
-        json.dump({"result": result_value}, f, ensure_ascii=False, default=str)
-except Exception as exc:
-    print(f"ERROR: failed to write result: {exc}", file=sys.stderr)
+# Thread finished — check for errors
+if _exc_info:
+    sys.stderr.write(_exc_info[0])
     sys.exit(1)
