@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Optional
 from ..logging_config import get_logger
 
 if TYPE_CHECKING:
+    from ..evolution.engine import EvolutionEngine
     from ..scheduler import TaskScheduler
     from .memory_manager import MemoryManager
 
@@ -20,14 +21,18 @@ class IdleInspector:
 
     Flow:
     1. Check TaskScheduler for due tasks -> propose execution
-    2. If no tasks, check memory/corrections -> propose self-improvement
-    3. Always asks user before acting (via proposal text)
+    2. Check EvolutionEngine for auto-refinements -> propose self_improve
+    3. Check tool failures -> propose read_own_source + file_patch fix
+    4. Check correction patterns -> propose modify_own_prompt
+    5. Always asks user before acting (via proposal text)
     """
 
     def __init__(self, scheduler: Optional["TaskScheduler"] = None,
-                 memory_mgr: Optional["MemoryManager"] = None):
+                 memory_mgr: Optional["MemoryManager"] = None,
+                 evolution: Optional["EvolutionEngine"] = None):
         self._scheduler = scheduler
         self._memory_mgr = memory_mgr
+        self._evolution = evolution
         self._last_check: float = 0.0
 
     def reset_cooldown(self):
@@ -46,13 +51,18 @@ class IdleInspector:
         if proposal:
             return proposal
 
-        # Phase 2: Self-improvement opportunities
-        proposal = self._check_self_improvement()
+        # Phase 2: Evolution-driven refinements (SOP skips, usage milestones)
+        proposal = self._check_evolution_refinements()
         if proposal:
             return proposal
 
-        # Phase 3: Tool failure patterns
+        # Phase 3: Tool failure patterns → self_improve
         proposal = self._check_tool_failures()
+        if proposal:
+            return proposal
+
+        # Phase 4: Correction patterns → modify_own_prompt
+        proposal = self._check_correction_patterns()
         if proposal:
             return proposal
 
@@ -87,7 +97,48 @@ class IdleInspector:
             + "\n\n是否执行这些任务？请确认。"
         )
 
-    def _check_self_improvement(self) -> str | None:
+    def _check_evolution_refinements(self) -> str | None:
+        """Check EvolutionEngine for auto-refinements (SOP skips, usage milestones).
+
+        Returns an actionable proposal the agent can execute with self_improve,
+        modify_own_prompt, or code_exec.
+        """
+        if not self._evolution:
+            return None
+
+        try:
+            refinements = self._evolution.get_auto_refinements()
+        except Exception as exc:
+            logger.warning("Evolution refinement check failed: %s", exc)
+            return None
+
+        if not refinements:
+            return None
+
+        lines = []
+        for r in refinements:
+            if r["type"] == "sop_skip":
+                lines.append(
+                    f"  - **SOP 优化**：{r['description']}\n"
+                    f"    操作: 用 ``self_improve`` 从 ``{r['file_path']}`` 中移除该步骤\n"
+                    f"    步骤名称: {r['step_name']}"
+                )
+            elif r["type"] == "skill_optimize":
+                lines.append(
+                    f"  - **技能优化**：{r['description']}\n"
+                    f"    操作: 用 ``code_exec`` 分析使用数据，生成优化建议"
+                )
+
+        if not lines:
+            return None
+
+        return (
+            "🔬 技能优化检测：发现以下可优化项：\n\n"
+            + "\n\n".join(lines)
+            + "\n\n是否执行这些优化？请确认。"
+        )
+
+    def _check_tool_failures(self) -> str | None:
         """Check memory/corrections for improvement suggestions.
 
         Uses lightweight heuristics — no LLM calls — to find areas
@@ -151,11 +202,11 @@ class IdleInspector:
         return proposal
 
     def _check_tool_failures(self) -> str | None:
-        """Phase 3: Check logged tool failures for patterns that need code fixes.
+        """Check logged tool failures and propose structured self_improve repairs.
 
-        When a tool fails ≥2 times, generates an actionable repair proposal
-        that the agent can follow after user confirmation:
-        ``read_own_source`` → ``file_patch`` → pycache clear → ``reload_module``.
+        When a tool fails ≥2 times, generates a repair proposal with exact
+        file paths and suggested fix approach so the agent can execute
+        ``read_own_source`` → ``self_improve`` → clear pycache → ``reload_module``.
         """
         if not self._memory_mgr:
             return None
@@ -175,16 +226,49 @@ class IdleInspector:
             if count >= 2:
                 latest = [f for f in failures if f["tool"] == tool][-1]
                 error_snippet = latest.get("error", "")[:120]
-                # Look for an example arg to hint at where the issue is
                 args_hint = latest.get("args", "")
                 if args_hint and len(args_hint) > 100:
                     args_hint = args_hint[:100] + "…"
 
+                # Infer which source file likely contains the tool
+                tool_to_file = {
+                    # AtomicTools live in tools.py
+                    "ask_user": "oaa/agent/tools.py",
+                    "file_write": "oaa/agent/tools.py",
+                    "file_patch": "oaa/agent/tools.py",
+                    "shell_run": "oaa/agent/tools.py",
+                    "code_run": "oaa/agent/tools.py",
+                    "code_exec": "oaa/agent/tools.py",
+                    "read_own_source": "oaa/agent/tools.py",
+                    "list_own_structure": "oaa/agent/tools.py",
+                    "reload_module": "oaa/agent/tools.py",
+                    "rollback_change": "oaa/agent/tools.py",
+                    "memory_recall": "oaa/agent/tools.py",
+                    "correction_log": "oaa/agent/tools.py",
+                    "self_reflect": "oaa/agent/tools.py",
+                    "update_working_checkpoint": "oaa/agent/tools.py",
+                    # ExtendedTools
+                    "word_doc": "oaa/agent/extended_tools.py",
+                    "excel_xlsx": "oaa/agent/extended_tools.py",
+                    "email_send": "oaa/agent/extended_tools.py",
+                    "skill_load": "oaa/agent/extended_tools.py",
+                    "skill_create": "oaa/agent/extended_tools.py",
+                    "web_search": "oaa/agent/extended_tools.py",
+                    "web_scan": "oaa/agent/extended_tools.py",
+                    "plan_create": "oaa/agent/extended_tools.py",
+                    "plan_update": "oaa/agent/extended_tools.py",
+                    "plan_list": "oaa/agent/extended_tools.py",
+                }
+                source_file = tool_to_file.get(tool, "oaa/agent/tools.py")
+
                 suggestions.append(
-                    f"工具 **{tool}** 最近失败 {count} 次\n"
+                    f"**{tool}** 最近失败 {count} 次\n"
                     f"  - 最后错误: {error_snippet}\n"
-                    f"  - 修复步骤: 查看源码(``read_own_source``) → 定位问题 → "
-                    f"``file_patch`` 修复 → 清除 ``__pycache__`` → ``reload_module`` 生效"
+                    f"  - 修复步骤:\n"
+                    f"    1. ``read_own_source path={source_file}`` 查看工具实现\n"
+                    f"    2. 分析错误原因，用 ``self_improve`` 修复\n"
+                    f"    3. 清除 ``__pycache__`` 目录\n"
+                    f"    4. ``reload_module module={source_file.replace('/', '.').replace('.py', '')}``"
                 )
 
         if not suggestions:
@@ -192,6 +276,44 @@ class IdleInspector:
 
         return (
             "🔧 空闲诊断：发现以下工具存在反复失败：\n\n"
-            + "\n".join(f"  - {s}" for s in suggestions)
+            + "\n\n".join(suggestions)
             + "\n\n是否检查并自动修复？请确认。"
+        )
+
+    def _check_correction_patterns(self) -> str | None:
+        """Check for repeated correction patterns and propose modify_own_prompt.
+
+        When the same lesson appears 2+ times in recent corrections,
+        suggests adding it to the system prompt so the agent stops
+        repeating the mistake.
+        """
+        if not self._memory_mgr:
+            return None
+
+        try:
+            corrections = self._memory_mgr.load_recent_corrections(20)
+        except Exception:
+            return None
+
+        if len(corrections) < 2:
+            return None
+
+        lessons = [c["lesson"] for c in corrections if c.get("lesson")]
+        repeated = [(l, c) for l, c in Counter(lessons).items() if c >= 2]
+
+        if not repeated:
+            return None
+
+        lines = []
+        for lesson, count in repeated[:3]:
+            lines.append(
+                f"  - **{lesson}**（重复 {count} 次）\n"
+                f"    操作: 用 ``modify_own_prompt action=write section=agents`` "
+                f"在 agents 段中加入该规则"
+            )
+
+        return (
+            "📝 响应模式优化：发现以下反复修正：\n\n"
+            + "\n\n".join(lines)
+            + "\n\n是否更新提示词以记住这些规则？请确认。"
         )

@@ -79,10 +79,11 @@ class OAAAgent:
         # Tiered memory system (HOT + corrections + warm/ + cold/)
         self.memory = MemoryManager(os.path.join(config.data_dir, "memory"))
 
-        # Idle inspector (needs memory, so initialized after MemoryManager)
+        # Idle inspector (needs memory + evolution, so initialized after both)
         self._idle_inspector = IdleInspector(
             scheduler=scheduler,
             memory_mgr=self.memory,
+            evolution=evolution,
         )
 
         self.llm = LLMClient(config.model)

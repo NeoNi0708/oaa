@@ -112,6 +112,61 @@ class EvolutionEngine:
         return True
 
     # ------------------------------------------------------------------
+    # Auto-refinements — actionable proposals for IdleInspector
+    # ------------------------------------------------------------------
+
+    def get_auto_refinements(self) -> list[dict]:
+        """Return structured, actionable refinements for the IdleInspector.
+
+        Each refinement includes:
+          - type: "sop_skip" | "skill_optimize"
+          - skill_name
+          - file_path (absolute path to the file that needs changing)
+          - description (human-readable)
+          - action (what the agent should do)
+          - old_content / new_content (for self_improve)
+        """
+        refinements: list[dict] = []
+        data_dir = Path(self.data_dir)
+
+        # SOP skips → suggest removing the skipped step from SOP.md
+        for skill_name, skips in self.stats.get("sop_skips", {}).items():
+            for step_name, skip_count in skips.items():
+                if skip_count >= 3:
+                    sop_path = data_dir / "skills" / skill_name / "SOP.md"
+                    if not sop_path.exists():
+                        # Try category discovery
+                        for cat_dir in (data_dir / "skills").iterdir():
+                            if cat_dir.is_dir():
+                                candidate = cat_dir / skill_name / "SOP.md"
+                                if candidate.exists():
+                                    sop_path = candidate
+                                    break
+                    if sop_path.exists():
+                        refinements.append({
+                            "type": "sop_skip",
+                            "skill_name": skill_name,
+                            "file_path": str(sop_path),
+                            "description": f"SOP 步骤「{step_name}」已跳过 {skip_count} 次",
+                            "action": "从 SOP.md 中移除该步骤",
+                            "step_name": step_name,
+                        })
+
+        # Skill usage milestones → suggest optimization review
+        for skill_name, count in self.stats.get("skill_usage", {}).items():
+            if count >= 5 and count % 5 == 0 and count <= 20:
+                refinements.append({
+                    "type": "skill_optimize",
+                    "skill_name": skill_name,
+                    "file_path": "",
+                    "description": f"技能「{skill_name}」已使用 {count} 次",
+                    "action": "用 code_exec 分析使用模式并生成优化建议",
+                    "usage_count": count,
+                })
+
+        return refinements
+
+    # ------------------------------------------------------------------
     # Level 3 — LLM-driven skill crystallization
     # ------------------------------------------------------------------
 
