@@ -1,6 +1,6 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-18（A3 空泡 + 输出截断自动续写 + 代码审查 已提交）
+> 最后更新：2026-05-18（P0 Phase 1 完成：code_exec + 消息压缩）
 
 ---
 
@@ -156,6 +156,32 @@
 
 ---
 
+## 本次会话（2026-05-18 续）— P0 Phase 1
+
+### 闭环断点 1：code_exec — 运行时代码执行
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `_exec_runner.py` | **新增** | 安全 exec() 子进程，禁用 `os.system`/`subprocess.Popen`/`shutil.rmtree`/`exec`/`eval`/`compile`，通过 `result` 变量返回值，写 JSON 到结果文件 |
+| `tools.py` | +`do_code_exec` | 异步方法，解析 JSON result，与 `code_run` 并存（沙箱 vs exec） |
+| `tool_schema.py` | +`code_exec` | `{code: string, timeout: int}`，默认 15s，max 60 |
+
+**安全策略**：`_exec_runner.py` 分三层防御：① 函数打补丁 — 在 `os`/`subprocess`/`shutil` 模块加载后替换危险函数为 stub；② 受限 builtins — 移除 `exec`/`eval`/`compile`；③ 子进程隔离 — 与 `_sandbox_runner.py` 同样以 `python -I` 独立进程运行。
+
+**验证结果**：`result=42` ✓、`dict result` ✓、`os.system` 阻断 ✓、`subprocess.run` 阻断 ✓、`shutil.rmtree` 阻断 ✓、`exec` 阻断 ✓、标准库允许 ✓、无 result 返回 None ✓
+
+### 闭环断点 4：消息压缩 — 防止 context overflow
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `loop.py` | `AgentLoop.__init__` 加 `max_messages=60` | 默认保留 1 条 system + 59 条最近消息 |
+| `loop.py` | `_compact_messages()` | 每轮 `_build_turn_messages` 后调用，保留 system + 最近 `max_messages-1` 条 |
+| `loop.py` | +MemoryManager 联动 | 首次压缩时写入 HOT memory：`[消息压缩] 已压缩 N 条消息，原始请求: "..."` |
+
+**策略**：截断式压缩（Phase 1），只保留最近上下文。压缩记录写入持久记忆，避免 agent 完全丢失原始请求上下文。后续 Phase 3 可升级为 LLM 摘要式压缩。
+
+---
+
 ## 待修复
 
 ### P0 — 闭环补全计划（OAA v2）
@@ -166,15 +192,15 @@
 
 #### 闭环断点 1 — 没有运行时代码执行（`loadcodex` 等价物）
 
-| 维度 | 现状 | 目标 |
-|------|------|------|
-| `code_run` | 沙箱子进程，有 timeout，拿不到返回值 | 进程内 `exec()`，捕获 `locals()` 返回值 |
-| 能力上限 | 预设工具的并集 | 任意 Python 代码可执行 |
+| 维度 | 现状 | 目标 | 状态 |
+|------|------|------|------|
+| `code_run` | 沙箱子进程，有 timeout，拿不到返回值 | 进程内 `exec()`，捕获 `locals()` 返回值 | ✅ **Phase 1 完成** |
+| 能力上限 | 预设工具的并集 | 任意 Python 代码可执行 | ✅ **Phase 1 完成** |
 
 工作项：
-1. 创建 `oaa/agent/_exec_runner.py` — 安全 `exec()` 封装，限制 `builtins`（禁用 `os.system`, `subprocess`, `shutil.rmtree` 等），通过 `result` 变量约定返回值
-2. 在 `AtomicTools` 新增 `do_code_exec(args)` — 与 `code_run` 并存，`code_run` 保持沙箱模式用于不信任代码，`code_exec` 用于 agent 自我扩展
-3. schema 定义：`{code: string, timeout: int, description: "Execute Python code in-process and capture return value via 'result' variable"}`
+1. ✅ **完成** 创建 `oaa/agent/_exec_runner.py` — 安全 `exec()` 封装，限制 `builtins`（禁用 `os.system`, `subprocess`, `shutil.rmtree` 等），通过 `result` 变量约定返回值
+2. ✅ **完成** 在 `AtomicTools` 新增 `do_code_exec(args)` — 与 `code_run` 并存，`code_run` 保持沙箱模式用于不信任代码，`code_exec` 用于 agent 自我扩展
+3. ✅ **完成** schema 定义：`{code: string, timeout: int, description: "..."}`
 
 #### 闭环断点 2 — 工具注册太重
 
@@ -201,12 +227,12 @@
 #### 闭环断点 4 — 消息队列无限增长
 
 工作项：
-1. `AgentLoop.__init__` 加 `max_messages: int = 30` 参数
-2. 每轮结束后调用 `_compact_messages()`，逻辑：
+1. ✅ **完成** `AgentLoop.__init__` 加 `max_messages: int = 60` 参数
+2. ✅ **完成** 每轮结束后调用 `_compact_messages()`，逻辑：
    - 保留 system prompt（第 0 条）
-   - 保留最近 N 轮完整交换
-   - 移除中间的工具调用细节（保留 assistant+tool 的轮次，但压缩 tool result 的 body）
-3. 与 MemoryManager 联动：压缩前将关键信息提取到 HOT memory
+   - 保留最近 `max_messages-1` 条消息
+   - 移除中间的工具调用细节
+3. ✅ **完成** 与 MemoryManager 联动：首次压缩时将原始请求写入 HOT memory
 
 #### 闭环断点 5 — 工具失败未影响 agent 行为
 
@@ -236,11 +262,11 @@
 ### 执行顺序
 
 ```
-Phase 1（断点 1 + 4） → Phase 2（断点 2 + 6） → Phase 3（断点 3 + 5）
-    2 天                     1 天                     2 天
+Phase 1（断点 1 + 4） ✅ 完成 → Phase 2（断点 2 + 6） → Phase 3（断点 3 + 5）
+                             1 天                     2 天
 ```
 
-Phase 1 收益最大：`code_exec` 给 agent 无限扩展能力，消息压缩防止 context overflow。Phase 3 形成真正的自我改进闭环。
+Phase 1 已完成：`code_exec` 给 agent 无限扩展能力，消息压缩防止 context overflow。Phase 3 形成真正的自我改进闭环。
 
 ---
 

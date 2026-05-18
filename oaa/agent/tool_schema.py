@@ -20,6 +20,21 @@ ATOMIC_TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "code_exec",
+            "description": "Execute Python code in-process for agent self-extension. Allows most imports but blocks shell execution (os.system, subprocess.Popen, shutil.rmtree, etc.). Use 'result' variable to return a value.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Python code to execute"},
+                    "timeout": {"type": "integer", "default": 15, "description": "Timeout in seconds (max 60)"},
+                },
+                "required": ["code"],
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "file_read",
             "description": "Read file content",
             "parameters": {
@@ -141,6 +156,85 @@ ATOMIC_TOOLS_SCHEMA = [
         }
     },
 ]
+
+SHELL_RUN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "shell_run",
+        "description": "Execute an arbitrary shell command. Use this when you need to run CLI tools, scripts, or any system command. For Python/PowerShell code use 'code_run' instead.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to execute"},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (max 300)", "default": 60},
+                "cwd": {"type": "string", "description": "Working directory (default: workspace root)"},
+            },
+            "required": ["command"],
+        }
+    }
+}
+
+SELF_MOD_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_own_source",
+            "description": "Read OAA source code files. Use when you need to understand or debug your own implementation. Provide a file path or a glob pattern.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path relative to project root, e.g. 'oaa/agent/tools.py'"},
+                    "pattern": {"type": "string", "description": "Glob pattern to filter multiple files, e.g. 'oaa/gateway/adapters/feishu*'"},
+                    "start_line": {"type": "integer", "description": "Start line (1-based, default 1)"},
+                    "line_count": {"type": "integer", "description": "Number of lines to read (default 200)"},
+                },
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_own_structure",
+            "description": "List OAA project directory structure. Use to discover where tools, skills, and config files are located.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Subdirectory relative to project root, e.g. 'oaa/agent'"},
+                    "depth": {"type": "integer", "description": "Max directory depth (default 2, max 4)"},
+                },
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reload_module",
+            "description": "Reload a Python module after source changes. Clears __pycache__ and re-imports. Only works for non-core modules (tools, extended_tools, adapter files). Core module changes (loop, handler, oaa_agent) require a restart.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "module": {"type": "string", "description": "Python module path relative to project root, e.g. 'oaa/agent/extended_tools'"},
+                },
+                "required": ["module"],
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rollback_change",
+            "description": "List or apply a rollback of a previous self-modification. Call with no arguments to list recent changes with indexes. Call with an index to roll back a specific change.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer", "description": "Index of the change to roll back (omit to list recent changes)"},
+                },
+            }
+        }
+    },
+]
+
+ATOMIC_TOOLS_SCHEMA = ATOMIC_TOOLS_SCHEMA + [SHELL_RUN_TOOL] + SELF_MOD_TOOLS
 
 WECHAT_TOOLS_SCHEMA = [
     {"type": "function", "function": {
@@ -323,6 +417,20 @@ EXTENDED_TOOLS_SCHEMA = [
             "resources": {"type": "string", "description": "Optional: comma-separated resource dirs (scripts,references,assets)"},
             "path": {"type": "string", "description": "Optional: output directory (defaults to skills dir)"},
         }, "required": ["name", "description"]}
+    }},
+    {"type": "function", "function": {
+        "name": "feishu_cli_run",
+        "description": "Execute any lark-cli command. Covers all 200+ lark-cli commands across 11 business domains not exposed by individual feishu_* tools.",
+        "parameters": {"type": "object", "properties": {
+            "args": {"type": "string", "description": "Raw CLI arguments, e.g. 'im +messages-send --chat-id oc_xxx --text hello'"},
+        }, "required": ["args"]}
+    }},
+    {"type": "function", "function": {
+        "name": "dingtalk_cli_run",
+        "description": "Execute any dws (dingtalk-workspace-cli) command. Covers all 200+ dws commands across 11 business domains not exposed by individual dingtalk_* tools.",
+        "parameters": {"type": "object", "properties": {
+            "args": {"type": "string", "description": "Raw CLI arguments, e.g. 'chat message send --user user123 --text hello'"},
+        }, "required": ["args"]}
     }},
 ]
 

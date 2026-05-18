@@ -59,12 +59,14 @@ class AgentLoop:
         handler: "BaseHandler",
         tools_schema: list,
         max_turns: int = 70,
+        max_messages: int = 60,
         memory_mgr=None,
     ):
         self.llm = llm
         self.handler = handler
         self.tools_schema = tools_schema
         self.max_turns = max_turns
+        self._max_messages = max_messages
         self._memory_mgr = memory_mgr
         self._system_prompt = "You are OAA Agent."
         self._last_llm_content = ""
@@ -211,6 +213,9 @@ class AgentLoop:
             # Append assistant + tool-result messages
             messages = self._build_turn_messages(messages, content, tool_calls, tool_result_entries)
 
+            # Compact messages if over limit (always keep recent context)
+            messages = self._compact_messages(messages)
+
         yield {"type": "done", "content": "Max turns exceeded."}
 
     def _build_turn_messages(self, messages: list, content: str,
@@ -241,3 +246,42 @@ class AgentLoop:
                 "tool_call_id": entry["tool_use_id"],
             })
         return messages
+
+    def _compact_messages(self, messages: list) -> list:
+        """Trim oldest non-system messages when over ``_max_messages``.
+
+        Keeps the system prompt and the most recent messages. On first
+        compaction, saves a summary to HOT memory so the original
+        request context is preserved.
+        """
+        if len(messages) <= self._max_messages:
+            return messages
+
+        # Keep system prompt (index 0) + last (max_messages - 1) messages
+        trimmed = messages[:1] + messages[-(self._max_messages - 1):]
+        removed_count = len(messages) - len(trimmed)
+        logger.info("Compacted %d old messages, kept %d", removed_count, len(trimmed))
+
+        # Record compaction in HOT memory once per run
+        if self._memory_mgr and not getattr(self, '_compaction_recorded', False):
+            self._compaction_recorded = True
+            original_request = ""
+            for msg in messages[1:]:
+                if msg.get("role") == "user" and not msg.get("content", "").startswith("【系统提示"):
+                    original_request = msg["content"][:200]
+                    break
+            summary = (
+                f"[消息压缩] 已压缩 {removed_count} 条较早的对话消息，"
+                f"保留最近 {self._max_messages} 条上下文。"
+            )
+            if original_request:
+                summary += f" 原始请求: \"{original_request}\""
+            try:
+                self._memory_mgr.add_to_hot(summary)
+            except Exception as exc:
+                logger.warning("Failed to store compaction summary: %s", exc)
+
+        return trimmed
+
+
+_StepOutcome = StepOutcome
