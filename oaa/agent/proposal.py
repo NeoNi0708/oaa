@@ -180,12 +180,23 @@ class ProposalExecutor:
     """Executes a proposal's action sequence using a tool handler.
 
     Each action in the proposal must be ``{"tool": str, "args": dict, ...}``.
+    Optionally an action may include:
+
+    * ``verify`` — a dict ``{"tool": str, "args": dict, ...}`` that is run
+      *after* the main action to confirm it succeeded.
+    * ``rollback`` — a dict ``{"tool": str, "args": dict, ...}`` that is run
+      when **verify** fails, to undo the action.
+
     The executor dispatches each action to ``handler.dispatch(tool, args)``
-    and records success/failure.
+    and records success/failure/verification/rollback per step.
     """
 
     async def execute(self, proposal: dict, handler: "BaseHandler") -> dict:
-        """Run all actions in *proposal* sequentially. Returns updated proposal dict."""
+        """Run all actions in *proposal* sequentially. Returns updated proposal dict.
+
+        If an action defines ``verify``, the executor runs it after the action.
+        If verification fails and ``rollback`` is defined, rollback is executed.
+        """
         proposal["status"] = STATUS_RUNNING
         results = []
 
@@ -193,27 +204,76 @@ class ProposalExecutor:
             tool = action.get("tool", "")
             args = action.get("args", {})
             desc = action.get("description", tool)
+            verify_action = action.get("verify")
+            rollback_action = action.get("rollback")
 
             logger.info("Proposal %s step %d: %s", proposal.get("id"), i + 1, desc)
+
+            step = {
+                "step": i + 1,
+                "tool": tool,
+                "status": "success",
+            }
+
             try:
                 result = await handler.dispatch(tool, args)
-                results.append({
-                    "step": i + 1,
-                    "tool": tool,
-                    "status": "success",
-                    "result": _summarize(result, 500),
-                })
+                step["result"] = _summarize(result, 500)
+
+                # --- Verification ---
+                if verify_action:
+                    v_tool = verify_action.get("tool", "")
+                    v_args = verify_action.get("args", {})
+                    try:
+                        v_result = await handler.dispatch(v_tool, v_args)
+                        step["verified"] = True
+                        step["verify_result"] = _summarize(v_result, 200)
+                    except Exception as v_exc:
+                        step["verified"] = False
+                        step["verify_error"] = str(v_exc)
+                        logger.warning(
+                            "Proposal %s step %d verify failed: %s",
+                            proposal.get("id"), i + 1, v_exc,
+                        )
+
+                        # --- Rollback ---
+                        if rollback_action:
+                            r_tool = rollback_action.get("tool", "")
+                            r_args = rollback_action.get("args", {})
+                            try:
+                                r_result = await handler.dispatch(r_tool, r_args)
+                                step["rollback"] = "success"
+                            except Exception as r_exc:
+                                step["rollback"] = f"failed: {r_exc}"
+                                logger.warning(
+                                    "Proposal %s step %d rollback also failed: %s",
+                                    proposal.get("id"), i + 1, r_exc,
+                                )
+
+                        results.append(step)
+                        proposal["status"] = STATUS_FAILED
+                        proposal["error"] = (
+                            f"Step {i + 1} ({tool}) 验证失败: {v_exc}"
+                        )
+                        proposal["result"] = json.dumps(
+                            results, ensure_ascii=False, default=str,
+                        )
+                        return proposal
+
+                results.append(step)
+
             except Exception as exc:
-                logger.warning("Proposal %s step %d failed: %s", proposal.get("id"), i + 1, exc)
-                results.append({
-                    "step": i + 1,
-                    "tool": tool,
-                    "status": "error",
-                    "error": str(exc),
-                })
+                logger.warning(
+                    "Proposal %s step %d failed: %s",
+                    proposal.get("id"), i + 1, exc,
+                )
+                step["status"] = "error"
+                step["error"] = str(exc)
+                results.append(step)
                 proposal["status"] = STATUS_FAILED
                 proposal["error"] = f"Step {i + 1} ({tool}) failed: {exc}"
-                proposal["result"] = json.dumps(results, ensure_ascii=False, default=str)
+                proposal["result"] = json.dumps(
+                    results, ensure_ascii=False, default=str,
+                )
                 return proposal
 
         proposal["status"] = STATUS_DONE

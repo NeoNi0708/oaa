@@ -31,6 +31,10 @@ VALID_TYPES = {
     "get_models",
     "stop_chat",
     "apply_evolution",
+    # Evolution Factory
+    "list_proposals",
+    "proposal_approve",
+    "proposal_ignore",
 }
 _ = VALID_TYPES  # prevent import-stripping
 
@@ -460,6 +464,84 @@ class ManagementHandler:
             },
             "suggestions": suggestions,
         }
+
+    # ------------------------------------------------------------------
+    # Evolution Factory
+    # ------------------------------------------------------------------
+
+    def _handle_list_proposals(self, payload: dict) -> dict:
+        """Return proposals, optionally filtered by status."""
+        if self._agent is None:
+            return {"ok": False, "error": "Agent not initialized"}
+        store = self._agent._proposal_store
+        if store is None:
+            return {"ok": False, "error": "Proposal store not available"}
+        status = payload.get("status", "")
+        if status:
+            proposals = store.list_by_status(status)
+        else:
+            proposals = store.all_proposals()
+        return {"ok": True, "proposals": proposals, "count": len(proposals)}
+
+    async def _handle_proposal_approve(self, payload: dict) -> dict:
+        """Approve and execute a proposal by ID."""
+        if self._agent is None:
+            return {"ok": False, "error": "Agent not initialized"}
+        store = self._agent._proposal_store
+        if store is None:
+            return {"ok": False, "error": "Proposal store not available"}
+        prop_id = payload.get("id", "")
+        if not prop_id:
+            return {"ok": False, "error": "No proposal ID provided"}
+        proposal = store.get(prop_id)
+        if proposal is None:
+            return {"ok": False, "error": f"Proposal not found: {prop_id}"}
+        if proposal.get("status") != "pending":
+            return {"ok": False, "error": f"Proposal is not pending (status={proposal['status']})"}
+
+        from ..agent.proposal import ProposalExecutor
+        handler = self._agent.build_handler()
+        executor = ProposalExecutor()
+        try:
+            result = await executor.execute(proposal, handler)
+            store.update_status(
+                result.get("id", prop_id), result["status"],
+                executed_at=result.get("executed_at"),
+                result=result.get("result"),
+                error=result.get("error"),
+            )
+            return {
+                "ok": True,
+                "proposal_id": prop_id,
+                "proposal_status": result["status"],
+                "result": result.get("result"),
+                "error": result.get("error"),
+            }
+        except Exception as exc:
+            store.update_status(prop_id, "failed", error=str(exc))
+            return {"ok": False, "error": str(exc)}
+
+    def _handle_proposal_ignore(self, payload: dict) -> dict:
+        """Ignore a proposal by ID, optionally permanently."""
+        if self._agent is None:
+            return {"ok": False, "error": "Agent not initialized"}
+        store = self._agent._proposal_store
+        inspector = self._agent._idle_inspector
+        if store is None or inspector is None:
+            return {"ok": False, "error": "Proposal system not available"}
+        prop_id = payload.get("id", "")
+        permanent = payload.get("permanent", False)
+        if not prop_id:
+            return {"ok": False, "error": "No proposal ID provided"}
+        proposal = store.get(prop_id)
+        if proposal is None:
+            return {"ok": False, "error": f"Proposal not found: {prop_id}"}
+        # Use target from proposal for ignore list, fall back to id
+        target = proposal.get("target", prop_id)
+        inspector.ignore_tool(target, permanent=permanent)
+        new_status = "ignored_forever" if permanent else "ignored_once"
+        store.update_status(prop_id, new_status)
+        return {"ok": True, "proposal_id": prop_id, "status": new_status}
 
     # ------------------------------------------------------------------
     # QR / Channel login

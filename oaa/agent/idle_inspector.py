@@ -561,7 +561,9 @@ class IdleInspector:
                  "description": f"修复 {tool} 的 {error_snippet}"},
                  "description": f"用 self_improve 修复 {tool}"},
                 {"tool": "reload_module", "args": {"module": mod_for_reload},
-                 "description": "重载模块使修复生效"},
+                 "description": "重载模块使修复生效",
+                 "verify": {"tool": "code_exec", "args": {"code": f"import {mod_for_reload.split('.')[-1]}; print('reload ok')"},
+                            "description": "验证模块重载成功"}},
             ]
 
             # Create structured proposal

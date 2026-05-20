@@ -49,6 +49,9 @@ _MANAGEMENT_TYPES = {
     "switch_model", "get_models",
     "stop_chat",
     "apply_evolution",
+    "list_proposals",
+    "proposal_approve",
+    "proposal_ignore",
 }
 
 

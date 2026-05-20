@@ -18,6 +18,7 @@ import ConnectionsView from './views/ConnectionsView.vue'
 import TaskView from './views/TaskView.vue'
 import FileView from './views/FileView.vue'
 import SettingsView from './views/SettingsView.vue'
+import EvolutionView from './views/EvolutionView.vue'
 
 const activeTab = ref('chat')
 
@@ -28,6 +29,7 @@ const tabComponents: Record<string, any> = {
   tasks: TaskView,
   files: FileView,
   settings: SettingsView,
+  evolution: EvolutionView,
 }
 
 const activeComponent = computed(() => tabComponents[activeTab.value])
