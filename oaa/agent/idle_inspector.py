@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 logger = get_logger("agent.idle_inspector")
 
 # Minimum seconds between idle inspections
-_INSPECTION_COOLDOWN = 300  # 5 minutes
+_INSPECTION_COOLDOWN = 600  # 10 minutes
 
 # Max times the same proposal is delivered before suppression
 _MAX_PROPOSAL_REPEATS = 3
@@ -49,7 +49,7 @@ class IdleInspector:
         self._scheduler = scheduler
         self._memory_mgr = memory_mgr
         self._evolution = evolution
-        self._last_check: float = 0.0
+        self._last_check: float = time.time()
         # Background task support
         self._background_task: asyncio.Task | None = None
         self._notify_callback: Callable[[str], Coroutine] | None = None

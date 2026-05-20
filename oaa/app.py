@@ -241,6 +241,8 @@ class OAAApp:
                 import re as _re
                 simple = _re.sub(r"[🔍🔬🔧💡📊📝⏳✅❌🔵🟢]", "", full)
                 simple = simple.replace("**", "").replace("``", "")
+                if len(simple) > 600:
+                    simple = simple[:600] + "\n\n（消息过长已截断，请在聊天页面查看完整内容）"
                 result = await adapter.send_message(adapter._bot_user_id, simple)
                 if isinstance(result, dict) and result.get("status") == "error":
                     logger.warning("WeChat send_message failed: %s", result.get("msg"))
