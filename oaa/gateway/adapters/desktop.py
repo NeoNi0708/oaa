@@ -63,6 +63,8 @@ class DesktopAdapter:
         self._worker = None              # set by app for background tasks
         self._clients = set()
         self._server = None
+        # Optional callback fired when first client connects (set by app)
+        self._on_first_client = None
         # Pending user confirmations: request_id → Future[bool]
         self._pending_confirms: dict[str, asyncio.Future] = {}
         # Active chat tasks per websocket — cancelled when new message arrives
@@ -140,6 +142,9 @@ class DesktopAdapter:
         self._clients.add(websocket)
         remote = websocket.remote_address if hasattr(websocket, 'remote_address') else "?"
         logger.debug("Client connected: %s", remote)
+        # Fire first-client hook (startup check, etc.)
+        if len(self._clients) == 1 and self._on_first_client:
+            asyncio.create_task(self._on_first_client())
         try:
             async for raw in websocket:
                 try:
