@@ -115,6 +115,8 @@ class AtomicTools(BaseHandler):
         self.working_memory = {}
         self._memory_mgr: Optional["MemoryManager"] = None
         self._archiver: Optional["ConversationArchiver"] = None
+        self._proposal_store = None
+        self._idle_inspector = None
 
     def _resolve_path(self, path: str) -> str:
         """Resolve path relative to workspace, checking permissions if configured."""
@@ -127,6 +129,14 @@ class AtomicTools(BaseHandler):
     def set_archiver(self, archiver: "ConversationArchiver"):
         """Inject the conversation archiver for history search."""
         self._archiver = archiver
+
+    def set_proposal_store(self, store):
+        """Inject the ProposalStore for structured proposal management."""
+        self._proposal_store = store
+
+    def set_idle_inspector(self, inspector):
+        """Inject the IdleInspector for registering tool ignores."""
+        self._idle_inspector = inspector
 
     async def _confirm(self, operation: str, details: str = "") -> bool:
         """Check permission for an operation. Returns True if allowed."""
@@ -1444,3 +1454,69 @@ class AtomicTools(BaseHandler):
             }
         except Exception as exc:
             return {"status": "error", "msg": str(exc), "pid": pid, "alive": True}
+
+    # ------------------------------------------------------------------
+    # Proposal management tools (self-healing closed loop)
+    # ------------------------------------------------------------------
+
+    @agent_tool(
+        name="proposal_list",
+        description="List pending self-improvement proposals. Each proposal has an ID, type (tool_fix/install_dep/sop_optimize/skill_crystallize), description, and executable actions. Call this to see what improvements are waiting for approval."
+    )
+    async def do_proposal_list(self, include_history: bool = False) -> dict:
+        """List pending or all proposals from the store."""
+        if not self._proposal_store:
+            return {"status": "error", "msg": "提案系统未初始化"}
+        proposals = self._proposal_store.all_proposals() if include_history else self._proposal_store.list_pending()
+        if not proposals:
+            return {"status": "success", "proposals": [], "msg": "暂无待处理提案"}
+        return {"status": "success", "proposals": proposals, "count": len(proposals)}
+
+    @agent_tool(
+        name="proposal_approve",
+        description="Approve and execute a self-improvement proposal by ID. Executes the proposal's action sequence (read_own_source → self_improve → reload_module, or shell_run install, etc.) and reports the result of each step. Example: proposal_approve(id='prop_1234567890_1')"
+    )
+    async def do_proposal_approve(self, id: str) -> dict:
+        """Approve a proposal and execute its action sequence."""
+        if not self._proposal_store:
+            return {"status": "error", "msg": "提案系统未初始化"}
+        proposal = self._proposal_store.get(id)
+        if not proposal:
+            return {"status": "error", "msg": f"未找到提案: {id}"}
+        if proposal["status"] != "pending":
+            return {"status": "error", "msg": f"提案 {id} 状态为 {proposal['status']}，不能执行"}
+
+        from .proposal import ProposalExecutor
+        executor = ProposalExecutor()
+        # The handler is self (AtomicTools is a BaseHandler with dispatch)
+        result = await executor.execute(proposal, self)
+        self._proposal_store.update_status(
+            result["id"], result["status"],
+            executed_at=result.get("executed_at"),
+            result=result.get("result"),
+            error=result.get("error"),
+        )
+        return {
+            "status": "success" if result["status"] == "done" else "error",
+            "proposal_id": id,
+            "proposal_status": result["status"],
+            "result": result.get("result", ""),
+            "error": result.get("error", ""),
+        }
+
+    @agent_tool(
+        name="proposal_ignore",
+        description="Ignore a tool or pattern in future idle inspections. Use permanent=True to skip forever (e.g. a stub tool that will never work), or permanent=False to skip just the next inspection cycle. Example: proposal_ignore(target='wechat_contacts', permanent=True)"
+    )
+    async def do_proposal_ignore(self, target: str, permanent: bool = False) -> dict:
+        """Add *target* to the persistent ignore list for idle inspections."""
+        if not self._idle_inspector:
+            return {"status": "error", "msg": "巡检系统未初始化"}
+        self._idle_inspector.ignore_tool(target, permanent=permanent)
+        mode = "永久" if permanent else "本次"
+        return {
+            "status": "success",
+            "msg": f"已忽略「{target}」（{mode}），下次巡检不再报告。",
+            "target": target,
+            "permanent": permanent,
+        }

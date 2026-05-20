@@ -86,11 +86,16 @@ class OAAAgent:
         # Tiered memory system (HOT + corrections + warm/ + cold/)
         self.memory = MemoryManager(os.path.join(config.data_dir, "memory"))
 
-        # Idle inspector (needs memory + evolution, so initialized after both)
+        # Structured proposal system (replaces pending_proposals.md)
+        from .proposal import ProposalStore
+        self._proposal_store = ProposalStore(os.path.join(config.data_dir, "memory"))
+
+        # Idle inspector (needs memory + evolution + proposal_store)
         self._idle_inspector = IdleInspector(
             scheduler=scheduler,
             memory_mgr=self.memory,
             evolution=evolution,
+            proposal_store=self._proposal_store,
         )
 
         self.llm = LLMClient(config.model)
@@ -110,6 +115,8 @@ class OAAAgent:
         self.atomic = AtomicTools(config.data_dir, permissions=permissions)
         self.atomic.set_memory_manager(self.memory)
         self.atomic.set_archiver(self.archiver)
+        self.atomic.set_proposal_store(self._proposal_store)
+        self.atomic.set_idle_inspector(self._idle_inspector)
         self.extended = ExtendedTools(
             config.data_dir, permissions=permissions, wechat_adapter=wechat_adapter,
             dingtalk_client_id=config.dingtalk.client_id,
@@ -301,6 +308,9 @@ class OAAAgent:
 - 多步任务 → 主动 `plan_create` 规划，逐步执行，每步完后自动进入下一步
 - 和用户说话简洁直接：不要铺垫、不要复述工具输出、不要"让我试试"
 - 全部完成后用 1-2 句话总结结果即可
+- **看到待处理提案时**：用 `proposal_list` 查看 → 用 `proposal_approve` 执行 → 报告结果。不需要先问用户"是否执行"。
+- **遇到缺失依赖时**：直接 `shell_run pip install <包名>` 安装，装完继续工作。不要报告"缺少依赖"。
+- **能直接解决的问题就不要报告问题**：安装包、修复配置、清理缓存——自己动手。
 
 ## 业务领域
 
@@ -312,6 +322,12 @@ class OAAAgent:
         # Inject tiered memory (HOT + recent corrections)
         memory_prompt = self.memory.build_memory_prompt()
         result += "\n\n" + memory_prompt
+
+        # Inject pending structured proposals (self-healing closed loop)
+        if self._proposal_store and self._proposal_store.has_pending():
+            proposal_text = self._proposal_store.get_pending_proposal_text()
+            if proposal_text:
+                result += "\n\n" + proposal_text
 
         # Inject recent conversation summaries for context warmth
         if self.archiver:

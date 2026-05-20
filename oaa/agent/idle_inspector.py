@@ -3,6 +3,10 @@
 ``inspect()`` can be called synchronously (from end of ``process_message``)
 or driven periodically by a background asyncio task managed via
 :meth:`start_background` / :meth:`stop_background`.
+
+Structured proposals are stored in ``ProposalStore`` (JSON) instead of
+free-text ``pending_proposals.md``.  A persistent ignore list prevents
+repeated proposals for tools the user has dismissed.
 """
 import asyncio
 import json
@@ -17,6 +21,7 @@ if TYPE_CHECKING:
     from ..evolution.engine import EvolutionEngine
     from ..scheduler import TaskScheduler
     from .memory_manager import MemoryManager
+    from .proposal import ProposalStore
 
 logger = get_logger("agent.idle_inspector")
 
@@ -36,7 +41,7 @@ class IdleInspector:
     3. Check memory health (density, archives)
     4. Check tool failures -> propose read_own_source + file_patch fix
     5. Check correction patterns -> propose modify_own_prompt
-    6. Always asks user before acting (via proposal text)
+    6. All proposals stored in ProposalStore; text returned for notifications
 
     Supports both on-demand (``inspect()``) and periodic (``start_background()``)
     modes. The background task runs on ``_INSPECTION_COOLDOWN`` interval and
@@ -45,10 +50,12 @@ class IdleInspector:
 
     def __init__(self, scheduler: Optional["TaskScheduler"] = None,
                  memory_mgr: Optional["MemoryManager"] = None,
-                 evolution: Optional["EvolutionEngine"] = None):
+                 evolution: Optional["EvolutionEngine"] = None,
+                 proposal_store: Optional["ProposalStore"] = None):
         self._scheduler = scheduler
         self._memory_mgr = memory_mgr
         self._evolution = evolution
+        self._proposal_store = proposal_store
         self._last_check: float = time.time()
         # Background task support
         self._background_task: asyncio.Task | None = None
@@ -56,10 +63,64 @@ class IdleInspector:
         # Dedup tracking: proposal_hash → send_count
         self._proposal_tracker: dict[str, int] = {}
         self._dedup_path = ""  # set by set_memory_path or inferred from memory_mgr
+        # Persistent ignore list (tool_name → "once" | "forever")
+        self._ignore_list: dict[str, str] = {}
+        self._ignore_path = ""
+        self._load_ignore_list()
 
     def reset_cooldown(self):
         """Reset the cooldown timer so next check runs immediately."""
         self._last_check = 0.0
+
+    # ------------------------------------------------------------------
+    # Ignore list — persistent tool/pattern suppression
+    # ------------------------------------------------------------------
+
+    def set_memory_path(self, memory_dir: str):
+        """Set the memory directory for dedup and ignore list persistence."""
+        self._dedup_path = os.path.join(memory_dir, "proposal_dedup.json")
+        self._ignore_path = os.path.join(memory_dir, "proposal_ignore.json")
+        self._load_ignore_list()
+
+    def _load_ignore_list(self):
+        if self._ignore_path and os.path.exists(self._ignore_path):
+            try:
+                with open(self._ignore_path, encoding="utf-8") as f:
+                    self._ignore_list = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                self._ignore_list = {}
+
+    def _save_ignore_list(self):
+        if self._ignore_path:
+            try:
+                os.makedirs(os.path.dirname(self._ignore_path), exist_ok=True)
+                with open(self._ignore_path, "w", encoding="utf-8") as f:
+                    json.dump(self._ignore_list, f, indent=2, ensure_ascii=False)
+            except OSError as exc:
+                logger.warning("Failed to save ignore list: %s", exc)
+
+    def is_tool_ignored(self, tool_name: str) -> bool:
+        """Check if *tool_name* is in the ignore list."""
+        mode = self._ignore_list.get(tool_name, "")
+        if mode == "forever":
+            return True
+        if mode == "once":
+            # Consume the once-ignore after this check
+            del self._ignore_list[tool_name]
+            self._save_ignore_list()
+            return True
+        return False
+
+    def ignore_tool(self, tool_name: str, permanent: bool = False):
+        """Add *tool_name* to the ignore list.
+
+        Args:
+            tool_name: Tool or pattern name to ignore.
+            permanent: If True, ignored forever; if False, skipped once.
+        """
+        self._ignore_list[tool_name] = "forever" if permanent else "once"
+        self._save_ignore_list()
+        logger.info("Tool '%s' set to ignore (%s)", tool_name, "forever" if permanent else "once")
 
     def set_notify_callback(self, callback: Callable[[str], Coroutine] | None):
         """Register an async callback that receives inspection proposals.
@@ -151,17 +212,14 @@ class IdleInspector:
 
         return None
 
-    def _store_proposal(self, proposal: str):
-        """Store a proposal, respecting dedup limit (max 3 same proposals)."""
+    def _store_proposal(self, proposal_text: str):
+        """Store a proposal notification, respecting dedup limit."""
         if not self._memory_mgr:
             return
-
-        # Dedup: hash proposal content, track send count
         import hashlib
-        phash = hashlib.md5(proposal.encode()).hexdigest()
-        self._dedup_path = os.path.join(
-            self._memory_mgr._dir, "proposal_dedup.json"
-        ) if not self._dedup_path else self._dedup_path
+        phash = hashlib.md5(proposal_text.encode()).hexdigest()
+        if not self._dedup_path and self._memory_mgr:
+            self.set_memory_path(str(self._memory_mgr._dir))
         self._load_dedup_tracker()
 
         count = self._proposal_tracker.get(phash, 0) + 1
@@ -171,12 +229,6 @@ class IdleInspector:
 
         self._proposal_tracker[phash] = count
         self._save_dedup_tracker()
-
-        try:
-            self._memory_mgr.save_pending_proposal(proposal)
-            logger.info("Stored proposal (send #%d/%d)", count, _MAX_PROPOSAL_REPEATS)
-        except Exception as exc:
-            logger.warning("Failed to store pending proposal: %s", exc)
 
     def _load_dedup_tracker(self):
         if self._dedup_path and os.path.exists(self._dedup_path):
@@ -268,17 +320,13 @@ class IdleInspector:
     def _check_usage_patterns(self) -> str | None:
         """Analyze task/tool/skill usage patterns and propose improvements.
 
-        Checks EvolutionEngine stats for:
-        - Skills with heavy usage but no crystallization: suggest optimization
-        - Skills with high skip rates: suggest SOP refinement
-        - Tool failure clusters: suggest self_improve repairs
-        - Recently crystallized skills: notify user
+        Creates structured proposals for skill crystallization, SOP skips,
+        and tool failure clusters.
         """
         if not self._evolution:
             return None
 
-        suggestions = []
-
+        suggestions_text = []
         try:
             stats = self._evolution.stats
         except Exception:
@@ -288,11 +336,31 @@ class IdleInspector:
         skill_usage = stats.get("skill_usage", {})
         crystallized_names = {c["name"] for c in stats.get("crystallized", [])}
         for skill_name, count in sorted(skill_usage.items(), key=lambda x: -x[1]):
-            if count >= 5 and skill_name not in crystallized_names:
-                suggestions.append(
-                    f"**{skill_name}** 已使用 {count} 次，达到结晶阈值但尚未生成固化技能。"
-                    f"建议使用 ``self_improve`` 触发自动结晶。"
-                )
+            if count < 5 or skill_name in crystallized_names:
+                continue
+            if self.is_tool_ignored(f"crystal:{skill_name}"):
+                continue
+            if self._proposal_store and self._proposal_store.has_pending_for_target(f"crystal:{skill_name}", "skill_crystallize"):
+                continue
+
+            actions = [
+                {"tool": "self_improve", "args": {"path": "", "old_content": "", "new_content": "",
+                 "description": f"为 {skill_name} 生成固化技能"},
+                 "description": f"触发 {skill_name} 的自动结晶"}
+            ]
+            if self._proposal_store:
+                from .proposal import Proposal, TYPE_SKILL_CRYSTALLIZE
+                self._proposal_store.add(Proposal(
+                    type=TYPE_SKILL_CRYSTALLIZE,
+                    title=f"{skill_name} 可固化为技能",
+                    problem=f"{skill_name} 已使用 {count} 次，达到结晶阈值但未生成固化技能",
+                    benefit=f"固化后 agent 可直接调用该技能，无需重复加载",
+                    target=f"crystal:{skill_name}",
+                    actions=actions,
+                ))
+            suggestions_text.append(
+                f"**{skill_name}** 已使用 {count} 次，达到结晶阈值但尚未生成固化技能。"
+            )
 
         # 2. SOP steps with high skip counts → suggest removal
         sop_skips = stats.get("sop_skips", {})
@@ -300,53 +368,72 @@ class IdleInspector:
             if not isinstance(steps, dict):
                 continue
             for step_name, skip_count in steps.items():
+                if skip_count < 3:
+                    continue
+                target = f"sop:{skill_name}/{step_name}"
+                if self.is_tool_ignored(target):
+                    continue
+                if self._proposal_store and self._proposal_store.has_pending_for_target(target, "sop_optimize"):
+                    continue
+
+                actions = [
+                    {"tool": "read_own_source", "args": {"path": f"skills/{skill_name}/SOP.md"},
+                     "description": f"查看 {skill_name} 的 SOP"},
+                    {"tool": "self_improve", "args": {"path": f"skills/{skill_name}/SOP.md", "old_content": f"## {step_name}", "new_content": ""},
+                     "description": f"从 SOP 中移除 {step_name} 步骤"},
+                ]
+                if self._proposal_store:
+                    from .proposal import Proposal, TYPE_SOP_OPTIMIZE
+                    self._proposal_store.add(Proposal(
+                        type=TYPE_SOP_OPTIMIZE,
+                        title=f"{skill_name} SOP 步骤「{step_name}」可移除",
+                        problem=f"该步骤已跳过 {skip_count} 次，说明不适用或多余",
+                        benefit=f"移除后 agent 执行该技能时更简洁高效",
+                        target=target,
+                        actions=actions,
+                    ))
                 if skip_count >= 5:
-                    suggestions.append(
-                        f"**{skill_name}** 的 SOP 步骤「{step_name}」已跳过 {skip_count} 次，"
-                        f"强烈建议从 SOP 中移除。"
+                    suggestions_text.append(
+                        f"**{skill_name}** 的 SOP 步骤「{step_name}」已跳过 {skip_count} 次，强烈建议移除。"
                     )
-                elif skip_count >= 3:
-                    suggestions.append(
-                        f"**{skill_name}** 的 SOP 步骤「{step_name}」已跳过 {skip_count} 次，"
-                        f"可考虑移除该步骤。"
+                else:
+                    suggestions_text.append(
+                        f"**{skill_name}** 的 SOP 步骤「{step_name}」已跳过 {skip_count} 次，可考虑移除。"
                     )
 
-        # 3. Recently crystallized skills — notify
+        # 3. Recently crystallized skills — notify (no structured proposal needed)
         for c in stats.get("crystallized", []):
             name = c.get("name", "?")
             created = c.get("created", "")[:10]
-            suggestions.append(
+            suggestions_text.append(
                 f"**{name}** 已成功固化为技能（{created}），可查看 skill 目录确认。"
             )
 
-        # 4. Check tool failure stats from memory
+        # 4. Tool failure clusters from memory (with ignore check)
         if self._memory_mgr:
             try:
                 failures = self._memory_mgr.count_tool_failures()
                 if failures.get("total", 0) > 0:
                     by_tool = failures.get("by_tool", {})
                     for tool, count in sorted(by_tool.items(), key=lambda x: -x[1])[:3]:
-                        if count >= 3:
-                            suggestions.append(
-                                f"**{tool}** 累计失败 {count} 次，需检查修复。"
-                            )
+                        if count < 3:
+                            continue
+                        if self.is_tool_ignored(tool):
+                            continue
+                        if self._proposal_store and self._proposal_store.has_pending_for_target(tool, "tool_fix"):
+                            continue
+                        suggestions_text.append(
+                            f"**{tool}** 累计失败 {count} 次，需检查修复。"
+                        )
             except Exception:
                 pass
 
-        if not suggestions:
+        if not suggestions_text:
             return None
-
-        # Deduplicate (same text may appear from different sources)
-        seen = set()
-        unique_suggestions = []
-        for s in suggestions:
-            if s not in seen:
-                seen.add(s)
-                unique_suggestions.append(s)
 
         proposal = (
             "📊 使用模式分析：发现以下可优化项：\n\n"
-            + "\n".join(f"  - {s}" for s in unique_suggestions)
+            + "\n".join(f"  - {s}" for s in suggestions_text)
             + "\n\n是否进行优化？请确认。"
         )
         return proposal
@@ -401,11 +488,11 @@ class IdleInspector:
         return proposal
 
     def _check_tool_failures(self) -> str | None:
-        """Check logged tool failures and propose structured self_improve repairs.
+        """Check logged tool failures and create structured proposals.
 
-        When a tool fails ≥2 times, generates a repair proposal with exact
-        file paths and suggested fix approach so the agent can execute
-        ``read_own_source`` → ``self_improve`` → clear pycache → ``reload_module``.
+        When a tool fails ≥2 times, creates a ``Proposal`` with structured
+        actions (``read_own_source`` → ``self_improve`` → pycache → reload)
+        and stores it in ``ProposalStore``.  Returns notification text.
         """
         if not self._memory_mgr:
             return None
@@ -418,78 +505,107 @@ class IdleInspector:
         if not failures:
             return None
 
-        # Skip known stub/limitation tools — their "failures" are by design
+        # Skip known stub/limitation tools
         _STUB_TOOLS = frozenset({
             "wechat_contacts", "wechat_history", "wechat_sessions", "wechat_search",
         })
 
         tool_counts = Counter(f["tool"] for f in failures if f["tool"] not in _STUB_TOOLS)
 
-        suggestions = []
         for tool, count in tool_counts.most_common(3):
-            if count >= 2:
-                latest = [f for f in failures if f["tool"] == tool][-1]
-                error_snippet = latest.get("error", "")[:120]
-                args_hint = latest.get("args", "")
-                if args_hint and len(args_hint) > 100:
-                    args_hint = args_hint[:100] + "…"
+            if count < 2:
+                continue
+            # Skip ignored tools
+            if self.is_tool_ignored(tool):
+                continue
+            # Skip if proposal already exists for this tool
+            if self._proposal_store and self._proposal_store.has_pending_for_target(tool, "tool_fix"):
+                continue
 
-                # Infer which source file likely contains the tool
-                tool_to_file = {
-                    # AtomicTools live in tools.py
-                    "ask_user": "oaa/agent/tools.py",
-                    "file_write": "oaa/agent/tools.py",
-                    "file_patch": "oaa/agent/tools.py",
-                    "shell_run": "oaa/agent/tools.py",
-                    "code_run": "oaa/agent/tools.py",
-                    "code_exec": "oaa/agent/tools.py",
-                    "read_own_source": "oaa/agent/tools.py",
-                    "list_own_structure": "oaa/agent/tools.py",
-                    "reload_module": "oaa/agent/tools.py",
-                    "rollback_change": "oaa/agent/tools.py",
-                    "memory_recall": "oaa/agent/tools.py",
-                    "correction_log": "oaa/agent/tools.py",
-                    "self_reflect": "oaa/agent/tools.py",
-                    "update_working_checkpoint": "oaa/agent/tools.py",
-                    # ExtendedTools
-                    "word_doc": "oaa/agent/extended_tools.py",
-                    "excel_xlsx": "oaa/agent/extended_tools.py",
-                    "email_send": "oaa/agent/extended_tools.py",
-                    "skill_load": "oaa/agent/extended_tools.py",
-                    "skill_create": "oaa/agent/extended_tools.py",
-                    "web_search": "oaa/agent/extended_tools.py",
-                    "web_scan": "oaa/agent/extended_tools.py",
-                    "plan_create": "oaa/agent/extended_tools.py",
-                    "plan_update": "oaa/agent/extended_tools.py",
-                    "plan_list": "oaa/agent/extended_tools.py",
-                }
-                source_file = tool_to_file.get(tool, "oaa/agent/tools.py")
+            latest = [f for f in failures if f["tool"] == tool][-1]
+            error_snippet = latest.get("error", "")[:120]
 
-                suggestions.append(
-                    f"**{tool}** 最近失败 {count} 次\n"
-                    f"  - 最后错误: {error_snippet}\n"
-                    f"  - 修复步骤:\n"
-                    f"    1. ``read_own_source path={source_file}`` 查看工具实现\n"
-                    f"    2. 分析错误原因，用 ``self_improve`` 修复\n"
-                    f"    3. 清除 ``__pycache__`` 目录\n"
-                    f"    4. ``reload_module module={source_file.replace('/', '.').replace('.py', '')}``"
+            tool_to_file = {
+                "ask_user": "oaa/agent/tools.py",
+                "file_write": "oaa/agent/tools.py",
+                "file_patch": "oaa/agent/tools.py",
+                "shell_run": "oaa/agent/tools.py",
+                "code_run": "oaa/agent/tools.py",
+                "code_exec": "oaa/agent/tools.py",
+                "read_own_source": "oaa/agent/tools.py",
+                "list_own_structure": "oaa/agent/tools.py",
+                "reload_module": "oaa/agent/tools.py",
+                "rollback_change": "oaa/agent/tools.py",
+                "memory_recall": "oaa/agent/tools.py",
+                "correction_log": "oaa/agent/tools.py",
+                "self_reflect": "oaa/agent/tools.py",
+                "update_working_checkpoint": "oaa/agent/tools.py",
+                "word_doc": "oaa/agent/extended_tools.py",
+                "excel_xlsx": "oaa/agent/extended_tools.py",
+                "email_send": "oaa/agent/extended_tools.py",
+                "skill_load": "oaa/agent/extended_tools.py",
+                "skill_create": "oaa/agent/extended_tools.py",
+                "web_search": "oaa/agent/extended_tools.py",
+                "web_scan": "oaa/agent/extended_tools.py",
+                "plan_create": "oaa/agent/extended_tools.py",
+                "plan_update": "oaa/agent/extended_tools.py",
+                "plan_list": "oaa/agent/extended_tools.py",
+            }
+            source_file = tool_to_file.get(tool, "oaa/agent/tools.py")
+            mod_for_reload = source_file.replace("/", ".").replace(".py", "")
+
+            actions = [
+                {"tool": "read_own_source", "args": {"path": source_file},
+                 "description": f"查看 {tool} 的实现代码"},
+                {"tool": "self_improve", "args": {"path": source_file, "old_content": "", "new_content": "",
+                 "description": f"修复 {tool} 的 {error_snippet}"},
+                 "description": f"用 self_improve 修复 {tool}"},
+                {"tool": "reload_module", "args": {"module": mod_for_reload},
+                 "description": "重载模块使修复生效"},
+            ]
+
+            # Create structured proposal
+            if self._proposal_store:
+                from .proposal import Proposal, TYPE_TOOL_FIX
+                prop = Proposal(
+                    type=TYPE_TOOL_FIX,
+                    title=f"{tool} 累计失败 {count} 次需修复",
+                    problem=f"工具 {tool} 累计失败 {count} 次。最后错误: {error_snippet}",
+                    benefit=f"修复后 {tool} 可正常使用",
+                    target=tool,
+                    actions=actions,
                 )
+                self._proposal_store.add(prop)
+                prop_id = prop.id
+            else:
+                prop_id = ""
 
-        if not suggestions:
-            return None
+            # Return notification text
+            lines = [
+                f"**{tool}** 最近失败 {count} 次",
+                f"  - 最后错误: {error_snippet}",
+                f"  - 修复步骤:",
+                f"    1. ``read_own_source path={source_file}`` 查看工具实现",
+                f"    2. 分析错误原因，用 ``self_improve`` 修复",
+                f"    3. 清除 ``__pycache__`` 目录",
+                f"    4. ``reload_module module={mod_for_reload}``",
+            ]
+            if prop_id:
+                lines.append(f"  - 提案ID: {prop_id}（可用 proposal_approve 执行）")
 
-        return (
-            "🔧 空闲诊断：发现以下工具存在反复失败：\n\n"
-            + "\n\n".join(suggestions)
-            + "\n\n是否检查并自动修复？请确认。"
-        )
+            return (
+                "🔧 空闲诊断：发现以下工具存在反复失败：\n\n"
+                + "\n\n".join(lines)
+                + "\n\n是否检查并自动修复？请确认。"
+            )
+
+        return None
 
     def _check_correction_patterns(self) -> str | None:
         """Check for repeated correction patterns and propose modify_own_prompt.
 
         When the same lesson appears 2+ times in recent corrections,
-        suggests adding it to the system prompt so the agent stops
-        repeating the mistake.
+        creates a structured Proposal with ``modify_own_prompt`` action.
         """
         if not self._memory_mgr:
             return None
@@ -508,16 +624,34 @@ class IdleInspector:
         if not repeated:
             return None
 
-        lines = []
         for lesson, count in repeated[:3]:
-            lines.append(
-                f"  - **{lesson}**（重复 {count} 次）\n"
-                f"    操作: 用 ``modify_own_prompt action=write section=agents`` "
-                f"在 agents 段中加入该规则"
+            target = f"correction:{lesson[:40]}"
+            if self.is_tool_ignored(target):
+                continue
+            if self._proposal_store and self._proposal_store.has_pending_for_target(target, "config_change"):
+                continue
+
+            actions = [
+                {"tool": "modify_own_prompt", "args": {"action": "write", "section": "agents", "content": lesson},
+                 "description": f"将规则「{lesson}」写入 agents 段"},
+            ]
+            if self._proposal_store:
+                from .proposal import Proposal, TYPE_CONFIG_CHANGE
+                self._proposal_store.add(Proposal(
+                    type=TYPE_CONFIG_CHANGE,
+                    title=f"修正模式：{lesson[:40]}",
+                    problem=f"该教训重复出现 {count} 次，说明 agent 未记住",
+                    benefit=f"写入提示词后 agent 不再重复犯错",
+                    target=target,
+                    actions=actions,
+                ))
+
+            return (
+                "📝 响应模式优化：发现以下反复修正：\n\n"
+                + f"  - **{lesson}**（重复 {count} 次）\n"
+                + f"    操作: 用 ``modify_own_prompt action=write section=agents`` "
+                + "在 agents 段中加入该规则"
+                + "\n\n是否更新提示词以记住这些规则？请确认。"
             )
 
-        return (
-            "📝 响应模式优化：发现以下反复修正：\n\n"
-            + "\n\n".join(lines)
-            + "\n\n是否更新提示词以记住这些规则？请确认。"
-        )
+        return None
