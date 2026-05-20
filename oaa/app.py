@@ -166,6 +166,7 @@ class OAAApp:
 
         # Startup self-check: background task that waits for GUI client
         self._startup_notified: set[str] = set()
+        self._notify_lock = asyncio.Lock()
         asyncio.create_task(self._startup_check())
 
         # Register hook: when a Desktop GUI client connects, have agent report in
@@ -180,9 +181,10 @@ class OAAApp:
 
     async def _notify_desktop(self):
         """Have the agent proactively check status and report to the Desktop GUI."""
-        if "desktop" in self._startup_notified:
-            return
-        self._startup_notified.add("desktop")
+        async with self._notify_lock:
+            if "desktop" in self._startup_notified:
+                return
+            self._startup_notified.add("desktop")
         if not self.desktop._clients:
             return
 
@@ -205,9 +207,10 @@ class OAAApp:
 
     async def _notify_channel(self, channel: str):
         """Have the agent generate a welcome message for a just-connected channel."""
-        if channel in self._startup_notified:
-            return
-        self._startup_notified.add(channel)
+        async with self._notify_lock:
+            if channel in self._startup_notified:
+                return
+            self._startup_notified.add(channel)
 
         adapter = self.channel_adapters.get(channel)
         if not adapter:
@@ -238,13 +241,16 @@ class OAAApp:
                 import re as _re
                 simple = _re.sub(r"[🔍🔬🔧💡📊📝⏳✅❌🔵🟢]", "", full)
                 simple = simple.replace("**", "").replace("``", "")
-                await adapter.send_message(adapter._bot_user_id, simple)
-                logger.info("Agent welcome sent to WeChat (%s)", adapter._bot_user_id)
+                result = await adapter.send_message(adapter._bot_user_id, simple)
+                if isinstance(result, dict) and result.get("status") == "error":
+                    logger.warning("WeChat send_message failed: %s", result.get("msg"))
+                else:
+                    logger.info("Agent welcome sent to WeChat (%s)", adapter._bot_user_id)
         except Exception as exc:
             logger.warning("Agent welcome for channel %s failed: %s", channel, exc)
 
     async def _startup_check(self):
-        """Wait for Desktop GUI client, then have the agent report in."""
+        """Wait for Desktop GUI client, then trigger agent-driven startup reports."""
         try:
             if not self.desktop._clients:
                 for _ in range(15):
@@ -252,11 +258,7 @@ class OAAApp:
                     if self.desktop._clients:
                         break
 
-            # Have the agent proactively report to Desktop if a client connected
-            if self.desktop._clients and "desktop" not in self._startup_notified:
-                await self._notify_desktop()
-
-            # Also notify WeChat if already authenticated at startup
+            # Notify WeChat if already authenticated at startup
             wechat = self.channel_adapters.get("wechat")
             if wechat and getattr(wechat, 'is_authenticated', False) and getattr(wechat, '_bot_user_id', None):
                 await self._notify_channel("wechat")
