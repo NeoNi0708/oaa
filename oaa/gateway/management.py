@@ -562,6 +562,10 @@ class ManagementHandler:
                     if asyncio.iscoroutine(result_or_coro):
                         asyncio.create_task(result_or_coro)
 
+            # Notify the newly-connected channel with a welcome message
+            if self._agent and self._agent._on_channel_ready:
+                asyncio.create_task(self._agent._on_channel_ready(channel))
+
         return {
             "ok": True,
             "status": result.get("status", "waiting"),
@@ -590,6 +594,8 @@ class ManagementHandler:
             if hasattr(adapter, "start_polling"):
                 import asyncio
                 asyncio.create_task(adapter.start_polling())
+            if self._agent and self._agent._on_channel_ready:
+                asyncio.create_task(self._agent._on_channel_ready(channel))
             return {"ok": True, "online": True, "msg": "微信已重连"}
         elif channel == "dingtalk":
             cid = self._config.dingtalk.client_id

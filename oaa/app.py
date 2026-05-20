@@ -165,65 +165,79 @@ class OAAApp:
         await self.agent._idle_inspector.start_background()
 
         # Startup self-check: background task that waits for GUI client
-        self._startup_done = False
+        self._startup_notified: set[str] = set()
         asyncio.create_task(self._startup_check())
 
-        # Register hook: when first GUI client connects, try startup check again
-        self.desktop._on_first_client = self._on_gui_client_connected
+        # Register hook: when a Desktop GUI client connects, send startup notification
+        self.desktop._on_first_client = lambda: asyncio.create_task(self._notify_desktop())
+
+        # Wire a callback so management.py can send welcome when a new channel authenticates
+        self.agent._on_channel_ready = self._notify_channel
 
         logger.info("OAA ready. Waiting for messages...")
         while True:
             await asyncio.sleep(3600)
 
-    async def _on_gui_client_connected(self):
-        """Called when first Desktop GUI client connects — re-trigger startup check."""
-        if not self._startup_done:
-            await self._startup_check()
+    async def _notify_desktop(self):
+        """Send startup notification to all connected Desktop GUI clients."""
+        status = self.agent._build_channel_status()
+        if status and "desktop" not in self._startup_notified:
+            self._startup_notified.add("desktop")
+            msg = f"🟢 OAA 已启动\n\n{status}\n\n随时可以通过以下通道给我布置工作。"
+            await self.desktop.notify_all(msg)
+            logger.info("Startup notification sent to Desktop GUI")
+
+    async def _notify_channel(self, channel: str):
+        """Send welcome notification through a just-connected channel."""
+        if channel in self._startup_notified:
+            return
+        self._startup_notified.add(channel)
+
+        status = self.agent._build_channel_status()
+        if not status:
+            return
+
+        # Simplify for plain-text channels
+        import re as _re
+        simple_status = _re.sub(r"[✅❌🔵]", "", status).replace("**", "").replace("``", "")
+        wechat_msg = f"OAA 已启动\n\n{simple_status}\n\n随时可以通过以上通道给我布置工作。"
+
+        if channel == "wechat":
+            wechat = self.channel_adapters.get("wechat")
+            if wechat and getattr(wechat, 'is_authenticated', False) and wechat._bot_user_id:
+                await wechat.send_message(wechat._bot_user_id, wechat_msg)
+                logger.info("Welcome notification sent to WeChat (%s)", wechat._bot_user_id)
 
     async def _startup_check(self):
-        """After startup, report channel status to the user via available channels.
-
-        Waits up to 30s for a Desktop GUI client to connect before sending.
-        This is a background task — doesn't block the startup sequence.
-        """
+        """Report channel status at startup. Waits up to 30s for a Desktop GUI client."""
         try:
             status = self.agent._build_channel_status()
             if not status:
-                self._startup_done = True
                 return
 
-            # Simplify status for plain-text channels (WeChat doesn't support emoji well)
-            import re as _re
-            simple_status = _re.sub(r"[✅❌🔵]", "", status)
-            simple_status = simple_status.replace("**", "").replace("``", "")
-
-            desktop_msg = f"🟢 OAA 已启动\n\n{status}\n\n随时可以通过以下通道给我布置工作。"
-            wechat_msg = f"OAA 已启动\n\n{simple_status}\n\n随时可以通过以上通道给我布置工作。"
-
-            # 1. Push to Desktop GUI — wait for a client up to 30s
+            # Notify Desktop GUI — wait for client up to 30s
             if not self.desktop._clients:
                 for _ in range(15):
                     await asyncio.sleep(2)
                     if self.desktop._clients:
                         break
-            if self.desktop._clients:
-                await self.desktop.notify_all(desktop_msg)
+            if self.desktop._clients and "desktop" not in self._startup_notified:
+                self._startup_notified.add("desktop")
+                msg = f"🟢 OAA 已启动\n\n{status}\n\n随时可以通过以下通道给我布置工作。"
+                await self.desktop.notify_all(msg)
                 logger.info("Startup notification sent to Desktop GUI (%d clients)", len(self.desktop._clients))
 
-            # 2. Push to WeChat if bot owner's wxid is known (send immediately, no wait)
+            # Notify WeChat if already authenticated at startup
             wechat = self.channel_adapters.get("wechat")
-            if wechat and getattr(wechat, 'is_authenticated', False) and wechat._bot_user_id:
-                await wechat.send_message(wechat._bot_user_id, wechat_msg)
+            if wechat and getattr(wechat, 'is_authenticated', False) and wechat._bot_user_id and "wechat" not in self._startup_notified:
+                self._startup_notified.add("wechat")
+                import re as _re
+                simple = _re.sub(r"[✅❌🔵]", "", status).replace("**", "").replace("``", "")
+                await wechat.send_message(wechat._bot_user_id, f"OAA 已启动\n\n{simple}\n\n随时可以通过以上通道给我布置工作。")
                 logger.info("Startup notification sent to WeChat (%s)", wechat._bot_user_id)
 
-            self._startup_done = True
-
-            if not self.desktop._clients:
-                logger.info("No Desktop GUI client connected within 30s — startup notification deferred to on-connect hook")
-
         except Exception as exc:
-            logger.warning("Startup check notification failed: %s", exc)
-            self._startup_done = True
+            logger.warning("Startup check failed: %s", exc)
 
     async def stop(self):
         logger.info("Shutting down...")

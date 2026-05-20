@@ -100,6 +100,8 @@ class OAAAgent:
 
         # Runtime channel status (set by OAAApp after adapters are created)
         self._channel_adapters: dict = {}
+        # Callback fired when a channel authenticates mid-session (set by OAAApp)
+        self._on_channel_ready = None
 
         skills_dir = os.path.join(config.data_dir, "skills")
         self.skill_mgr = SkillManager(skills_dir)
