@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any, AsyncGenerator, Optional, TYPE_CHECKING
 
 from ..llm import LLMClient, LLMResponse
@@ -17,6 +18,35 @@ _MAX_RETRIES = 3
 _BASE_DELAY = 1.0
 _LLM_TIMEOUT = 90.0  # hard cap per LLM call, outer safety net beyond SDK timeout
 _MAX_CONTINUATIONS = 5  # max auto-continuation turns for truncated responses
+_MAX_TOOL_RETRIES = 2  # max auto-retries for transient tool errors
+_TRANSIENT_ERRORS = {"rate", "429", "timeout", "timed out", "too many", "busy", "503", "502"}
+
+
+def _classify_error(exc: Exception) -> str:
+    """Classify a tool error as 'transient', 'auth', or 'permanent'."""
+    msg = str(exc).lower()
+    if any(t in msg for t in _TRANSIENT_ERRORS):
+        return "transient"
+    if "401" in msg or "unauthorized" in msg or "auth" in msg or "403" in msg:
+        return "auth"
+    return "permanent"
+
+
+def _recovery_hint(tool_name: str, error_msg: str, err_type: str) -> str:
+    """Return a recovery hint appended to the tool result for the LLM."""
+    if err_type == "auth":
+        return (
+            f"\n\n[恢复提示] 工具 {tool_name} 因权限/认证问题失败。"
+            f"请检查配置中相关 API Key 是否有效，或通过 web_search 查找该服务的认证方式。"
+            f"不要建议用户手动完成。"
+        )
+    return (
+        f"\n\n[恢复提示] 工具 {tool_name} 调用失败: {error_msg[:120]}。"
+        f"请尝试：1) 使用其他工具或方法完成相同目标；"
+        f"2) 如果没有合适的工具，用 read_own_source + self_improve 修改代码添加功能；"
+        f"3) 用 web_search 查找现成的解决方案或替代工具。"
+        f"完成任务是第一优先级。不要建议用户手动操作。"
+    )
 
 
 def _friendly_error(exc: Exception) -> str:
@@ -72,6 +102,12 @@ class AgentLoop:
         self._last_llm_content = ""
         self._continuation_count = 0
 
+    def _error_with_context(self, error_msg: str) -> str:
+        """Append error to last yielded content so it doesn't overwrite the conversation."""
+        if self._last_llm_content:
+            return self._last_llm_content + "\n\n[系统错误] " + error_msg
+        return error_msg
+
     def set_skill_context(self, system_prompt: str, extra_tools: Optional[list] = None):
         """Set system prompt and optionally add skill-specific tools."""
         self._system_prompt = system_prompt
@@ -124,10 +160,23 @@ class AgentLoop:
                 except Exception as exc:
                     last_error = exc
                     err_type = type(exc).__name__
-                    # API/server errors are not transient — fail immediately
-                    if "APIError" in str(exc) or "EngineInternalError" in str(exc) or "InvalidParamError" in str(exc):
-                        logger.error("LLM server error [%s], not retrying: %s", err_type, exc)
-                        yield {"type": "done", "content": _friendly_error(exc)}
+                    # API/server errors are not transient — fail immediately.
+                    # BadRequestError (OpenAI SDK), ContextLengthExceeded, etc.
+                    # should not be retried — they will fail the same way every time.
+                    err_msg = str(exc)
+                    if ("APIError" in err_msg or "EngineInternalError" in err_msg
+                        or "InvalidParamError" in err_msg
+                        or err_type in ("BadRequestError", "ContextLengthExceeded", "NotFoundError",
+                                        "AuthenticationError", "PermissionDeniedError",
+                                        "UnprocessableEntityError", "ContentTooLongError")):
+                        logger.error("LLM non-retryable error [%s]: %s", err_type, exc)
+                        # If there was any previous assistant output, append the error
+                        # so it doesn't overwrite the conversation in the frontend.
+                        if self._last_llm_content:
+                            yield {"type": "llm_output", "content": "\n\n[系统错误] " + _friendly_error(exc)}
+                            yield {"type": "done", "content": ""}
+                        else:
+                            yield {"type": "done", "content": self._error_with_context(_friendly_error(exc))}
                         return
                 if last_error:
                     if attempt < _MAX_RETRIES:
@@ -143,11 +192,16 @@ class AgentLoop:
                             "LLM call failed [%s] after %d attempts: %s",
                             err_type, _MAX_RETRIES, last_error,
                         )
-                        yield {"type": "done", "content": _friendly_error(last_error)}
+                        if self._last_llm_content:
+                            yield {"type": "llm_output", "content": "\n\n[系统错误] " + _friendly_error(last_error)}
+                            yield {"type": "done", "content": ""}
+                        else:
+                            yield {"type": "done", "content": self._error_with_context(_friendly_error(last_error))}
                         return
 
             content = (response.content or "") if response else ""
-            tool_calls = response.tool_calls
+            tool_calls = response.tool_calls if response else []
+            thinking = response.thinking if response else ""
 
             if content:
                 yield {"type": "llm_output", "content": content}
@@ -155,7 +209,7 @@ class AgentLoop:
 
             # Auto-continuation: if response was truncated (max_tokens hit) with no tool calls,
             # re-prompt the LLM to continue from where it left off
-            if not tool_calls and response.finish_reason in ("length", "max_tokens"):
+            if not tool_calls and response and response.finish_reason in ("length", "max_tokens"):
                 if self._continuation_count < _MAX_CONTINUATIONS:
                     self._continuation_count += 1
                     logger.info("Response truncated (turn %d), auto-continuing (%d/%d)",
@@ -186,13 +240,38 @@ class AgentLoop:
                     args = {"_raw": raw_args}
 
                 yield {"type": "tool_call", "name": tool_name, "args": args}
-                try:
-                    result = await self.handler.dispatch(tool_name, args)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
+
+                # Execute tool with auto-retry for transient errors
+                result = None
+                last_tool_error: Exception | None = None
+                for tool_attempt in range(1, _MAX_TOOL_RETRIES + 1):
+                    try:
+                        result = await self.handler.dispatch(tool_name, args)
+                        last_tool_error = None
+                        break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        last_tool_error = exc
+                        err_cat = _classify_error(exc)
+                        if err_cat == "transient" and tool_attempt < _MAX_TOOL_RETRIES:
+                            t_delay = _BASE_DELAY * (2 ** (tool_attempt - 1))
+                            logger.warning("Tool %s transient error [%s] attempt %d/%d, retry in %.1fs",
+                                           tool_name, err_cat, tool_attempt, _MAX_TOOL_RETRIES, t_delay)
+                            yield {"type": "status", "content": f"工具 {tool_name} 临时错误，重试 ({tool_attempt}/{_MAX_TOOL_RETRIES})..."}
+                            await asyncio.sleep(t_delay)
+                        else:
+                            break
+
+                if last_tool_error is not None:
+                    exc = last_tool_error
                     logger.error("Tool %s failed: %s", tool_name, exc)
-                    result = {"status": "error", "msg": str(exc)}
+                    err_cat = _classify_error(exc)
+                    result = {
+                        "status": "error",
+                        "msg": str(exc),
+                        "_recovery_hint": _recovery_hint(tool_name, str(exc), err_cat),
+                    }
                 yield {"type": "tool_result", "name": tool_name, "result": result}
 
                 # Record tool failures for self-diagnosis
@@ -202,7 +281,39 @@ class AgentLoop:
                     except Exception as rec_err:
                         logger.warning("Failed to record tool failure: %s", rec_err)
 
-                result_str = str(result)
+                # Auto-detect missing modules for code tools → suggest pip install
+                if tool_name in ("code_run", "code_exec") and isinstance(result, dict) and result.get("status") == "error":
+                    err_text = " ".join(filter(None, [
+                        str(result.get("msg", "")),
+                        str(result.get("stdout", "")),
+                        str(result.get("stderr", "")),
+                    ]))
+                    mod_match = re.search(r"(?:ModuleNotFoundError|ImportError):\s*No module named ['\"]?(.+?)['\"]?(?:\s|$)", err_text)
+                    if mod_match:
+                        mod_name = mod_match.group(1)
+                        result["_recovery_hint"] = (
+                            f"\n\n[恢复提示] 缺少 Python 模块 '{mod_name}'。"
+                            f"请用 shell_run 命令安装：`pip install {mod_name}`，然后重试。"
+                            f"完成任务是第一优先级。不要建议用户手动操作。"
+                        )
+
+                # Format error results with clear recovery hints for the LLM
+                if isinstance(result, dict) and result.get("status") == "error":
+                    parts = [f"status: error", f"msg: {result.get('msg', '')}"]
+                    # Include stdout/stderr for code tools (the error detail is there, not in msg)
+                    if tool_name in ("code_run", "code_exec"):
+                        for key in ("stdout", "stderr"):
+                            val = result.get(key, "")
+                            if val:
+                                lines = val.strip().split("\n")
+                                snippet = "\n".join(lines[-8:])  # last 8 lines = traceback tail
+                                parts.append(f"{key} (tail):\n{snippet}")
+                    if hint := result.get("_recovery_hint"):
+                        parts.append("_" * 30)
+                        parts.append(hint.lstrip())
+                    result_str = "\n".join(parts)
+                else:
+                    result_str = str(result)
                 if len(result_str) > 8000:
                     result_str = result_str[:8000] + "...[truncated]"
                 tool_result_entries.append({
@@ -211,7 +322,7 @@ class AgentLoop:
                 })
 
             # Append assistant + tool-result messages
-            messages = self._build_turn_messages(messages, content, tool_calls, tool_result_entries)
+            messages = self._build_turn_messages(messages, content, tool_calls, tool_result_entries, thinking)
 
             # Compact messages if over limit (always keep recent context)
             messages = await self._compact_messages(messages)
@@ -219,9 +330,12 @@ class AgentLoop:
         yield {"type": "done", "content": "Max turns exceeded."}
 
     def _build_turn_messages(self, messages: list, content: str,
-                              tool_calls: list, tool_result_entries: list) -> list:
+                              tool_calls: list, tool_result_entries: list,
+                              thinking: str = "") -> list:
         """Build messages for this turn: assistant msg with tool_calls + tool results."""
         assistant_msg: dict = {"role": "assistant", "content": content}
+        if thinking:
+            assistant_msg["reasoning_content"] = thinking
         if tool_calls:
             assistant_msg["tool_calls"] = [
                 {

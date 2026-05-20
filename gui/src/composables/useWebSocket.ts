@@ -51,22 +51,33 @@ export function useWebSocket() {
   let isDestroyed = false
 
   // Management request queue
-  const pendingRequests = new Map<string, PendingRequest>()
+  // eslint-disable-next-line prefer-const
+  let pendingRequests = new Map<string, PendingRequest>()
+  let _connectResolve: (() => void) | null = null
+  let _connectPromise: Promise<void> | null = null
 
   function connect() {
     if (isDestroyed) return
+    _connectPromise = new Promise((resolve) => { _connectResolve = resolve })
     try {
       ws.value = new WebSocket('ws://127.0.0.1:9765')
     } catch {
+      _connectPromise = null
       scheduleReconnect()
       return
     }
     ws.value.onopen = () => {
       connected.value = true
+      confirmRequest.value = null
+      qrCode.value = null
+      _connectResolve?.()
     }
     ws.value.onclose = () => {
       connected.value = false
       ws.value = null
+      confirmRequest.value = null
+      qrCode.value = null
+      _connectPromise = null
       scheduleReconnect()
     }
     ws.value.onerror = () => {
@@ -144,7 +155,32 @@ export function useWebSocket() {
   // Management request API
   // ------------------------------------------------------------------
 
-  function sendRequest(type: string, payload: Record<string, unknown> = {}): Promise<MgmtResponse> {
+  async function waitForOpen(): Promise<void> {
+    if (ws.value?.readyState === WebSocket.OPEN) return
+    const timeoutMs = 10000
+    if (_connectPromise) {
+      await Promise.race([
+        _connectPromise,
+        new Promise(resolve => setTimeout(resolve, timeoutMs)),
+      ])
+    }
+    if (ws.value?.readyState !== WebSocket.OPEN && !isDestroyed) {
+      await Promise.race([
+        new Promise<void>((resolve) => {
+          const check = setInterval(() => {
+            if (ws.value?.readyState === WebSocket.OPEN || isDestroyed) {
+              clearInterval(check)
+              resolve()
+            }
+          }, 100)
+        }),
+        new Promise(resolve => setTimeout(resolve, timeoutMs)),
+      ])
+    }
+  }
+
+  async function sendRequest(type: string, payload: Record<string, unknown> = {}): Promise<MgmtResponse> {
+    await waitForOpen()
     return new Promise((resolve, reject) => {
       if (!ws.value || ws.value.readyState !== WebSocket.OPEN) {
         reject(new Error('WebSocket not connected'))

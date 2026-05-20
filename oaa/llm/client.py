@@ -1,6 +1,7 @@
 """LLM client — unified factory for OpenAI-compatible and Anthropic APIs."""
 from dataclasses import dataclass, field
 
+import openai
 from openai import AsyncOpenAI
 
 from ..config import ModelConfig
@@ -54,6 +55,8 @@ class _OpenAIClient:
         self._tools = tools
 
     async def chat(self, messages: list) -> LLMResponse:
+        import asyncio as _asyncio
+        import random as _random
         kwargs: dict = {"model": self.config.model_id, "messages": messages, "stream": True}
         if self._tools:
             kwargs["tools"] = self._tools
@@ -64,7 +67,30 @@ class _OpenAIClient:
                        self.config.model_id, len(messages), len(self._tools),
                        self.config.max_tokens, self.config.base_url)
 
-        stream = await self._client.chat.completions.create(**kwargs)
+        last_exc = None
+        for attempt in range(4):  # 1 initial + 3 retries
+            try:
+                stream = await self._client.chat.completions.create(**kwargs)
+                break
+            except openai.RateLimitError as exc:
+                last_exc = exc
+                if attempt < 3:
+                    wait = (2 ** attempt) + _random.random()
+                    logger.warning("Rate limit (attempt %d/3), retrying in %.1fs", attempt + 1, wait)
+                    await _asyncio.sleep(wait)
+                    continue
+                raise
+            except openai.APIStatusError as exc:
+                if exc.status_code in (502, 503) and attempt < 3:
+                    wait = (2 ** attempt) + _random.random()
+                    logger.warning("API %d (attempt %d/3), retrying in %.1fs", exc.status_code, attempt + 1, wait)
+                    await _asyncio.sleep(wait)
+                    continue
+                raise
+        else:
+            # All retries exhausted
+            if last_exc:
+                raise last_exc
         content = ""
         tool_calls: dict[int, dict] = {}
         thinking = ""

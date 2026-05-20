@@ -4,6 +4,7 @@ Inspired by self-improving skill patterns.
 """
 import os
 import re
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -219,6 +220,30 @@ class MemoryManager:
         return {"status": "success", "matches": result, "query": query}
 
     # ------------------------------------------------------------------
+    # Pending proposals — IdleInspector → agent injection
+    # ------------------------------------------------------------------
+
+    def save_pending_proposal(self, proposal: str):
+        """Store a proposal from IdleInspector for the agent to see on next turn."""
+        path = self._dir / "pending_proposals.md"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(proposal.strip() + "\n---\n")
+
+    def load_pending_proposals(self) -> str:
+        """Return all pending proposals, then clear them (consumed on read)."""
+        path = self._dir / "pending_proposals.md"
+        if not path.exists():
+            return ""
+        content = path.read_text(encoding="utf-8").strip()
+        # Clear after reading — agent gets one-shot delivery
+        path.write_text("", encoding="utf-8")
+        return content
+
+    def has_pending_proposals(self) -> bool:
+        path = self._dir / "pending_proposals.md"
+        return path.exists() and path.stat().st_size > 0
+
+    # ------------------------------------------------------------------
     # System prompt fragment
     # ------------------------------------------------------------------
 
@@ -239,4 +264,67 @@ class MemoryManager:
                 lines.append(f"- {c['context']} → {c['lesson']}")
             parts.append("# 最近修正记录\n\n" + "\n".join(lines))
 
+        # Pending proposals — one-shot injection, cleared after read
+        proposals = self.load_pending_proposals()
+        if proposals:
+            parts.append("# ⏳ 待处理自愈提案\n\n以下自愈/优化机会待处理，系统规则第9条允许你自主执行无需等待用户确认：\n\n" + proposals)
+
         return "\n\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # Tool failure tracking
+    # ------------------------------------------------------------------
+
+    def add_tool_failure(self, tool_name: str, args: dict, error_msg: str) -> dict:
+        """Record a tool execution failure to tool_failures.md."""
+        import json
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        args_str = json.dumps(args, ensure_ascii=False)[:200]
+        entry = (
+            f"\n## {timestamp}\n"
+            f"- **tool**: {tool_name}\n"
+            f"- **error**: {error_msg[:300]}\n"
+            f"- **args**: {args_str}\n"
+        )
+        path = self._dir / "tool_failures.md"
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + entry, encoding="utf-8")
+        return {"status": "success"}
+
+    def load_tool_failures(self, limit: int = 50) -> list[dict]:
+        """Return the most recent *limit* tool failure records."""
+        path = self._dir / "tool_failures.md"
+        if not path.exists():
+            return []
+        text = path.read_text(encoding="utf-8")
+        entries = []
+        for block in re.split(r"\n## ", text):
+            if not block.strip():
+                continue
+            lines = block.strip().split("\n")
+            header = lines[0].strip()
+            tool = ""
+            error = ""
+            args = ""
+            for l in lines:
+                if l.startswith("- **tool**"):
+                    tool = l.split(":", 1)[-1].strip()
+                elif l.startswith("- **error**"):
+                    error = l.split(":", 1)[-1].strip()
+                elif l.startswith("- **args**"):
+                    args = l.split(":", 1)[-1].strip()
+            entries.append({
+                "timestamp": header,
+                "tool": tool,
+                "error": error,
+                "args": args,
+            })
+        return entries[-limit:]
+
+    def count_tool_failures(self, since_timestamp: str = "") -> dict:
+        """Count tool failures grouped by tool name."""
+        entries = self.load_tool_failures(500)
+        if since_timestamp:
+            entries = [e for e in entries if e["timestamp"] >= since_timestamp]
+        tool_counts = Counter(e["tool"] for e in entries)
+        return {"status": "success", "total": len(entries), "by_tool": dict(tool_counts)}

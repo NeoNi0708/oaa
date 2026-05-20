@@ -77,7 +77,7 @@ WECHAT_TOOLS_SCHEMA = [
     }},
     {"type": "function", "function": {
         "name": "wechat_send_text",
-        "description": "Proactively send a WeChat text message to a contact (wxid or name). Requires WeChat bot to be logged in.",
+        "description": "Send a WeChat text message via iLink adapter (不需要 wechat-cli，微信在线即可用). Use when user says '发微信给...' or to push notification to user's WeChat.",
         "parameters": {"type": "object", "properties": {
             "to": {"type": "string", "description": "Recipient wxid (preferred) or name"},
             "text": {"type": "string", "description": "Message text content"},
@@ -90,6 +90,14 @@ WECHAT_TOOLS_SCHEMA = [
             "to": {"type": "string", "description": "Contact wxid"},
             "status": {"type": "integer", "enum": [1, 0], "description": "1 = show typing, 0 = hide typing", "default": 1},
         }, "required": ["to"]}
+    }},
+    {"type": "function", "function": {
+        "name": "wechat_send_file",
+        "description": "Send a local file to a WeChat contact via CDN upload (不需要 wechat-cli，微信在线即可用). Supports images, documents, videos, and audio files. Use when user asks to send a file to their WeChat or to a contact.",
+        "parameters": {"type": "object", "properties": {
+            "to": {"type": "string", "description": "Recipient wxid (preferred) or name"},
+            "file_path": {"type": "string", "description": "Absolute path to the local file"},
+        }, "required": ["to", "file_path"]}
     }},
 ]
 

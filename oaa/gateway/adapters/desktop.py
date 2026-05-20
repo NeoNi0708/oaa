@@ -43,8 +43,8 @@ _current_ws: contextvars.ContextVar = contextvars.ContextVar("desktop_current_ws
 _MANAGEMENT_TYPES = {
     "get_config", "save_config",
     "get_tasks", "save_task", "delete_task", "toggle_task",
-    "get_skills", "get_evolution",
-    "qr_login", "poll_qr",
+    "get_skills", "get_skill_detail", "switch_skill", "get_evolution",
+    "qr_login", "poll_qr", "reconnect_channel",
     "get_status",
     "switch_model", "get_models",
     "stop_chat",
@@ -319,6 +319,22 @@ class DesktopAdapter:
         except Exception as exc:
             logger.debug("Send failed, removing client: %s", exc)
             self._clients.discard(websocket)
+
+    async def notify_all(self, content: str, msg_type: str = "llm_output"):
+        """Broadcast a notification to all connected GUI clients.
+
+        Used by IdleInspector background task to push proposals.
+        Defaults to ``llm_output`` type so the GUI renders it as assistant output.
+        """
+        msg = json.dumps({
+            "type": msg_type,
+            "payload": {"content": content},
+        }, ensure_ascii=False)
+        for ws in self._clients.copy():
+            try:
+                await ws.send(msg)
+            except Exception:
+                self._clients.discard(ws)
 
     async def send_message(self, user_id: str, content: str, session_id: str = ""):
         """Send message to desktop client."""

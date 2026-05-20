@@ -1,12 +1,19 @@
 <template>
   <div class="chat-view">
+    <!-- Error fallback -->
+    <div v-if="crashError" class="chat-error-fallback">
+      <div class="error-icon">⚠</div>
+      <h3>聊天组件异常</h3>
+      <pre class="error-detail">{{ crashError }}</pre>
+    </div>
+
     <!-- Header -->
     <div class="chat-header">
       <div class="chat-header-info">
         <div class="title-row">
           <h1 class="chat-title">二愣</h1>
           <span :class="['phase-pill', agentPhase]">{{ agentPhaseLabel }}</span>
-          <div class="model-selector" v-if="Object.keys(filteredModelList).length > 0">
+          <div class="model-selector" v-if="Object.keys(flattenedModelList).length > 0">
             <button class="model-btn" @click.stop="toggleModelMenu" title="切换模型">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 10 10H12V2z"/><path d="M12 2a10 10 0 0 1 10 10h-10V2z"/></svg>
               <span class="model-label">{{ activeModelLabel }}</span>
@@ -14,13 +21,13 @@
             </button>
             <div v-if="showModelMenu" class="model-menu" @click.stop>
               <div
-                v-for="(mdl, prov) in filteredModelList"
-                :key="prov"
-                :class="['model-item', { active: prov === activeProvider }]"
-                @click="switchModel(prov)"
+                v-for="item in flattenedModelList"
+                :key="item.key"
+                :class="['model-item', { active: item.key === activeModelKey }]"
+                @click="switchModel(item.provider, item.model_id)"
               >
-                <div class="model-item-name">{{ providerLabel(prov) }}</div>
-                <div class="model-item-meta">{{ mdl.model_id || '未配置' }}</div>
+                <div class="model-item-name">{{ item.label }}</div>
+                <div class="model-item-meta">{{ item.model_id || '未配置' }}</div>
               </div>
             </div>
           </div>
@@ -182,12 +189,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onUnmounted, onErrorCaptured } from 'vue'
 import { marked } from 'marked'
 import { useWebSocket, type ChatMessage } from '../composables/useWebSocket'
 import { useAgentStatus } from '../composables/useAgentStatus'
 
 interface ModelInfo {
+  name: string
   api_key: string
   model_id: string
   base_url: string
@@ -209,6 +217,14 @@ const {
 } = useWebSocket()
 
 const { phase: agentPhase, phaseLabel: agentPhaseLabel, chatCount, formatUptime } = useAgentStatus(sendRequest)
+
+// Error boundary — captures render errors so we see the error, not a black screen
+const crashError = ref<string | null>(null)
+onErrorCaptured((err: Error) => {
+  crashError.value = `${err.message}\n${err.stack?.split('\n').slice(0, 3).join('\n') || ''}`
+  console.error('[ChatView] Error captured:', err)
+  return false // let error propagate
+})
 
 const input = ref('')
 const loading = ref(false)
@@ -279,20 +295,42 @@ function readFileAsText(file: File): Promise<string> {
   })
 }
 
-// Model switching
-const modelList = ref<Record<string, ModelInfo>>({})
+// Model switching — supports multiple entries per provider
+interface ModelListEntry {
+  provider: string
+  model_id: string
+  api_key: string
+  base_url: string
+  name: string
+}
+
+const modelList = ref<Record<string, ModelListEntry[]>>({})
 const activeProvider = ref('')
+const activeModelId = ref('')
 const showModelMenu = ref(false)
 const activeModelLabel = ref('')
 
-const filteredModelList = computed(() => {
-  const result: Record<string, ModelInfo> = {}
-  for (const [prov, info] of Object.entries(modelList.value)) {
-    if (info.api_key && info.model_id) result[prov] = info
+const activeModelKey = computed(() => `${activeProvider.value}::${activeModelId.value}`)
+
+/** Flatten provider→entries into a single sorted list for the dropdown. */
+const flattenedModelList = computed(() => {
+  const result: { key: string; provider: string; model_id: string; label: string }[] = []
+  for (const [prov, entries] of Object.entries(modelList.value)) {
+    for (const entry of entries) {
+      if (!entry.api_key && !entry.model_id) continue
+      const key = `${prov}::${entry.model_id}`
+      const label = entry.name
+        ? `${providerLabel(prov)}[${entry.name}]`
+        : `${providerLabel(prov)}: ${entry.model_id}`
+      result.push({ key, provider: prov, model_id: entry.model_id, label })
+    }
   }
-  if (activeProvider.value && !result[activeProvider.value] && modelList.value[activeProvider.value]) {
-    result[activeProvider.value] = modelList.value[activeProvider.value]
-  }
+  // Put active provider first, then alphabetical
+  result.sort((a, b) => {
+    if (a.provider === activeProvider.value && b.provider !== activeProvider.value) return -1
+    if (a.provider !== activeProvider.value && b.provider === activeProvider.value) return 1
+    return a.label.localeCompare(b.label)
+  })
   return result
 })
 
@@ -314,28 +352,38 @@ async function loadModels() {
   try {
     const resp = await sendRequest('get_models')
     if (resp.ok) {
-      modelList.value = (resp.models as Record<string, ModelInfo>) || {}
+      modelList.value = (resp.models as Record<string, ModelListEntry[]>) || {}
       activeProvider.value = (resp.active as string) || ''
+      activeModelId.value = (resp.active_model_id as string) || ''
       updateActiveModelLabel()
     }
   } catch { /* ignore */ }
 }
 
-async function switchModel(provider: string) {
-  if (provider === activeProvider.value) { showModelMenu.value = false; return }
+async function switchModel(provider: string, model_id?: string) {
+  const key = `${provider}::${model_id}`
+  if (key === activeModelKey.value && model_id) { showModelMenu.value = false; return }
   showModelMenu.value = false
   try {
-    await sendRequest('switch_model', { provider })
-    activeProvider.value = provider
-    updateActiveModelLabel()
+    const resp = await sendRequest('switch_model', { provider, model_id: model_id || '' })
+    if (resp.ok) {
+      activeProvider.value = provider
+      activeModelId.value = (resp.model_id as string) || model_id || ''
+      updateActiveModelLabel()
+    }
   } catch { /* ignore */ }
 }
 
 function updateActiveModelLabel() {
-  const mdl = modelList.value[activeProvider.value]
-  activeModelLabel.value = mdl?.model_id
-    ? `${providerLabel(activeProvider.value)}: ${mdl.model_id}`
-    : providerLabel(activeProvider.value)
+  const entries = modelList.value[activeProvider.value] || []
+  const entry = entries.find(e => e.model_id === activeModelId.value) || entries[0]
+  if (entry?.model_id) {
+    activeModelLabel.value = entry.name
+      ? `${providerLabel(activeProvider.value)}[${entry.name}]`
+      : `${providerLabel(activeProvider.value)}: ${entry.model_id}`
+  } else {
+    activeModelLabel.value = providerLabel(activeProvider.value)
+  }
 }
 
 function onDocumentClick() { showModelMenu.value = false }
@@ -357,8 +405,13 @@ _modelWatchStop = watch(connected, (val) => {
 
 function renderContent(text: any) {
   const safe = typeof text === 'string' ? text : JSON.stringify(text, null, 2)
-  return marked.parse(safe, { breaks: true })
-    .replace(/<a /g, '<a target="_blank" rel="noopener noreferrer" ')
+  try {
+    return marked.parse(safe, { async: false, breaks: true })
+      .replace(/<a /g, '<a target="_blank" rel="noopener noreferrer" ')
+  } catch (e) {
+    console.error('renderContent error:', e)
+    return safe // 如果解析失败，直接显示原始内容
+  }
 }
 
 function roleLabel(msg: ChatMessage) {

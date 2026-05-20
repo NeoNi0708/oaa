@@ -8,11 +8,14 @@ from ..evolution.engine import EvolutionEngine
 from ..init import ensure_data_dir, load_identity
 from ..llm import LLMClient
 from ..logging_config import get_logger
+from .ai_search_tool import AiSearchTools
 from .browser_tools import BrowserTools
 from .extended_tools import ExtendedTools
 from .handler import BaseHandler
 from .idle_inspector import IdleInspector
 from .loop import AgentLoop
+from . import system_rules as _sys_rules
+from .conversation_archiver import ConversationArchiver
 from .memory_manager import MemoryManager
 from .skill_manager import SkillManager
 from .tool_schema import ATOMIC_TOOLS_SCHEMA, BROWSER_TOOLS_SCHEMA, DINGTALK_TOOLS_SCHEMA, EXTENDED_TOOLS_SCHEMA, FEISHU_TOOLS_SCHEMA, MCP_TOOLS_SCHEMA, WECHAT_TOOLS_SCHEMA
@@ -34,10 +37,12 @@ class _MergedHandler(BaseHandler):
     consumed by ``AgentLoop``.
     """
 
-    def __init__(self, atomic: AtomicTools, extended: ExtendedTools, browser: BrowserTools):
+    def __init__(self, atomic: AtomicTools, extended: ExtendedTools, browser: BrowserTools,
+                 search: AiSearchTools):
         self._atomic = atomic
         self._extended = extended
         self._browser = browser
+        self._search = search
 
     def __getattr__(self, name: str):
         if not name.startswith("do_"):
@@ -49,9 +54,11 @@ class _MergedHandler(BaseHandler):
             return getattr(self._extended, name)
         if hasattr(self._browser, name):
             return getattr(self._browser, name)
+        if hasattr(self._search, name):
+            return getattr(self._search, name)
         # Check decorator registries on each backend
         tool_name = name[3:]  # strip "do_"
-        for backend in (self._atomic, self._extended, self._browser):
+        for backend in (self._atomic, self._extended, self._browser, self._search):
             if tool_name in backend._tool_registry:
                 return backend._tool_registry[tool_name]
         # Fall back to dynamic tools
@@ -88,12 +95,19 @@ class OAAAgent:
 
         self.llm = LLMClient(config.model)
 
+        # Conversation archiver (structured summaries + cross-session search)
+        self.archiver = ConversationArchiver(config.data_dir, llm=self.llm)
+
+        # Runtime channel status (set by OAAApp after adapters are created)
+        self._channel_adapters: dict = {}
+
         skills_dir = os.path.join(config.data_dir, "skills")
         self.skill_mgr = SkillManager(skills_dir)
         self.skill_mgr.discover()
 
         self.atomic = AtomicTools(config.data_dir, permissions=permissions)
         self.atomic.set_memory_manager(self.memory)
+        self.atomic.set_archiver(self.archiver)
         self.extended = ExtendedTools(
             config.data_dir, permissions=permissions, wechat_adapter=wechat_adapter,
             dingtalk_client_id=config.dingtalk.client_id,
@@ -101,12 +115,18 @@ class OAAAgent:
         )
         self.extended.set_skill_manager(self.skill_mgr)
         self.browser = BrowserTools()
+        self.search = AiSearchTools(
+            tavily_api_key=config.search.tavily_api_key,
+            exa_api_key=config.search.exa_api_key,
+            anysearch_api_key=config.search.anysearch_api_key,
+        )
 
         self._tools_schema = (
             ATOMIC_TOOLS_SCHEMA + EXTENDED_TOOLS_SCHEMA + BROWSER_TOOLS_SCHEMA + MCP_TOOLS_SCHEMA
             + collect_tool_schemas(AtomicTools)
             + collect_tool_schemas(ExtendedTools)
             + collect_tool_schemas(BrowserTools)
+            + collect_tool_schemas(AiSearchTools)
         )
         if config.wechat.enabled and config.wechat.iLink_token:
             self._tools_schema = self._tools_schema + WECHAT_TOOLS_SCHEMA
@@ -115,9 +135,58 @@ class OAAAgent:
         if config.dingtalk.enabled and config.dingtalk.client_id:
             self._tools_schema = self._tools_schema + DINGTALK_TOOLS_SCHEMA
 
+    def set_channel_adapters(self, adapters: dict):
+        """Inject runtime channel adapter instances for status introspection.
+
+        The agent uses this to know which channels are connected and what
+        tools are available — e.g. iLink-connected WeChat means send_file
+        works, but wechat-cli stubs remain unavailable.
+        """
+        self._channel_adapters = adapters
+
+    def _build_channel_status(self) -> str:
+        """Build a runtime status report of all channel adapters.
+
+        Injected into the system prompt so the agent knows the actual
+        connection state rather than guessing from tool names.
+        """
+        if not self._channel_adapters:
+            return ""
+
+        lines = []
+        for name in ("wechat", "dingtalk", "feishu"):
+            adapter = self._channel_adapters.get(name)
+            if adapter is None:
+                continue
+
+            # Check authentication status (adapters may have is_authenticated
+            # as a property or method, or we fall back to config)
+            authed = getattr(adapter, "is_authenticated", None)
+            if callable(authed):
+                authed = authed()
+            elif authed is None:
+                authed = False
+
+            if name == "wechat":
+                if authed:
+                    cli_ok = bool(getattr(self.config.wechat, "wechat_cli_path", ""))
+                    lines.append(f"- 微信 (iLink): ✅ 已连接 — wechat_send_file / wechat_send_text / wechat_send_typing 可用")
+                    lines.append(f"- 微信 (wechat-cli): {'✅ 已配置 — wechat_contacts / wechat_history / wechat_search / wechat_sessions 可用' if cli_ok else '❌ 未配置 — wechat_contacts / wechat_history / wechat_search / wechat_sessions 不可用'}")
+                else:
+                    lines.append(f"- 微信: ❌ 未连接（请先扫码登录）")
+            elif name == "dingtalk":
+                lines.append(f"- 钉钉: {'✅ 已连接' if authed else '❌ 未连接'}")
+            elif name == "feishu":
+                lines.append(f"- 飞书: {'✅ 已连接' if authed else '❌ 未连接'}")
+
+        if not lines:
+            return ""
+
+        return "# 当前通道状态\n\n" + "\n".join(lines)
+
     def build_handler(self) -> BaseHandler:
-        """Build a merged handler that exposes atomic, extended, and browser tools."""
-        handler = _MergedHandler(self.atomic, self.extended, self.browser)
+        """Build a merged handler that exposes atomic, extended, browser, and search tools."""
+        handler = _MergedHandler(self.atomic, self.extended, self.browser, self.search)
         # Pre-load dynamic tools from manifest (survive restarts)
         manifest = self.extended._load_dynamic_manifest()
         for tool_name, entry in manifest.items():
@@ -173,6 +242,15 @@ class OAAAgent:
 
         config_path = os.path.join(self.config.data_dir, "config.json")
 
+        # Process alive-status — prevents hallucination that OAA isn't running
+        oaa_pid = os.getpid()
+        oaa_cmdline = ""
+        try:
+            import psutil
+            oaa_cmdline = " ".join(psutil.Process(oaa_pid).cmdline())[:200]
+        except ImportError:
+            pass
+
         awareness = f"""\
 # 重要：当前日期与工具使用规则
 
@@ -183,24 +261,21 @@ class OAAAgent:
 你的项目根目录是 {OAA_ROOT}。
 数据目录是 {self.config.data_dir}。
 
+**本进程正在运行中。** PID={oaa_pid}。当用户说"页面不见了"或"OAA 退出了"时，你**确实在运行中**，不应声称进程已退出。先排除前端连接或 GUI 显示问题。
+
 关键目录：
 - 应用代码: {OAA_ROOT}/oaa/
 - 技能文件: {self.config.data_dir}/skills/
 - 动态工具: {self.config.data_dir}/dynamic_tools/
 - 配置文件: {config_path}
 - 持久记忆: {self.config.data_dir}/memory/
-- 当前权限级别: **{self.config.permissions.get("permission_level", "auto")}**
+- 当前权限级别: **{(self.config.permissions.get("permission_level") if isinstance(self.config.permissions, dict) else self.config.permissions) or "auto"}**
 
 需要读取自身源码时，使用 `read_own_source`。需要查看项目结构时，使用 `list_own_structure`。
 
-## 强制规则
+{_sys_rules.SYSTEM_RULES}
 
-1. **任何涉及实时数据、当前信息、最新动态的问题，必须调用 web_search 或 web_scan**
-2. **禁止使用训练数据回答关于"今天"、"现在"、"当前"、"最新"的问题**
-3. **搜索结果可能不精确时，用 web_scan 直接访问具体网页获取详细内容**
-4. **复杂多步骤任务先用 plan_create 制定计划，再逐步执行**
-5. **查询天气、电影排片、股票价格、新闻事件等实时信息必须上网搜索，不准凭记忆回答**
-6. **你有 shell_run 工具可以执行任何命令行操作，严禁要求用户打开终端或运行命令。所有交互必须在 GUI 内完成（通过聊天窗口与用户交流）。需要执行命令行时自行使用 shell_run。**
+{self._build_channel_status()}
 
 ## 可用工具
 
@@ -235,6 +310,12 @@ class OAAAgent:
         # Inject tiered memory (HOT + recent corrections)
         memory_prompt = self.memory.build_memory_prompt()
         result += "\n\n" + memory_prompt
+
+        # Inject recent conversation summaries for context warmth
+        if self.archiver:
+            recent = self.archiver.load_recent_summaries(limit=3)
+            if recent:
+                result += "\n\n## 近期对话摘要\n\n以下是你近期完成的工作和讨论的话题。当你觉得用户的问题可能是「继续之前的话题」时，在这里找找线索：\n\n" + recent
 
         return result
 
@@ -274,10 +355,14 @@ class OAAAgent:
         loop.set_skill_context(system_prompt)
 
         trajectory: list[dict] = []
+        skill_loaded: str | None = None
         final_result = ""
         async for chunk in loop.run(user_input, history=history):
             if chunk["type"] == "tool_call":
                 trajectory.append({"tool": chunk["name"], "args": chunk.get("args", {})})
+                # Track which skill the LLM loaded for this task
+                if chunk["name"] == "skill_load" and not skill_loaded:
+                    skill_loaded = chunk.get("args", {}).get("name", "") or None
             elif chunk["type"] == "done":
                 final_result = chunk.get("content", "")
                 # Idle inspection: check for due tasks or improvement areas
@@ -290,8 +375,25 @@ class OAAAgent:
                         logger.warning("Idle inspection failed: %s", exc)
             yield chunk
 
-        # Record evolution data
+        # Record evolution data + HOT memory
         if self.evolution:
+            skill_tag = skill_loaded or "default"
             self.evolution.record_trajectory(
-                "default", user_input, trajectory, final_result,
+                skill_tag, user_input, trajectory, final_result,
             )
+            if skill_loaded:
+                self.evolution.record_skill_usage(skill_loaded)
+
+        if self.memory and skill_loaded:
+            summary = (user_input[:80] + "...") if len(user_input) > 80 else user_input
+            self.memory.add_to_hot(
+                f"用技能「{skill_loaded}」完成了: {summary}"
+            )
+
+        # Archive conversation summary (every 10 messages, non-blocking)
+        if self.archiver and final_result and history is not None:
+            total_msgs = len(history) + 1  # +1 for this turn
+            if total_msgs > 0 and total_msgs % 10 == 0:
+                asyncio.create_task(
+                    self.archiver.summarize_and_archive(user_input, final_result)
+                )

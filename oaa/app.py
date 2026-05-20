@@ -4,6 +4,7 @@ import os
 import sys
 
 from .agent.oaa_agent import OAAAgent
+from .agent.worker import WorkerAgent
 from .auth.permissions import PermissionsManager
 from .config import AppConfig
 from .evolution.engine import EvolutionEngine
@@ -42,7 +43,12 @@ class OAAApp:
         self.permissions = PermissionsManager(self.config)
         self.session_mgr = SessionManager(os.path.join(self.config.data_dir, "db", "oaa.db"))
         self.evolution = EvolutionEngine(self.config.data_dir, llm=None)
-        self.agent = OAAAgent(self.config, permissions=self.permissions, evolution=self.evolution)
+        self.scheduler = TaskScheduler(os.path.join(self.config.data_dir, "tasks"))
+        self.agent = OAAAgent(self.config, permissions=self.permissions, evolution=self.evolution,
+                              scheduler=self.scheduler)
+        # Wire LLM to EvolutionEngine so skill crystallization can use the same model
+        self.evolution.set_llm(self.agent.llm)
+        self.worker = WorkerAgent(self.config)
         self.gateway = Gateway(self.agent, self.session_mgr)
 
         # Desktop adapter (always enabled)
@@ -53,7 +59,20 @@ class OAAApp:
         self.channel_adapters: dict[str, object] = {}
         self._register_channels()
 
-        self.scheduler = TaskScheduler(os.path.join(self.config.data_dir, "tasks"))
+        # Pass wechat adapter to agent for proactive messaging
+        self.agent.extended.set_wechat_adapter(self.channel_adapters.get("wechat"))
+
+        # Share DingTalk adapter's authenticated CLI (from device-auth QR flow)
+        self.agent.extended.set_dingtalk_adapter(self.channel_adapters.get("dingtalk"))
+
+        # Share Feishu adapter's configured CLI (same reason — avoid unconfigured clone)
+        self.agent.extended.set_feishu_adapter(self.channel_adapters.get("feishu"))
+
+        # Inject channel adapters so the agent can introspect runtime status
+        self.agent.set_channel_adapters(self.channel_adapters)
+
+        # Wire worker agent for background task execution
+        self.desktop._worker = self.worker
 
         # Wire management handler for non-chat WebSocket operations
         self.desktop.set_management_handler(
@@ -71,36 +90,37 @@ class OAAApp:
         self.permissions.set_confirm_callback(self.desktop.create_confirm_callback())
 
     def _register_channels(self):
-        """Register channel adapters based on configuration."""
+        """Register channel adapters. Channels are enabled whenever credentials are present."""
         # WeChat iLink
         wc = self.config.wechat
-        wechat = WeChatILinkAdapter(token=wc.iLink_token, bot_id=wc.iLink_bot_id)
+        wechat = WeChatILinkAdapter(token=wc.iLink_token, bot_id=wc.iLink_bot_id, base_url=wc.base_url,
+                                     ilink_user_id=wc.ilink_user_id)
         self.gateway.register_adapter("wechat", wechat)
         self.channel_adapters["wechat"] = wechat
-        if wc.enabled:
-            logger.info("Channel 'wechat' registered (enabled)")
+        if wc.iLink_token:
+            logger.info("Channel 'wechat' registered (authenticated)")
         else:
-            logger.info("Channel 'wechat' registered (disabled — enable via Settings)")
+            logger.info("Channel 'wechat' registered (not authenticated)")
 
         # DingTalk
         dt = self.config.dingtalk
         dingtalk = DingTalkAdapter(client_id=dt.client_id, client_secret=dt.client_secret)
         self.gateway.register_adapter("dingtalk", dingtalk)
         self.channel_adapters["dingtalk"] = dingtalk
-        if dt.enabled and dt.client_id:
-            logger.info("Channel 'dingtalk' registered (enabled)")
+        if dt.client_id and dt.client_secret:
+            logger.info("Channel 'dingtalk' registered (authenticated)")
         else:
-            logger.info("Channel 'dingtalk' registered (disabled — enable via Settings)")
+            logger.info("Channel 'dingtalk' registered (not authenticated)")
 
         # Feishu
         fs = self.config.feishu
         feishu = FeishuAdapter(app_id=fs.app_id, app_secret=fs.app_secret)
         self.gateway.register_adapter("feishu", feishu)
         self.channel_adapters["feishu"] = feishu
-        if fs.enabled and fs.app_id:
-            logger.info("Channel 'feishu' registered (enabled)")
+        if fs.app_id and fs.app_secret:
+            logger.info("Channel 'feishu' registered (authenticated)")
         else:
-            logger.info("Channel 'feishu' registered (disabled — enable via Settings)")
+            logger.info("Channel 'feishu' registered (not authenticated)")
 
     async def start(self):
         logger.info("Starting Desktop WebSocket on :9765")
@@ -118,14 +138,70 @@ class OAAApp:
                 except Exception as exc:
                     logger.warning("Failed to start channel '%s': %s", name, exc)
 
+        logger.info("Starting worker agent...")
+        await self.worker.start()
         logger.info("Starting task scheduler...")
         asyncio.create_task(self.scheduler.start_loop())
+
+        # Start IdleInspector background task
+        async def _inspector_notify(proposal: str):
+            await self.desktop.notify_all(proposal)
+            # Also push via WeChat if adapter is logged in
+            wechat = self.channel_adapters.get("wechat")
+            if wechat and wechat.is_authenticated and wechat._bot_user_id:
+                try:
+                    # Strip emoji and simplify for WeChat plain text
+                    import re as _re
+                    simple = _re.sub(r"[🔍🔬🔧💡📊📝⏳]", "", proposal)
+                    simple = simple.replace("**", "").replace("``", "")
+                    # Truncate long messages
+                    if len(simple) > 600:
+                        simple = simple[:600] + "\n\n（消息过长已截断，请在聊天页面查看完整内容）"
+                    await wechat.send_message(wechat._bot_user_id,
+                        f"💡 空闲巡检发现优化项：\n\n{simple}")
+                except Exception as exc:
+                    logger.debug("WeChat inspector notify failed: %s", exc)
+        self.agent._idle_inspector.set_notify_callback(_inspector_notify)
+        await self.agent._idle_inspector.start_background()
+
+        # Startup self-check: report channel status to user
+        await self._startup_check()
+
         logger.info("OAA ready. Waiting for messages...")
         while True:
             await asyncio.sleep(3600)
 
+    async def _startup_check(self):
+        """After startup, report channel status to the user via available channels."""
+        try:
+            status = self.agent._build_channel_status()
+            if not status:
+                return
+
+            # Simplify status for plain-text channels (WeChat doesn't support emoji well)
+            import re as _re
+            simple_status = _re.sub(r"[✅❌🔵]", "", status)
+            simple_status = simple_status.replace("**", "").replace("``", "")
+
+            desktop_msg = f"🟢 OAA 已启动\n\n{status}\n\n随时可以通过以下通道给我布置工作。"
+            wechat_msg = f"OAA 已启动\n\n{simple_status}\n\n随时可以通过以上通道给我布置工作。"
+
+            # 1. Push to Desktop GUI if any client is connected
+            if self.desktop._clients:
+                await self.desktop.notify_all(desktop_msg)
+
+            # 2. Push to WeChat if bot owner's wxid is known
+            wechat = self.channel_adapters.get("wechat")
+            if wechat and getattr(wechat, 'is_authenticated', False) and wechat._bot_user_id:
+                await wechat.send_message(wechat._bot_user_id, wechat_msg)
+
+        except Exception as exc:
+            logger.warning("Startup check notification failed: %s", exc)
+
     async def stop(self):
         logger.info("Shutting down...")
+        await self.agent._idle_inspector.stop_background()
+        await self.worker.stop()
         self.scheduler.stop_loop()
         # Stop all registered adapters
         for name, adapter in self.gateway._adapters.items():

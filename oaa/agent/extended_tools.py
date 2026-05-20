@@ -681,6 +681,24 @@ Delete this section if no resources are required.
         except Exception as e:
             return {"status": "error", "msg": str(e)}
 
+    async def do_wechat_send_file(self, args: dict) -> dict:
+        """Send a local file to a WeChat contact via CDN upload."""
+        to = args.get("to", "")
+        file_path = args.get("file_path", "")
+        if not to or not file_path:
+            return {"status": "error", "msg": "to and file_path are required"}
+        if not self._wechat_adapter:
+            return {"status": "error", "msg": "微信适配器未连接，请先扫码登录"}
+        if not await self._confirm("wechat_send_file", f"To: {to}, File: {file_path}"):
+            return {"status": "error", "msg": "WeChat send not permitted"}
+        try:
+            result = await self._wechat_adapter.send_file(to, file_path)
+            if result.get("status") == "success":
+                return {"status": "success", "data": result}
+            return {"status": "error", "msg": result.get("msg", "发送失败")}
+        except Exception as e:
+            return {"status": "error", "msg": str(e)}
+
     async def do_wechat_send_typing(self, args: dict) -> dict:
         """Send typing indicator ('对方正在输入...'). status=1 show, 0 hide."""
         to = args.get("to", "")

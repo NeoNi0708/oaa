@@ -4,9 +4,11 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import textwrap
+import time
 from typing import TYPE_CHECKING, Optional
 
 from ..auth.permissions import PermissionsManager
@@ -16,6 +18,7 @@ from .path_utils import resolve_workspace_path
 from .tool_decorator import agent_tool
 
 if TYPE_CHECKING:
+    from .conversation_archiver import ConversationArchiver
     from .memory_manager import MemoryManager
 
 logger = get_logger("agent.tools")
@@ -111,6 +114,7 @@ class AtomicTools(BaseHandler):
         self.permissions = permissions
         self.working_memory = {}
         self._memory_mgr: Optional["MemoryManager"] = None
+        self._archiver: Optional["ConversationArchiver"] = None
 
     def _resolve_path(self, path: str) -> str:
         """Resolve path relative to workspace, checking permissions if configured."""
@@ -119,6 +123,10 @@ class AtomicTools(BaseHandler):
     def set_memory_manager(self, mgr: "MemoryManager"):
         """Inject the tiered memory manager."""
         self._memory_mgr = mgr
+
+    def set_archiver(self, archiver: "ConversationArchiver"):
+        """Inject the conversation archiver for history search."""
+        self._archiver = archiver
 
     async def _confirm(self, operation: str, details: str = "") -> bool:
         """Check permission for an operation. Returns True if allowed."""
@@ -644,15 +652,26 @@ class AtomicTools(BaseHandler):
                 self._restore_backup(full_path, backup_path)
                 return {"status": "error", "msg": f"Verification error: {exc}"}
 
+        # Auto-verify Python files: syntax check if no explicit verify was given
+        if not verify_cmd and full_path.endswith(".py"):
+            try:
+                with open(full_path, "r", encoding="utf-8") as _f:
+                    ast.parse(_f.read())
+            except SyntaxError as _syn:
+                self._restore_backup(full_path, backup_path)
+                return {
+                    "status": "error",
+                    "msg": f"Python 语法错误 (line {_syn.lineno}): {_syn.msg} — 已回滚",
+                    "syntax_error": _syn.msg,
+                    "line": _syn.lineno,
+                }
+
         # Success: clear pycache, reload, record
         self._clear_pycache(full_path)
-
         rel_path = os.path.relpath(full_path, OAA_ROOT)
         reload_msg = self._do_reload(rel_path)
-
         desc = description or f"self_improve: replaced unique text in {path}"
         self._record_change(full_path, desc, backup_path)
-
         return {
             "status": "success",
             "msg": f"Applied to {path} and verified successfully. {reload_msg}",
@@ -732,6 +751,28 @@ class AtomicTools(BaseHandler):
         if self._memory_mgr:
             return self._memory_mgr.search(query)
         return {"status": "error", "msg": "Memory manager not available"}
+
+    @agent_tool(
+        name="chat_history_search",
+        description="Search past conversation summaries by keyword. Use when user asks about previous discussions ('我们之前聊过什么', '上次那个客户', '我记得说过...'). Returns structured summaries of past sessions sorted by relevance."
+    )
+    async def do_chat_history_search(self, query: str, limit: int = 10) -> dict:
+        """Search archived conversation summaries for a keyword.
+
+        Searches structured summaries (user goals, key info, completed items, open issues)
+        stored across past sessions. Results are ordered by relevance score.
+
+        Args:
+            query: Keyword or phrase to search for.
+            limit: Maximum number of results (default 10, max 30).
+        """
+        if not query:
+            return {"status": "error", "msg": "query is required"}
+        if not self._archiver:
+            return {"status": "error", "msg": "对话归档模块未就绪"}
+        limit = min(limit, 30)
+        matches = self._archiver.search(query, limit=limit)
+        return {"status": "success", "query": query, "matches": matches, "total": len(matches)}
 
     @agent_tool(
         name="self_reflect",
@@ -842,8 +883,36 @@ class AtomicTools(BaseHandler):
         full_path = os.path.normpath(os.path.join(OAA_ROOT, path))
         if not full_path.startswith(os.path.normpath(OAA_ROOT)):
             return {"status": "error", "msg": "Path outside OAA project root"}
-        if not os.path.isfile(full_path):
-            return {"status": "error", "msg": f"File not found: {path}"}
+        if not os.path.exists(full_path):
+            return {"status": "error", "msg": f"Path not found: {path}"}
+        if os.path.isdir(full_path):
+            import glob as _glob
+            rel_path = os.path.relpath(full_path, OAA_ROOT)
+            items = []
+            for entry in sorted(os.listdir(full_path)):
+                entry_path = os.path.join(full_path, entry)
+                if os.path.isdir(entry_path):
+                    items.append(f"[dir]  {entry}/")
+                else:
+                    size = os.path.getsize(entry_path)
+                    items.append(f"[file] {entry}  ({size} bytes)")
+            listing = "\n".join(items)
+            try:
+                from .memory_manager import MemoryManager
+                mm = MemoryManager(os.path.join(os.path.dirname(OAA_ROOT), "memory"))
+                mm.add_correction(
+                    context="read_own_source called with a directory path",
+                    lesson="read_own_source 只能读取文件。要浏览目录结构请使用 list_own_structure 工具。"
+                )
+            except Exception:
+                pass
+            return {
+                "status": "success",
+                "path": rel_path,
+                "is_directory": True,
+                "content": f"📁 {rel_path}/\n\n{listing}",
+                "hint": "这是目录，不是文件。浏览目录结构请用 list_own_structure，读取文件内容才用 read_own_source。",
+            }
 
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -1052,3 +1121,323 @@ class AtomicTools(BaseHandler):
         except Exception as exc:
             logger.error("Rollback failed: %s", exc)
             return {"status": "error", "msg": f"回滚失败: {exc}"}
+
+    # ------------------------------------------------------------------
+    # Code review & project navigation tools
+    # ------------------------------------------------------------------
+
+    @agent_tool(
+        name="code_search",
+        description="Search across all project files for a text pattern or regex. Results include file paths and matching lines with line numbers. Use for finding where functions are defined, tracing references, or auditing code patterns."
+    )
+    async def do_code_search(self, pattern: str, path: str = "", include: str = "", max_results: int = 50) -> dict:
+        """Search across OAA project files for a text pattern or regex."""
+        search_root = os.path.join(OAA_ROOT, path) if path else OAA_ROOT
+        if not search_root.startswith(os.path.normpath(OAA_ROOT)):
+            return {"status": "error", "msg": "Path outside OAA project root"}
+
+        import subprocess as _sp
+        cmd = ["grep", "-rn", "--color=never", "-I"]
+        if include:
+            for g in include.split(","):
+                cmd.extend(["--include", g.strip()])
+        cmd.extend([pattern, search_root])
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            out = stdout.decode("utf-8", errors="replace") if stdout else ""
+
+            lines = [l for l in out.split("\n") if l.strip()]
+            total = len(lines)
+
+            # Win32: use findstr if grep unavailable
+            if total == 0 and proc.returncode != 0:
+                cmd2 = ["findstr", "/S", "/N", "/I"]
+                if include:
+                    for g in include.split(","):
+                        cmd2.extend(["/D:" + g.strip().replace("*", "")])
+                cmd2.extend([pattern, search_root + "\\*" if path else OAA_ROOT + "\\*"])
+                proc2 = await asyncio.create_subprocess_exec(
+                    *cmd2,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout2, _ = await asyncio.wait_for(proc2.communicate(), timeout=30)
+                out2 = stdout2.decode("utf-8", errors="replace") if stdout2 else ""
+                lines = [l for l in out2.split("\n") if l.strip()][:max_results]
+                total = len(lines)
+                return {"status": "success" if total > 0 else "empty",
+                        "results": lines, "total": total, "pattern": pattern, "path": path or "."}
+
+            lines = lines[:max_results]
+            return {"status": "success" if total > 0 else "empty",
+                    "results": lines, "total": min(total, max_results),
+                    "truncated": total > max_results, "pattern": pattern, "path": path or "."}
+        except asyncio.TimeoutError:
+            return {"status": "error", "msg": "Search timed out after 30s"}
+        except Exception as exc:
+            logger.error("code_search failed: %s", exc)
+            return {"status": "error", "msg": str(exc)}
+
+    @agent_tool(
+        name="file_glob",
+        description="List files matching a glob pattern. Use for discovering project structure, finding files by extension or name pattern. Supports recursive patterns like '**/*.py'."
+    )
+    async def do_file_glob(self, pattern: str, path: str = "") -> dict:
+        """List files matching a glob pattern within the OAA project."""
+        import glob as _glob
+        search_root = os.path.join(OAA_ROOT, path) if path else OAA_ROOT
+        if not search_root.startswith(os.path.normpath(OAA_ROOT)):
+            return {"status": "error", "msg": "Path outside OAA project root"}
+
+        full_pattern = os.path.normpath(os.path.join(search_root, pattern))
+        matches = [m for m in _glob.glob(full_pattern, recursive=True) if os.path.isfile(m)]
+        matches = matches[:200]  # cap at 200 files
+
+        rel_matches = [os.path.relpath(m, OAA_ROOT) for m in matches]
+        return {
+            "status": "success" if rel_matches else "empty",
+            "files": rel_matches,
+            "total": len(rel_matches),
+            "truncated": len(matches) >= 200,
+        }
+
+    @agent_tool(
+        name="git_status",
+        description="Show git working tree status: modified, staged, untracked files. Use to understand what's changed before code review."
+    )
+    async def do_git_status(self) -> dict:
+        """Show git working tree status."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "status", "--short",
+                cwd=OAA_ROOT,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+            out = stdout.decode("utf-8", errors="replace") if stdout else ""
+            err = stderr.decode("utf-8", errors="replace") if stderr else ""
+            if proc.returncode != 0:
+                return {"status": "error", "msg": f"git status failed: {err[:1000]}"}
+            lines = [l for l in out.split("\n") if l.strip()]
+            return {"status": "success", "changes": lines, "total": len(lines)}
+        except asyncio.TimeoutError:
+            return {"status": "error", "msg": "git status timed out"}
+        except FileNotFoundError:
+            return {"status": "error", "msg": "git not found in PATH"}
+        except Exception as exc:
+            return {"status": "error", "msg": str(exc)}
+
+    @agent_tool(
+        name="git_diff",
+        description="Show git diff of unstaged changes. Use with staged=true to see staged diff, or provide two refs to compare branches/commits."
+    )
+    async def do_git_diff(self, staged: bool = False, ref1: str = "", ref2: str = "") -> dict:
+        """Show git diff — unstaged, staged, or between two refs."""
+        try:
+            args = ["git", "diff", "--no-color"]
+            if ref1 and ref2:
+                args.append(f"{ref1}...{ref2}")
+            elif ref1:
+                args.append(ref1)
+            elif staged:
+                args.append("--staged")
+
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=OAA_ROOT,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            out = stdout.decode("utf-8", errors="replace") if stdout else ""
+            err = stderr.decode("utf-8", errors="replace") if stderr else ""
+            if proc.returncode != 0:
+                return {"status": "error", "msg": f"git diff failed: {err[:1000]}"}
+
+            diff_sections = []
+            current = []
+            for line in out.split("\n"):
+                if line.startswith("diff --git"):
+                    if current:
+                        diff_sections.append("\n".join(current))
+                    current = [line]
+                else:
+                    current.append(line)
+            if current:
+                diff_sections.append("\n".join(current))
+
+            # Truncate to avoid blowing the context
+            max_sections = 15
+            total_files = len(diff_sections)
+            truncated = diff_sections[:max_sections]
+            total_chars = sum(len(s) for s in truncated)
+
+            return {
+                "status": "success",
+                "files_changed": total_files,
+                "diffs": truncated,
+                "total_chars": total_chars,
+                "truncated": total_files > max_sections,
+            }
+        except asyncio.TimeoutError:
+            return {"status": "error", "msg": "git diff timed out"}
+        except FileNotFoundError:
+            return {"status": "error", "msg": "git not found in PATH"}
+        except Exception as exc:
+            return {"status": "error", "msg": str(exc)}
+
+    @agent_tool(
+        name="git_log",
+        description="Show recent git commit history. Use to understand what changes have been made and by whom. Supports limiting count and showing a specific file's history."
+    )
+    async def do_git_log(self, count: int = 10, file_path: str = "", branch: str = "") -> dict:
+        """Show recent git commit history."""
+        try:
+            args = ["git", "log", f"--max-count={min(count, 50)}", "--format=format:%h %ai %an%n%s%n"]
+            if branch:
+                args.append(branch)
+            if file_path:
+                args.append("--", file_path)
+
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=OAA_ROOT,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+            out = stdout.decode("utf-8", errors="replace") if stdout else ""
+            err = stderr.decode("utf-8", errors="replace") if stderr else ""
+            if proc.returncode != 0:
+                return {"status": "error", "msg": f"git log failed: {err[:1000]}"}
+
+            entries = [e.strip() for e in out.split("\n\n") if e.strip()]
+            return {"status": "success", "entries": entries, "total": len(entries)}
+        except asyncio.TimeoutError:
+            return {"status": "error", "msg": "git log timed out"}
+        except FileNotFoundError:
+            return {"status": "error", "msg": "git not found in PATH"}
+        except Exception as exc:
+            return {"status": "error", "msg": str(exc)}
+
+    @agent_tool(
+        name="health_diagnose",
+        description="Comprehensive health diagnosis: checks WebSocket port 9765, process status, memory, CPU, recent tool failures, and data directory state. Run this when user reports app issues like '页面不见了', '技能加载不出来', or general instability."
+    )
+    async def do_health_diagnose(self) -> dict:
+        """Run comprehensive health checks — process, port, errors, disk."""
+        import datetime as _dt
+        pid = os.getpid()
+        checks = {}
+
+        # 1. Process health
+        checks["pid"] = pid
+        try:
+            import psutil
+            proc = psutil.Process(pid)
+            create_time = proc.create_time()
+            checks["uptime_sec"] = int(_dt.datetime.now().timestamp() - create_time)
+            checks["memory_mb"] = round(proc.memory_info().rss / 1024 / 1024, 1)
+            checks["cpu_percent"] = proc.cpu_percent(interval=0.1)
+            checks["num_threads"] = proc.num_threads()
+            checks["open_files"] = len(proc.open_files())
+            checks["connections"] = len(proc.connections())
+            checks["process_status"] = "running"
+        except ImportError:
+            checks["process_status"] = "running (psutil unavailable)"
+        except Exception as exc:
+            checks["process_status"] = f"error: {exc}"
+
+        # 2. WebSocket port 9765 check
+        try:
+            import subprocess as _sp
+            if os.name == "nt":
+                r = await asyncio.create_subprocess_exec(
+                    "netstat", "-ano",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                out, _ = await asyncio.wait_for(r.communicate(), timeout=10)
+                text = out.decode("utf-8", errors="replace") if out else ""
+                ws_listen = [l for l in text.split("\n") if "9765" in l and "LISTENING" in l]
+                ws_estab = [l for l in text.split("\n") if "9765" in l and "ESTABLISHED" in l]
+                checks["ws_port_9765"] = {
+                    "listening": len(ws_listen) > 0,
+                    "connections": len(ws_estab),
+                }
+            else:
+                r = await asyncio.create_subprocess_exec(
+                    "ss", "-tlnp", "sport", "=:9765",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                out, _ = await asyncio.wait_for(r.communicate(), timeout=10)
+                text = out.decode("utf-8", errors="replace") if out else ""
+                checks["ws_port_9765"] = {"listening": "LISTEN" in text}
+        except Exception as exc:
+            checks["ws_port_9765"] = {"error": str(exc)}
+
+        # 3. Tool failure count (recent)
+        try:
+            failures = self._memory_mgr.count_tool_failures() if self._memory_mgr else {"total": 0}
+            checks["recent_tool_failures"] = failures.get("total", 0)
+            checks["failures_by_tool"] = failures.get("by_tool", {})
+        except Exception:
+            checks["recent_tool_failures"] = -1
+
+        # 4. Data directory
+        try:
+            data_dir = self.data_dir
+            config_path = os.path.join(data_dir, "config.json")
+            skills_dir = os.path.join(data_dir, "skills")
+            checks["data_dir"] = {
+                "path": data_dir,
+                "exists": os.path.isdir(data_dir),
+                "config_exists": os.path.isfile(config_path),
+                "skills_count": len(os.listdir(skills_dir)) if os.path.isdir(skills_dir) else 0,
+                "disk_free_gb": round(shutil.disk_usage(data_dir).free / (1024**3), 1) if hasattr(shutil, 'disk_usage') else "unknown",
+            }
+        except Exception as exc:
+            checks["data_dir"] = {"error": str(exc)}
+
+        return {"status": "success", **checks}
+
+    @agent_tool(
+        name="check_self_process",
+        description="Check if the OAA application process is currently running. Returns PID, status, and uptime. Use this when user says the app is not running to verify before responding."
+    )
+    async def do_check_self_process(self) -> dict:
+        """Check if OAA process itself is alive and return runtime info."""
+        import datetime as _dt
+        pid = os.getpid()
+        try:
+            import psutil
+            proc = psutil.Process(pid)
+            create_time = proc.create_time()
+            uptime_sec = int(_dt.datetime.now().timestamp() - create_time)
+            mem_mb = proc.memory_info().rss / 1024 / 1024
+            cpu_pct = proc.cpu_percent(interval=0.1)
+            return {
+                "status": "success",
+                "alive": True,
+                "pid": pid,
+                "uptime_sec": uptime_sec,
+                "memory_mb": round(mem_mb, 1),
+                "cpu_percent": cpu_pct,
+                "cmdline": " ".join(proc.cmdline())[:200],
+            }
+        except ImportError:
+            # fallback without psutil
+            return {
+                "status": "success",
+                "alive": True,
+                "pid": pid,
+                "note": "psutil not available, limited info",
+            }
+        except Exception as exc:
+            return {"status": "error", "msg": str(exc), "pid": pid, "alive": True}

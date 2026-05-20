@@ -4,6 +4,7 @@ Level 1: Execution optimization (automatic)
 Level 2: Active refinement (suggestions for user)
 Level 3: Skill crystallization (from trajectories → LLM-driven pattern extraction)
 """
+import asyncio
 import json
 import os
 from datetime import datetime
@@ -33,6 +34,8 @@ class EvolutionEngine:
         if os.path.exists(self._stats_path):
             with open(self._stats_path, encoding="utf-8") as f:
                 self.stats = json.load(f)
+            logger.info("EvolutionEngine loaded stats from %s (skill_usage=%s)",
+                        self._stats_path, list(self.stats.get("skill_usage", {}).keys()))
         else:
             self.stats = {
                 "skill_usage": {},
@@ -48,10 +51,30 @@ class EvolutionEngine:
         with open(self._stats_path, "w", encoding="utf-8") as f:
             json.dump(self.stats, f, indent=2, ensure_ascii=False)
 
+    def set_llm(self, llm: "LLMClient"):
+        """Inject or replace the LLM client (e.g. wired after agent init)."""
+        self._llm = llm
+
     def record_skill_usage(self, skill_name: str):
-        """Level 1: Track how often each skill is used."""
+        """Level 1: Track how often each skill is used.
+
+        Auto-triggers Level 3 crystallization when the skill hits 3+ uses
+        and no crystallized version exists yet.
+        """
         self.stats["skill_usage"][skill_name] = self.stats["skill_usage"].get(skill_name, 0) + 1
         self._save_stats()
+
+        # Auto-crystallization: ≥3 uses, has LLM, no existing crystal → fire and forget
+        count = self.stats["skill_usage"][skill_name]
+        crystallized_names = {c["name"] for c in self.stats.get("crystallized", [])}
+        if count >= 3 and self._llm and skill_name not in crystallized_names:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self.extract_and_crystallize(skill_name))
+                    logger.info("Auto-crystallization triggered for '%s' (%d uses)", skill_name, count)
+            except RuntimeError:
+                logger.debug("No event loop for auto-crystallization of '%s'", skill_name)
 
     def record_sop_execution(self, skill_name: str, completed_steps: list[str],
                              skipped_steps: list[str]):
@@ -82,7 +105,7 @@ class EvolutionEngine:
         """Level 2: Detect patterns and generate improvement suggestions."""
         suggestions = []
         for skill, count in self.stats["skill_usage"].items():
-            if count >= 5 and count % 5 == 0:
+            if count >= 3:
                 suggestions.append({
                     "type": "optimize",
                     "skill": skill,
@@ -90,6 +113,8 @@ class EvolutionEngine:
                     "usage_count": count,
                 })
         for skill, skips in self.stats["sop_skips"].items():
+            if not isinstance(skips, dict):
+                continue
             for step, skip_count in skips.items():
                 if skip_count >= 3:
                     suggestions.append({
@@ -131,6 +156,8 @@ class EvolutionEngine:
 
         # SOP skips → suggest removing the skipped step from SOP.md
         for skill_name, skips in self.stats.get("sop_skips", {}).items():
+            if not isinstance(skips, dict):
+                continue
             for step_name, skip_count in skips.items():
                 if skip_count >= 3:
                     sop_path = data_dir / "skills" / skill_name / "SOP.md"
@@ -154,7 +181,7 @@ class EvolutionEngine:
 
         # Skill usage milestones → suggest optimization review
         for skill_name, count in self.stats.get("skill_usage", {}).items():
-            if count >= 5 and count % 5 == 0 and count <= 20:
+            if count >= 3:
                 refinements.append({
                     "type": "skill_optimize",
                     "skill_name": skill_name,

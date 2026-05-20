@@ -49,7 +49,10 @@ class PermissionsManager:
 
     @property
     def _level(self) -> str:
-        return self.config.permissions.get("permission_level", "auto")
+        p = self.config.permissions
+        if isinstance(p, dict):
+            return p.get("permission_level", "auto")
+        return str(p) if p else "auto"
 
     def _is_dangerous(self, operation: str) -> bool:
         return operation in self.DANGEROUS_OPS
@@ -61,14 +64,18 @@ class PermissionsManager:
     def check_path(self, path: str) -> bool:
         """Check if path is allowed (not in blacklist)."""
         abs_path = os.path.abspath(path)
-        for blacklisted in self.config.permissions.get("blacklist_paths", []):
+        blacklist = self.config.permissions.get("blacklist_paths", []) if isinstance(self.config.permissions, dict) else []
+        for blacklisted in blacklist:
             if abs_path.startswith(os.path.abspath(blacklisted)):
                 raise PermissionDenied(f"Access denied to: {path}")
         return True
 
     def require_confirm(self, operation: str) -> bool:
         """Check if operation needs user confirmation."""
-        return operation in self.config.permissions.get("require_confirm", [])
+        p = self.config.permissions
+        if isinstance(p, dict):
+            return operation in p.get("require_confirm", [])
+        return False
 
     async def confirm_operation(self, operation: str, details: str) -> bool:
         """Check and enforce permission level for *operation*.

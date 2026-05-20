@@ -27,30 +27,60 @@
             </optgroup>
           </select>
         </div>
-        <div class="form-group">
-          <label class="oaa-label">计费模式</label>
-          <select v-model="form.planType" class="oaa-select" @change="onPlanChange">
-            <option v-for="p in availablePlans" :key="p.value" :value="p.value">{{ p.label }}</option>
-          </select>
+
+        <!-- Saved models for this provider -->
+        <div v-if="currentProviderModels.length > 0" class="model-list">
+          <div
+            v-for="(entry, idx) in currentProviderModels"
+            :key="idx"
+            :class="['model-entry-card', { active: idx === form.editingModelIdx }]"
+            @click="selectModelEntry(idx)"
+          >
+            <div class="model-entry-summary">
+              <span class="model-entry-name">{{ entry.name || entry.model_id || '未命名' }}</span>
+              <span class="model-entry-id">{{ entry.model_id }}</span>
+              <span class="model-entry-key">{{ maskKey(entry.api_key) }}</span>
+            </div>
+            <button class="model-entry-del" @click.stop="deleteModelEntry(idx)" title="删除">&times;</button>
+          </div>
         </div>
-        <div class="form-group">
-          <label class="oaa-label">API 格式</label>
-          <select v-model="form.apiFormat" class="oaa-select">
-            <option value="openai">OpenAI 兼容</option>
-            <option value="anthropic">Anthropic</option>
-          </select>
+
+        <!-- Editing a single model entry -->
+        <div class="model-entry-editor">
+          <div class="form-group">
+            <label class="oaa-label">名称（方便识别）</label>
+            <input v-model="form.modelName" type="text" class="oaa-input" placeholder="例: 主力模型 / 备用模型" />
+          </div>
+          <div class="form-group">
+            <label class="oaa-label">计费模式</label>
+            <select v-model="form.planType" class="oaa-select" @change="onPlanChange">
+              <option v-for="p in availablePlans" :key="p.value" :value="p.value">{{ p.label }}</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="oaa-label">API 格式</label>
+            <select v-model="form.apiFormat" class="oaa-select">
+              <option value="openai">OpenAI 兼容</option>
+              <option value="anthropic">Anthropic</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="oaa-label">Base URL</label>
+            <input v-model="form.baseUrl" type="text" class="oaa-input" placeholder="https://api.example.com/v1" />
+          </div>
+          <div class="form-group">
+            <label class="oaa-label">API Key</label>
+            <input v-model="form.apiKey" type="password" class="oaa-input" placeholder="sk-..." />
+          </div>
+          <div class="form-group">
+            <label class="oaa-label">模型 ID</label>
+            <input v-model="form.modelId" type="text" class="oaa-input" placeholder="例: deepseek-chat" />
+          </div>
         </div>
-        <div class="form-group">
-          <label class="oaa-label">Base URL</label>
-          <input v-model="form.baseUrl" type="text" class="oaa-input" placeholder="https://api.example.com/v1" />
-        </div>
-        <div class="form-group">
-          <label class="oaa-label">API Key</label>
-          <input v-model="form.apiKey" type="password" class="oaa-input" placeholder="sk-..." />
-        </div>
-        <div class="form-group">
-          <label class="oaa-label">模型 ID</label>
-          <input v-model="form.modelId" type="text" class="oaa-input" placeholder="例: deepseek-chat" />
+
+        <div class="model-entry-actions">
+          <button class="oaa-btn oaa-btn--secondary" @click="addModelEntry">+ 添加模型</button>
+          <span v-if="currentProviderModels.length > 0" class="model-count">{{ currentProviderModels.length }} 个配置</span>
         </div>
       </section>
 
@@ -67,81 +97,6 @@
           <div class="input-row">
             <input v-model="form.dataDir" type="text" class="oaa-input" placeholder="~/OAA" />
             <button class="oaa-btn oaa-btn--secondary" @click="browseDirectory">浏览</button>
-          </div>
-        </div>
-      </section>
-
-      <!-- 通道配置 -->
-      <section class="settings-section">
-        <div class="section-header">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-          </svg>
-          <h3>通道配置</h3>
-        </div>
-
-        <!-- WeChat iLink -->
-        <div class="channel-config">
-          <div class="channel-toggle">
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="form.wechatEnabled" class="checkbox-input" />
-              <span class="checkbox-custom"></span>
-              <span class="checkbox-text"><strong>微信 (iLink)</strong></span>
-            </label>
-            <span v-if="form.wechatToken" class="channel-auth-badge">已认证</span>
-          </div>
-          <div v-if="form.wechatEnabled" class="channel-fields">
-            <div class="form-group">
-              <label class="oaa-label">iLink Token</label>
-              <input v-model="form.wechatToken" type="password" class="oaa-input" placeholder="扫码登录后自动填入" />
-            </div>
-            <div class="form-group">
-              <label class="oaa-label">Bot ID</label>
-              <input v-model="form.wechatBotId" type="text" class="oaa-input" placeholder="扫码登录后自动填入" readonly />
-            </div>
-            <p class="form-hint">前往「连接」页扫码登录微信后，Token 和 Bot ID 将自动填入此处。</p>
-          </div>
-        </div>
-
-        <!-- DingTalk -->
-        <div class="channel-config">
-          <div class="channel-toggle">
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="form.dingtalkEnabled" class="checkbox-input" />
-              <span class="checkbox-custom"></span>
-              <span class="checkbox-text"><strong>钉钉</strong></span>
-            </label>
-          </div>
-          <div v-if="form.dingtalkEnabled" class="channel-fields">
-            <div class="form-group">
-              <label class="oaa-label">Client ID</label>
-              <input v-model="form.dingtalkClientId" type="text" class="oaa-input" placeholder="钉钉应用 Client ID" />
-            </div>
-            <div class="form-group">
-              <label class="oaa-label">Client Secret</label>
-              <input v-model="form.dingtalkClientSecret" type="password" class="oaa-input" placeholder="钉钉应用 Client Secret" />
-            </div>
-          </div>
-        </div>
-
-        <!-- Feishu -->
-        <div class="channel-config">
-          <div class="channel-toggle">
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="form.feishuEnabled" class="checkbox-input" />
-              <span class="checkbox-custom"></span>
-              <span class="checkbox-text"><strong>飞书</strong></span>
-            </label>
-          </div>
-          <div v-if="form.feishuEnabled" class="channel-fields">
-            <div class="form-group">
-              <label class="oaa-label">App ID</label>
-              <input v-model="form.feishuAppId" type="text" class="oaa-input" placeholder="飞书应用 App ID" />
-            </div>
-            <div class="form-group">
-              <label class="oaa-label">App Secret</label>
-              <input v-model="form.feishuAppSecret" type="password" class="oaa-input" placeholder="飞书应用 App Secret" />
-            </div>
           </div>
         </div>
       </section>
@@ -290,7 +245,7 @@ const availablePlans = computed(() => planOptions[form.provider] || [{ value: 'a
 const planUrls: Record<string, Record<string, string>> = {
   deepseek: { api: 'https://api.deepseek.com' },
   volcengine: {
-    api: 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+    api: 'https://ark.cn-beijing.volces.com/api/v3',
     token: 'https://ark.cn-beijing.volces.com/api/plan/v3',
     coding: 'https://ark.cn-beijing.volces.com/api/coding/v3',
   },
@@ -298,18 +253,18 @@ const planUrls: Record<string, Record<string, string>> = {
     api: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     token: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
   },
-  siliconflow: { api: 'https://api.siliconflow.cn/v1/chat/completions' },
+  siliconflow: { api: 'https://api.siliconflow.cn/v1' },
   zhipu: {
     api: 'https://open.bigmodel.cn/api/paas/v4',
     coding: 'https://open.bigmodel.cn/api/coding/paas/v4',
   },
   moonshot: {
-    api: 'https://api.moonshot.cn/v1/chat/completions',
+    api: 'https://api.moonshot.cn/v1',
     coding: 'https://api.kimi.com/coding/v1',
   },
   stepfun: {
-    api: 'https://api.stepfun.com/v1/chat/completions',
-    step: 'https://api.stepfun.com/step_plan/v1/chat/completions',
+    api: 'https://api.stepfun.com/v1',
+    step: 'https://api.stepfun.com/step_plan/v1',
   },
   minimax: {
     api: 'https://api.minimaxi.com/v1',
@@ -317,7 +272,7 @@ const planUrls: Record<string, Record<string, string>> = {
   },
   xunfei: { coding: 'https://maas-coding-api.cn-huabei-1.xf-yun.com/v2' },
   xiaomi: {
-    api: 'https://api.xiaomimimo.com/v1/chat/completions',
+    api: 'https://api.xiaomimimo.com/v1',
     token: 'https://token-plan-cn.xiaomimimo.com/v1',
   },
   baichuan: { api: 'https://api.baichuan-ai.com/v1' },
@@ -332,6 +287,13 @@ const planUrls: Record<string, Record<string, string>> = {
 // Form — flat layout, mapped to/from backend config structure
 // ------------------------------------------------------------------
 
+interface ModelStoreEntry {
+  name: string
+  api_key: string
+  model_id: string
+  base_url: string
+}
+
 const defaultForm = {
   // model
   provider: 'deepseek',
@@ -340,31 +302,81 @@ const defaultForm = {
   baseUrl: 'https://api.deepseek.com',
   apiKey: '',
   modelId: 'deepseek-chat',
+  modelName: '',
+  editingModelIdx: -1 as number,
   // data_dir
   dataDir: '',
-  // wechat
-  wechatEnabled: false,
-  wechatToken: '',
-  wechatBotId: '',
-  // dingtalk
-  dingtalkEnabled: false,
-  dingtalkClientId: '',
-  dingtalkClientSecret: '',
-  // feishu
-  feishuEnabled: false,
-  feishuAppId: '',
-  feishuAppSecret: '',
   // permissions
   requireConfirm: [] as string[],
   blacklistPathsText: '',
-  // per-provider credentials — loaded from backend
-  models: {} as Record<string, { api_key: string; model_id: string; base_url: string }>,
+  // per-provider credentials — list per provider (new format)
+  models: {} as Record<string, ModelStoreEntry[]>,
 }
 
 const form = reactive({ ...defaultForm })
 const saveStatus = ref('')
 const saving = ref(false)
 const configLoading = ref(true)
+
+// Multi-model helpers
+const currentProviderModels = computed(() => form.models[form.provider] || [])
+
+function maskKey(key: string): string {
+  if (!key || key.length < 8) return key
+  return key.slice(0, 4) + '…' + key.slice(-4)
+}
+
+function selectModelEntry(idx: number) {
+  form.editingModelIdx = idx
+  const entry = currentProviderModels.value[idx]
+  if (entry) {
+    form.modelName = entry.name || ''
+    form.apiKey = entry.api_key || ''
+    form.modelId = entry.model_id || ''
+    form.baseUrl = entry.base_url || ''
+  }
+}
+
+function addModelEntry() {
+  const entries = form.models[form.provider] || []
+  const blank = { name: '', api_key: '', model_id: '', base_url: '' }
+  entries.push(blank)
+  form.models[form.provider] = entries
+  form.editingModelIdx = entries.length - 1
+  form.modelName = ''
+  form.apiKey = ''
+  form.modelId = ''
+  form.baseUrl = ''
+}
+
+function deleteModelEntry(idx: number) {
+  const entries = form.models[form.provider] || []
+  entries.splice(idx, 1)
+  if (entries.length === 0) {
+    delete form.models[form.provider]
+  }
+  form.editingModelIdx = -1
+  // If another entry exists, select it
+  if (entries.length > 0) {
+    selectModelEntry(0)
+  } else {
+    form.modelName = ''
+    form.apiKey = ''
+    form.modelId = ''
+    form.baseUrl = ''
+  }
+}
+
+function syncEditingEntry() {
+  const entries = currentProviderModels.value
+  if (form.editingModelIdx >= 0 && form.editingModelIdx < entries.length) {
+    const entry = entries[form.editingModelIdx]
+    entry.name = form.modelName
+    entry.api_key = form.apiKey
+    entry.model_id = form.modelId
+    entry.base_url = form.baseUrl
+  }
+}
 
 // ------------------------------------------------------------------
 // Backend ↔ Form mapping
@@ -379,25 +391,20 @@ function applyConfig(backendConfig: Record<string, unknown>) {
   form.apiKey = m.api_key || ''
   form.modelId = m.model_id || ''
 
-  // Load per-provider credentials
-  form.models = (backendConfig.models as Record<string, { api_key: string; model_id: string; base_url: string }>) || {}
+  // Load per-provider credentials (new list format)
+  const rawModels = backendConfig.models as Record<string, ModelStoreEntry[]> | undefined
+  form.models = rawModels || {}
+
+  // Auto-select editing index for current provider
+  const currentEntries = form.models[form.provider]
+  if (currentEntries && currentEntries.length > 0) {
+    const activeIdx = currentEntries.findIndex(e => e.model_id === form.modelId)
+    selectModelEntry(activeIdx >= 0 ? activeIdx : 0)
+  } else {
+    form.editingModelIdx = -1
+  }
 
   form.dataDir = (backendConfig.data_dir as string) || ''
-
-  const wc = (backendConfig.wechat as Record<string, unknown>) || {}
-  form.wechatEnabled = !!wc.enabled
-  form.wechatToken = (wc.iLink_token as string) || ''
-  form.wechatBotId = (wc.iLink_bot_id as string) || ''
-
-  const dt = (backendConfig.dingtalk as Record<string, unknown>) || {}
-  form.dingtalkEnabled = !!dt.enabled
-  form.dingtalkClientId = (dt.client_id as string) || ''
-  form.dingtalkClientSecret = (dt.client_secret as string) || ''
-
-  const fs = (backendConfig.feishu as Record<string, unknown>) || {}
-  form.feishuEnabled = !!fs.enabled
-  form.feishuAppId = (fs.app_id as string) || ''
-  form.feishuAppSecret = (fs.app_secret as string) || ''
 
   const perms = (backendConfig.permissions as Record<string, unknown>) || {}
   form.requireConfirm = (perms.require_confirm as string[]) || []
@@ -405,13 +412,20 @@ function applyConfig(backendConfig: Record<string, unknown>) {
 }
 
 function buildConfigPayload() {
-  // Save current provider's credentials into models dict
-  const updatedModels = { ...form.models }
-  updatedModels[form.provider] = {
-    api_key: form.apiKey,
-    model_id: form.modelId,
-    base_url: form.baseUrl,
+  // Sync the currently-edited entry into the models store
+  syncEditingEntry()
+
+  // Ensure current provider exists in models
+  const updatedModels: Record<string, ModelStoreEntry[]> = { ...form.models }
+  if (!updatedModels[form.provider] || updatedModels[form.provider].length === 0) {
+    updatedModels[form.provider] = [{
+      name: form.modelName || form.modelId || form.provider,
+      api_key: form.apiKey,
+      model_id: form.modelId,
+      base_url: form.baseUrl,
+    }]
   }
+
   return {
     model: {
       provider: form.provider,
@@ -425,22 +439,6 @@ function buildConfigPayload() {
     },
     models: updatedModels,
     data_dir: form.dataDir,
-    wechat: {
-      enabled: form.wechatEnabled,
-      iLink_token: form.wechatToken,
-      iLink_bot_id: form.wechatBotId,
-      wechat_cli_path: '',
-    },
-    dingtalk: {
-      enabled: form.dingtalkEnabled,
-      client_id: form.dingtalkClientId,
-      client_secret: form.dingtalkClientSecret,
-    },
-    feishu: {
-      enabled: form.feishuEnabled,
-      app_id: form.feishuAppId,
-      app_secret: form.feishuAppSecret,
-    },
     permissions: {
       blacklist_paths: form.blacklistPathsText
         .split('\n')
@@ -510,17 +508,15 @@ function onProviderChange() {
   form.planType = defaultPlan[form.provider] || availablePlans.value[0]?.value || 'api'
   form.apiFormat = (formatMap[form.provider] || 'openai') as 'openai' | 'anthropic'
 
-  // Load stored credentials for the selected provider
-  const saved = form.models[form.provider]
-  if (saved) {
-    form.apiKey = saved.api_key || ''
-    form.modelId = saved.model_id || ''
-    if (saved.base_url) {
-      form.baseUrl = saved.base_url
-    }
+  // Load entries for the selected provider; auto-select first entry
+  const entries = form.models[form.provider]
+  if (entries && entries.length > 0) {
+    selectModelEntry(0)
   } else {
+    form.modelName = ''
     form.apiKey = ''
     form.modelId = ''
+    form.editingModelIdx = -1
     updateBaseUrl()
   }
 }
@@ -713,4 +709,50 @@ async function saveSettings() {
 @keyframes settingsSpin {
   to { transform: rotate(360deg); }
 }
+
+/* --- Multi-model entry cards --- */
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oaa-space-2);
+  margin-bottom: var(--oaa-space-4);
+}
+.model-entry-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--oaa-space-2) var(--oaa-space-3);
+  border: 1px solid var(--oaa-border-subtle);
+  border-radius: var(--oaa-radius-md);
+  cursor: pointer;
+  transition: border-color var(--oaa-transition-fast);
+}
+.model-entry-card:hover { border-color: var(--oaa-primary); }
+.model-entry-card.active { border-color: var(--oaa-primary); background: rgba(99,102,241,0.06); }
+.model-entry-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--oaa-space-3);
+  min-width: 0;
+}
+.model-entry-name { font-weight: 600; font-size: var(--oaa-text-sm); color: var(--oaa-color-primary); }
+.model-entry-id { font-size: var(--oaa-text-xs); color: var(--oaa-color-muted); }
+.model-entry-key { font-size: var(--oaa-text-xs); color: var(--oaa-color-disabled); font-family: monospace; }
+.model-entry-del {
+  background: none; border: none; color: var(--oaa-color-muted);
+  cursor: pointer; font-size: 18px; line-height: 1; padding: 0 2px;
+}
+.model-entry-del:hover { color: var(--oaa-danger, #ef4444); }
+.model-entry-editor {
+  border: 1px solid var(--oaa-border-subtle);
+  border-radius: var(--oaa-radius-md);
+  padding: var(--oaa-space-4);
+  margin-bottom: var(--oaa-space-3);
+}
+.model-entry-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--oaa-space-3);
+}
+.model-count { font-size: var(--oaa-text-xs); color: var(--oaa-color-muted); }
 </style>

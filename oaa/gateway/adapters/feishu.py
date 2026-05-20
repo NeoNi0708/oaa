@@ -3,6 +3,10 @@
 Uses ``lark.ws.Client`` for receiving messages via WebSocket event subscription,
 and ``lark.Client`` (REST) for sending messages.
 
+QR login uses the `lark-cli` device auth flow (auto-installed via npm) for a
+seamless scan-and-authorize experience.  Falls back to OAuth redirect QR when
+the CLI is unavailable.
+
 All HTTP calls are offloaded to a thread pool via ``asyncio.to_thread`` so the
 event loop remains responsive.  The synchronous lark-oapi WebSocket callback
 bridges to the async gateway pipeline via ``asyncio.run_coroutine_threadsafe``.
@@ -16,10 +20,14 @@ import threading
 import time
 from typing import Any
 
+import lark_oapi as lark
 import requests
+from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
+from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
 
 from ...logging_config import get_logger
 from ..gateway import Message
+from .feishu_cli import FeishuCLI
 
 logger = get_logger("gateway.feishu")
 
@@ -52,6 +60,10 @@ class FeishuAdapter:
         self._tenant_token = ""
         self._token_expires_at = 0.0
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        self._lark_cli = FeishuCLI()
+        self._using_lark_cli = False
+        self._device_code = ""
+        self._poll_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Status
@@ -65,32 +77,102 @@ class FeishuAdapter:
     # QR-code OAuth login
     # ------------------------------------------------------------------
 
-    def get_qrcode(self) -> dict:
-        """Step 1: Generate a Feishu OAuth QR code for scan login (synchronous).
+    async def get_qrcode(self) -> dict:
+        """Generate a Feishu login QR code via lark-cli device auth.
+
+        Uses lark-cli ``auth login --recommend --no-wait --json``.
+        Auto-installs lark-cli via npm if needed, and configures App ID/Secret.
 
         Returns:
             dict with ``qrcode_url`` (base64 PNG data URI) and
-            ``state`` (anti-forgery token).
+            ``qrcode_id`` (device_code for polling), or ``error`` on failure.
         """
-        redirect_uri = "oaa://feishu/callback"
-        state = str(int(time.time()))
-        auth_url = (
-            f"{self.OAUTH_AUTHORIZE_URL}"
-            f"?app_id={self.app_id}"
-            f"&redirect_uri={redirect_uri}"
-            f"&state={state}"
+        # Cancel any previous poll task
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            self._poll_task = None
+        self._using_lark_cli = False
+        self._device_code = ""
+
+        installed = await self._lark_cli.ensure_installed()
+        if not installed:
+            return {"error": "lark-cli 未安装且自动安装失败。请手动执行: npm install -g @larksuite/cli"}
+
+        configured = await self._lark_cli.ensure_configured(
+            self.app_id, self.app_secret
         )
+        if not configured:
+            detail = self._lark_cli.last_error
+            msg = f"lark-cli 配置失败: {detail}" if detail else "lark-cli 配置失败"
+            msg += "。请检查 App ID 和 App Secret 是否正确，并确保飞书应用已启用机器人和设备授权能力。"
+            return {"error": msg}
+
+        result = await self._lark_cli.get_qrcode()
+        if "error" in result:
+            detail = result["error"]
+            if isinstance(detail, dict):
+                detail = detail.get("message", str(detail))
+            return {"error": f"lark-cli 设备授权失败: {detail}。请确认飞书应用已开启 '设备授权' 能力。"}
+
+        self._using_lark_cli = True
+        self._device_code = result.get("qrcode_id", "")
+
+        # Start background task to wait for device auth completion.
+        # lark-cli auth login --device-code blocks until user scans or code expires,
+        # so it must run in a background task, not in the poll handler.
+        self._poll_task = asyncio.create_task(
+            self._lark_cli._run(
+                ["auth", "login", "--device-code", self._device_code, "--json"]
+            )
+        )
+
+        return {
+            "qrcode_url": result["qrcode_url"],
+            "qrcode_id": result["qrcode_id"],
+        }
+
+    async def poll_qrcode_status(self, qrcode_id: str) -> dict:
+        """Poll QR code scan status.
+
+        Checks the background device-auth task started by :meth:`get_qrcode`.
+        The lark-cli ``--device-code`` command blocks until the user scans or
+        the device code expires, so it runs in a background ``asyncio.Task``.
+
+        Args:
+            qrcode_id: The ``device_code`` from :meth:`get_qrcode`.
+
+        Returns:
+            dict with ``status`` ``"waiting"``, ``"confirmed"``, ``"expired"``,
+            or ``"error"``.
+        """
+        if not self._poll_task:
+            return {"status": "waiting"}
+        if not self._poll_task.done():
+            return {"status": "waiting"}
+
+        # Background task finished — check result
         try:
-            import qrcode
-            import io
-            import base64
-            img = qrcode.make(auth_url)
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
-            return {"qrcode_url": data_uri, "qrcode_id": state, "state": state}
-        except ImportError:
-            return {"qrcode_url": auth_url, "state": state}
+            result = self._poll_task.result()
+        except asyncio.CancelledError:
+            return {"status": "waiting"}
+        except Exception as e:
+            logger.error("[Feishu] Auth poll task error: %s", e)
+            return {"status": "error", "msg": str(e)}
+
+        if result.get("ok", False):
+            return {"status": "confirmed", **result}
+
+        error = result.get("error", {})
+        if isinstance(error, dict):
+            err_msg = (error.get("message", "") or str(error)).lower()
+            if "expired" in err_msg:
+                return {"status": "expired"}
+            return {"status": "error", "msg": error.get("message", "")}
+
+        err_str = str(error).lower()
+        if "expired" in err_str:
+            return {"status": "expired"}
+        return {"status": "error", "msg": str(error)}
 
     async def handle_oauth_callback(self, code: str) -> dict:
         """Step 2: Exchange an OAuth authorization code for the user's identity.
@@ -216,11 +298,11 @@ class FeishuAdapter:
             logger.warning("[Feishu] Not configured — skipping start")
             return
 
-        self._main_loop = asyncio.get_running_loop()
+        # Stop existing client before re-starting
+        if self._ws_client is not None:
+            self.stop()
 
-        import lark_oapi as lark
-        from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
-        from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
+        self._main_loop = asyncio.get_running_loop()
 
         def _on_message(data: P2ImMessageReceiveV1):
             """Handle an incoming ``im.message.receive_v1`` event."""
@@ -315,6 +397,10 @@ class FeishuAdapter:
     def stop(self):
         """Stop the Feishu WebSocket event client."""
         self._running = False
+        # Cancel background QR poll task
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            self._poll_task = None
         if self._ws_client is not None:
             stop = getattr(self._ws_client, "stop", None)
             if stop is not None:

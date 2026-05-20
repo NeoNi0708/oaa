@@ -21,6 +21,7 @@ import requests
 
 from ...logging_config import get_logger
 from ..gateway import Message
+from .dingtalk_cli import DingTalkCLI
 
 logger = get_logger("gateway.dingtalk")
 
@@ -32,8 +33,8 @@ class DingTalkAdapter:
         1. Create an enterprise internal app on open.dingtalk.com
         2. Enable Robot capability & register Stream URL
         3. Pass AppKey / AppSecret to this adapter
-        4. Call :meth:`get_qrcode` for OAuth login QR, then
-           :meth:`handle_oauth_callback` to exchange the code for user info
+        4. Call :meth:`get_qrcode` for QR login, then
+           :meth:`poll_qrcode_status` to wait for user authorisation
         5. Call :meth:`start` to begin receiving messages via Stream
     """
 
@@ -50,6 +51,8 @@ class DingTalkAdapter:
         self._access_token = ""
         self._token_expires_at = 0.0
         self._webhooks: dict[str, str] = {}
+        self._dws_cli = DingTalkCLI(client_id=client_id, client_secret=client_secret)
+        self._using_dws = False
 
     # ------------------------------------------------------------------
     # Status
@@ -60,16 +63,42 @@ class DingTalkAdapter:
         return bool(self.client_id and self.client_secret)
 
     # ------------------------------------------------------------------
-    # QR-code OAuth login
+    # QR-code login
     # ------------------------------------------------------------------
 
-    def get_qrcode(self) -> dict:
-        """Step 1: Generate a DingTalk OAuth QR code for scan login (synchronous).
+    async def get_qrcode(self) -> dict:
+        """Generate a DingTalk login QR code.
+
+        Primary path: use dws (dingtalk-workspace-cli) device auth
+        (auto-installs CLI via npm if needed).  Falls back to OAuth
+        redirect QR when dws cannot be installed.
 
         Returns:
             dict with ``qrcode_url`` (base64 PNG data URI) and
-            ``state`` (anti-forgery token).
+            ``qrcode_id`` (device code for polling).
         """
+        self._using_dws = False
+
+        # --- Try dws device auth path ---
+        try:
+            installed = await self._dws_cli.ensure_installed()
+            if installed:
+                result = await self._dws_cli.get_qrcode()
+                if "error" not in result:
+                    self._using_dws = True
+                    return {
+                        "qrcode_url": result["qrcode_url"],
+                        "qrcode_id": result.get("qrcode_id", ""),
+                        "user_code": result.get("user_code", ""),
+                    }
+                logger.warning(
+                    "[DingTalk] dws device auth failed (%s), falling back to OAuth",
+                    result.get("error", "unknown"),
+                )
+        except Exception as exc:
+            logger.warning("[DingTalk] dws error (%s), falling back to OAuth QR", exc)
+
+        # --- Fallback: OAuth redirect QR ---
         redirect_uri = "oaa://dingtalk/callback"
         state = str(int(time.time()))
         auth_url = (
@@ -92,10 +121,31 @@ class DingTalkAdapter:
         except ImportError:
             return {"qrcode_url": auth_url, "state": state}
 
+    async def poll_qrcode_status(self, qrcode_id: str) -> dict:
+        """Poll QR code scan status.
+
+        When dws device auth is active, polls the device authorization
+        endpoint.  Otherwise returns ``"waiting"`` (the OAuth fallback has
+        no polling mechanism).
+
+        Args:
+            qrcode_id: The ``device_code`` from :meth:`get_qrcode`.
+
+        Returns:
+            dict with ``status`` ``"waiting"``, ``"confirmed"``,
+            ``"expired"``, or ``"error"``.
+        """
+        if self._using_dws:
+            return await self._dws_cli.poll_qrcode_status(qrcode_id)
+
+        # OAuth fallback: no polling
+        return {"status": "waiting"}
+
     async def handle_oauth_callback(self, code: str) -> dict:
-        """Step 2: Exchange an OAuth authorization code for the user's identity.
+        """Exchange an OAuth authorization code for the user's identity.
 
         Uses HMAC-SHA256 signed request to ``/sns/getuserinfo_bycode``.
+        Only used in the OAuth fallback path.
 
         Returns:
             dict with ``status`` ``"ok"`` + user info (``user_id``, ``name``,

@@ -32,6 +32,7 @@ class WeChatConfig:
     enabled: bool = False
     iLink_token: str = ""        # persisted session token
     iLink_bot_id: str = ""
+    ilink_user_id: str = ""      # bot owner's wxid, used for proactive messaging
     base_url: str = ""           # iLink API base URL from QR scan
     wechat_cli_path: str = ""    # path to wechat-cli
 
@@ -51,6 +52,13 @@ class FeishuConfig:
 
 
 @dataclass
+class SearchConfig:
+    tavily_api_key: str = ""
+    exa_api_key: str = ""
+    anysearch_api_key: str = ""
+
+
+@dataclass
 class AppConfig:
     DEFAULT_CONFIG_PATH: str = DEFAULT_CONFIG_PATH
     data_dir: str = os.path.expanduser("~/OAA")
@@ -59,6 +67,7 @@ class AppConfig:
     wechat: WeChatConfig = field(default_factory=WeChatConfig)
     dingtalk: DingTalkConfig = field(default_factory=DingTalkConfig)
     feishu: FeishuConfig = field(default_factory=FeishuConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
     permissions: dict = field(default_factory=lambda: {
         "blacklist_paths": [],
         "require_confirm": ["email_send", "wechat_send"],
@@ -70,6 +79,25 @@ class AppConfig:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(asdict(self), f, indent=2, ensure_ascii=False)
+
+    @classmethod
+    def _migrate_models(cls, raw: dict) -> dict:
+        """Migrate old ``{provider: {api_key, ...}}`` → ``{provider: [{name, ...}, ...]}``.
+
+        Old single-dict entries are wrapped in a list. Already-list entries pass through.
+        """
+        migrated = {}
+        for prov, val in raw.items():
+            if isinstance(val, dict):
+                entry = {"name": "", **{k: v for k, v in val.items() if k in ("api_key", "model_id", "base_url")}}
+                if not entry.get("name"):
+                    entry["name"] = val.get("model_id", prov)
+                migrated[prov] = [entry]
+            elif isinstance(val, list):
+                migrated[prov] = val
+            else:
+                migrated[prov] = []
+        return migrated
 
     @classmethod
     def load(cls, path: str = "") -> "AppConfig":
@@ -96,15 +124,20 @@ class AppConfig:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         model = ModelConfig(**data.get("model", {}))
-        models = data.get("models", {})
+        models = cls._migrate_models(data.get("models", {}))
         wechat = WeChatConfig(**data.get("wechat", {}))
         dingtalk = DingTalkConfig(**data.get("dingtalk", {}))
         feishu = FeishuConfig(**data.get("feishu", {}))
+        search = SearchConfig(**data.get("search", {}))
         perms = data.get("permissions", {})
+        # Normalize legacy string format to dict
+        if isinstance(perms, str):
+            perms = {"permission_level": perms, "blacklist_paths": [], "require_confirm": ["email_send", "wechat_send"]}
         return cls(
-            data_dir=data.get("data_dir", cls.data_dir),
+            data_dir=data.get("data_dir") or cls.data_dir,
             model=model, models=models,
             wechat=wechat,
             dingtalk=dingtalk, feishu=feishu,
+            search=search,
             permissions=perms,
         )

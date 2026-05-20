@@ -139,25 +139,44 @@ class ManagementHandler:
             self._config.model.max_tokens = m.get("max_tokens", self._config.model.max_tokens)
             self._config.model.temperature = m.get("temperature", self._config.model.temperature)
 
-        # Per-provider credentials (models dict)
+        # Per-provider credentials (models dict — array format per provider)
         if "models" in data:
-            self._config.models = data["models"]
-            # Sync active provider's creds from models dict
+            raw = data["models"]
+            # Normalize old single-dict format {prov: {api_key,...}} to list [{...}]
+            if isinstance(raw, dict):
+                normalized = {}
+                for prov, val in raw.items():
+                    if isinstance(val, dict):
+                        # Old format: {prov: {api_key, model_id, base_url}}
+                        entry = {"name": val.get("model_id", prov), "api_key": val.get("api_key", ""),
+                                 "model_id": val.get("model_id", ""), "base_url": val.get("base_url", "")}
+                        normalized[prov] = [entry]
+                    elif isinstance(val, list):
+                        normalized[prov] = val
+                    else:
+                        normalized[prov] = []
+                self._config.models = normalized
+            elif isinstance(raw, list):
+                # Old format: list of {api_key,...} — shouldn't happen, but handle gracefully
+                logger.warning("Unexpected models format (list), treating as noop")
+            # Sync active provider's creds from first entry
             prov = self._config.model.provider
-            if prov in self._config.models:
-                saved = self._config.models[prov]
-                if saved.get("api_key"):
-                    self._config.model.api_key = saved["api_key"]
-                if saved.get("model_id"):
-                    self._config.model.model_id = saved["model_id"]
-                if saved.get("base_url"):
-                    self._config.model.base_url = saved["base_url"]
+            entries = self._config.models.get(prov, [])
+            if entries:
+                entry = entries[0]
+                if entry.get("api_key"):
+                    self._config.model.api_key = entry["api_key"]
+                if entry.get("model_id"):
+                    self._config.model.model_id = entry["model_id"]
+                if entry.get("base_url"):
+                    self._config.model.base_url = entry["base_url"]
 
         if "wechat" in data:
             w = data["wechat"]
             self._config.wechat.enabled = w.get("enabled", self._config.wechat.enabled)
             self._config.wechat.iLink_token = w.get("iLink_token", self._config.wechat.iLink_token)
             self._config.wechat.iLink_bot_id = w.get("iLink_bot_id", self._config.wechat.iLink_bot_id)
+            self._config.wechat.ilink_user_id = w.get("ilink_user_id", self._config.wechat.ilink_user_id)
 
         if "dingtalk" in data:
             d = data["dingtalk"]
@@ -175,16 +194,28 @@ class ManagementHandler:
             self._config.data_dir = data["data_dir"]
 
         if "permissions" in data:
-            self._config.permissions = data["permissions"]
+            raw = data["permissions"]
+            if isinstance(raw, str):
+                # Normalize legacy string value (just permission_level) to dict
+                old = getattr(self._config, 'permissions', {})
+                if isinstance(old, dict):
+                    old["permission_level"] = raw
+                    self._config.permissions = old
+                else:
+                    self._config.permissions = {"permission_level": raw, "blacklist_paths": [], "require_confirm": ["email_send", "wechat_send"]}
+            elif isinstance(raw, dict):
+                self._config.permissions = raw
 
         # Backward-migrate any pre-models-dict config into the per-provider store
         prov = self._config.model.provider
         if prov and self._config.model.api_key:
-            self._config.models.setdefault(prov, {})
-            if not self._config.models[prov].get("api_key"):
-                self._config.models[prov]["api_key"] = self._config.model.api_key
-                self._config.models[prov]["model_id"] = self._config.model.model_id
-                self._config.models[prov]["base_url"] = self._config.model.base_url
+            if prov not in self._config.models or not self._config.models.get(prov):
+                self._config.models[prov] = [{
+                    "name": self._config.model.model_id or prov,
+                    "api_key": self._config.model.api_key,
+                    "model_id": self._config.model.model_id,
+                    "base_url": self._config.model.base_url,
+                }]
 
         self._config.save()
 
@@ -199,9 +230,7 @@ class ManagementHandler:
     # ------------------------------------------------------------------
 
     def _handle_get_models(self, _payload: dict) -> dict:
-        """Return all configured models and their credentials."""
-        from ..config import ModelConfig
-        from dataclasses import asdict
+        """Return all configured models and their credentials (list per provider)."""
         default_urls = {
             "deepseek": "https://api.deepseek.com",
             "volcengine": "https://ark.cn-beijing.volces.com/api/v3",
@@ -222,31 +251,58 @@ class ManagementHandler:
         }
         models = {}
         for prov, default_url in default_urls.items():
-            saved = self._config.models.get(prov, {})
-            models[prov] = {
-                "api_key": saved.get("api_key", ""),
-                "model_id": saved.get("model_id", ""),
-                "base_url": saved.get("base_url", default_url),
-            }
+            entries = self._config.models.get(prov, [])
+            if not entries:
+                models[prov] = []
+            else:
+                models[prov] = []
+                for entry in entries:
+                    models[prov].append({
+                        "name": entry.get("name", ""),
+                        "api_key": entry.get("api_key", ""),
+                        "model_id": entry.get("model_id", ""),
+                        "base_url": entry.get("base_url", default_url),
+                    })
         return {
             "ok": True,
             "active": self._config.model.provider,
+            "active_model_id": self._config.model.model_id,
             "models": models,
         }
 
     def _handle_switch_model(self, payload: dict) -> dict:
-        """Switch the active model provider without going through settings."""
+        """Switch the active model without going through settings.
+
+        Accepts either ``provider`` alone (picks first entry for that provider)
+        or ``provider`` + ``model_id`` (picks the matching entry).
+        """
         provider = payload.get("provider", "")
         if not provider:
             return {"ok": False, "error": "No provider specified"}
-        saved = self._config.models.get(provider, {})
+        entries = self._config.models.get(provider, [])
+        if not entries:
+            # Provider exists in config but has no entries (unlikely edge case)
+            self._config.model.provider = provider
+            self._config.model.api_key = ""
+            self._config.model.model_id = ""
+            self._config.model.base_url = ""
+            self._config.save()
+            if self._agent is not None:
+                self._agent.llm.reconfigure(self._config.model)
+            return {"ok": True}
+
+        # Pick the matching entry (or first if no model_id specified)
+        model_id = payload.get("model_id", "")
+        if model_id:
+            selected = next((e for e in entries if e.get("model_id") == model_id), entries[0])
+        else:
+            selected = entries[0]
+
         self._config.model.provider = provider
-        if "api_key" in saved:
-            self._config.model.api_key = saved["api_key"]
-        if "model_id" in saved:
-            self._config.model.model_id = saved["model_id"]
-        if "base_url" in saved and saved["base_url"]:
-            self._config.model.base_url = saved["base_url"]
+        self._config.model.api_key = selected.get("api_key", "")
+        self._config.model.model_id = selected.get("model_id", "")
+        self._config.model.base_url = selected.get("base_url", "")
+
         # Ensure api_format matches provider
         if provider in ("anthropic", "custom-anthropic"):
             self._config.model.api_format = "anthropic"
@@ -255,7 +311,7 @@ class ManagementHandler:
         self._config.save()
         if self._agent is not None:
             self._agent.llm.reconfigure(self._config.model)
-        return {"ok": True}
+        return {"ok": True, "model_id": self._config.model.model_id}
 
     # ------------------------------------------------------------------
     # Stop
@@ -267,7 +323,7 @@ class ManagementHandler:
         return {"ok": True}
 
     def _handle_apply_evolution(self, payload: dict) -> dict:
-        """Mark an evolution suggestion as applied."""
+        """Mark an evolution suggestion as applied and remove from pending list."""
         title = payload.get("title", "")
         if not title:
             return {"ok": False, "error": "No title provided"}
@@ -278,6 +334,14 @@ class ManagementHandler:
             "title": title,
             "applied_at": time.time(),
         })
+        # Remove from suggestions list by matching title
+        suggestions = self._evolution.stats.get("suggestions", [])
+        for idx, s in enumerate(suggestions):
+            s_title = s.get("skill", "") or s.get("message", "")[:20]
+            if s_title in title or title in s.get("message", ""):
+                self._evolution.accept_suggestion(idx)
+                break
+        self._evolution._save_stats()
         return {"ok": True}
 
     # ------------------------------------------------------------------
@@ -382,12 +446,15 @@ class ManagementHandler:
 
     def _handle_get_evolution(self, _payload: dict) -> dict:
         """Return evolution statistics and suggestions from EvolutionEngine."""
+        # Regenerate suggestions from current stats so threshold changes take effect
+        self._evolution.analyze_for_suggestions()
         suggestions = self._evolution.stats.get("suggestions", [])
+        skill_usage = self._evolution.stats.get("skill_usage", {})
 
         return {
             "ok": True,
             "stats": {
-                "skill_usage": self._evolution.stats.get("skill_usage", {}),
+                "skill_usage": skill_usage,
                 "sop_executions": self._evolution.stats.get("sop_executions", {}),
                 "crystallized": self._evolution.stats.get("crystallized", []),
             },
@@ -460,6 +527,7 @@ class ManagementHandler:
                 if token:
                     self._config.wechat.iLink_token = token
                     self._config.wechat.iLink_bot_id = result.get("ilink_bot_id", self._config.wechat.iLink_bot_id)
+                    self._config.wechat.ilink_user_id = result.get("ilink_user_id", self._config.wechat.ilink_user_id)
                     self._config.wechat.base_url = result.get("base_url", self._config.wechat.base_url)
                     self._config.wechat.enabled = True
                     self._config.save()

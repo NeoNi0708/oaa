@@ -18,12 +18,12 @@
     </div>
 
     <!-- 技能仓库 -->
-    <div v-if="activeTab === 'repo'" class="tab-content">
+    <div v-if="activeTab === 'repo'" key="repo" class="tab-content">
       <div v-if="loading" class="skill-loading">
         <span class="skill-spinner"></span>
         <span>加载技能列表...</span>
       </div>
-      <template v-else>
+      <div v-else class="tab-content-inner">
       <div class="section-header-inline">
         <h3>已安装技能</h3>
         <span class="oaa-badge oaa-badge--count">{{ allSkills.length }}</span>
@@ -46,77 +46,81 @@
           <div
             v-for="skill in group.skills"
             :key="skill.name"
-            :class="['skill-card', { expanded: expandedSkill === skill.name }]"
-            @click="toggleSkillDetail(skill.name)"
+            class="skill-card-wrapper"
           >
-            <div class="skill-icon-wrapper">
-              <span class="skill-icon">{{ skill.icon }}</span>
-            </div>
-            <div class="skill-info">
-              <div class="skill-name">
-                {{ skill.name }}
-                <span v-if="skill.current" class="skill-current-tag">当前</span>
+            <div
+              :class="['skill-card', { expanded: expandedSkill === skill.name }]"
+              @click="toggleSkillDetail(skill.name)"
+            >
+              <div class="skill-icon-wrapper">
+                <span class="skill-icon">{{ skill.icon }}</span>
               </div>
-              <div class="skill-desc">{{ skill.description }}</div>
-            </div>
-            <div class="skill-status">
-              <span v-if="skill.current" class="status-badge status-active">已加载</span>
-              <span v-else-if="skill.toolsCount > 0" class="status-badge status-ready">已安装</span>
-              <span v-else class="status-badge status-inactive">待激活</span>
-            </div>
-          </div>
-
-          <!-- Detail panel for expanded skill -->
-          <div v-if="expandedSkill === skill.name && skillDetail" class="skill-detail-panel">
-            <div class="detail-tabs">
-              <button
-                v-for="dt in detailTabs"
-                :key="dt.id"
-                :class="['detail-tab-btn', { active: activeDetailTab === dt.id }]"
-                @click.stop="activeDetailTab = dt.id"
-              >{{ dt.label }}</button>
+              <div class="skill-info">
+                <div class="skill-name">
+                  {{ skill.name }}
+                  <span v-if="skill.current" class="skill-current-tag">当前</span>
+                </div>
+                <div class="skill-desc">{{ skill.description }}</div>
+              </div>
+              <div class="skill-status">
+                <span v-if="skill.current" class="status-badge status-active">已加载</span>
+                <span v-else-if="skill.toolsCount > 0" class="status-badge status-ready">已安装</span>
+                <span v-else class="status-badge status-inactive">待激活</span>
+              </div>
             </div>
 
-            <!-- Description tab -->
-            <div v-if="activeDetailTab === 'desc'" class="detail-content">
-              <div class="detail-desc">{{ skillDetail.description || '暂无描述' }}</div>
-              <div v-if="skillDetail.tools && skillDetail.tools.length" class="detail-section">
-                <h4>工具 ({{ skillDetail.tools.length }})</h4>
-                <div v-for="t in skillDetail.tools" :key="t.name || t.function?.name" class="detail-tool-item">
-                  <span class="tool-name">{{ t.name || t.function?.name }}</span>
-                  <span class="tool-desc">{{ t.description || t.function?.description || '' }}</span>
+            <!-- Detail panel for expanded skill (positioned directly under this card) -->
+            <div v-if="expandedSkill === skill.name && skillDetail" class="skill-detail-panel">
+              <div class="detail-tabs">
+                <button
+                  v-for="dt in detailTabs"
+                  :key="dt.id"
+                  :class="['detail-tab-btn', { active: activeDetailTab === dt.id }]"
+                  @click.stop="activeDetailTab = dt.id"
+                >{{ dt.label }}</button>
+              </div>
+
+              <!-- Description tab -->
+              <div v-if="activeDetailTab === 'desc'" class="detail-content">
+                <div class="detail-desc">{{ skillDetail.description || '暂无描述' }}</div>
+                <div v-if="skillDetail.tools && skillDetail.tools.length" class="detail-section">
+                  <h4>工具 ({{ skillDetail.tools.length }})</h4>
+                  <div v-for="t in skillDetail.tools" :key="t.name || t.function?.name" class="detail-tool-item">
+                    <span class="tool-name">{{ t.name || t.function?.name }}</span>
+                    <span class="tool-desc">{{ t.description || t.function?.description || '' }}</span>
+                  </div>
+                </div>
+                <div v-if="skillDetail.knowledge && skillDetail.knowledge.length" class="detail-section">
+                  <h4>知识文档 ({{ skillDetail.knowledge.length }})</h4>
+                  <div v-for="(k, i) in skillDetail.knowledge" :key="i" class="detail-knowledge-item">
+                    <details>
+                      <summary>知识 #{{ i + 1 }} ({{ k.length }} 字)</summary>
+                      <pre class="knowledge-body">{{ k }}</pre>
+                    </details>
+                  </div>
                 </div>
               </div>
-              <div v-if="skillDetail.knowledge && skillDetail.knowledge.length" class="detail-section">
-                <h4>知识文档 ({{ skillDetail.knowledge.length }})</h4>
-                <div v-for="(k, i) in skillDetail.knowledge" :key="i" class="detail-knowledge-item">
-                  <details>
-                    <summary>知识 #{{ i + 1 }} ({{ k.length }} 字)</summary>
-                    <pre class="knowledge-body">{{ k }}</pre>
-                  </details>
-                </div>
+
+              <!-- SKILL.md tab -->
+              <div v-if="activeDetailTab === 'skill'" class="detail-content">
+                <pre v-if="skillDetail.skill_md" class="detail-markdown">{{ skillDetail.skill_md }}</pre>
+                <div v-else class="detail-empty">无 SKILL.md</div>
               </div>
-            </div>
 
-            <!-- SKILL.md tab -->
-            <div v-if="activeDetailTab === 'skill'" class="detail-content">
-              <pre v-if="skillDetail.skill_md" class="detail-markdown">{{ skillDetail.skill_md }}</pre>
-              <div v-else class="detail-empty">无 SKILL.md</div>
-            </div>
+              <!-- SOP.md tab -->
+              <div v-if="activeDetailTab === 'sop'" class="detail-content">
+                <pre v-if="skillDetail.sop_md" class="detail-markdown">{{ skillDetail.sop_md }}</pre>
+                <div v-else class="detail-empty">无 SOP.md</div>
+              </div>
 
-            <!-- SOP.md tab -->
-            <div v-if="activeDetailTab === 'sop'" class="detail-content">
-              <pre v-if="skillDetail.sop_md" class="detail-markdown">{{ skillDetail.sop_md }}</pre>
-              <div v-else class="detail-empty">无 SOP.md</div>
-            </div>
-
-            <div class="detail-actions">
-              <button
-                v-if="!skillDetail.is_current"
-                class="oaa-btn oaa-btn--primary oaa-btn--sm"
-                @click.stop="loadSkill(skill.name)"
-              >加载此技能</button>
-              <span v-else class="current-skill-badge">✓ 当前已加载</span>
+              <div class="detail-actions">
+                <button
+                  v-if="!skillDetail.is_current"
+                  class="oaa-btn oaa-btn--primary oaa-btn--sm"
+                  @click.stop="loadSkill(expandedSkill)"
+                >加载此技能</button>
+                <span v-else class="current-skill-badge">✓ 当前已加载</span>
+              </div>
             </div>
           </div>
 
@@ -125,16 +129,16 @@
       <div v-if="filteredGroups.length === 0" class="no-results">
         没有找到匹配 "{{ searchQuery }}" 的技能
       </div>
-      </template>
+      </div>
     </div>
 
     <!-- 自生技能 -->
-    <div v-if="activeTab === 'evolution'" class="tab-content">
+    <div v-if="activeTab === 'evolution'" key="evolution" class="tab-content">
       <div v-if="loading" class="skill-loading">
         <span class="skill-spinner"></span>
         <span>加载进化建议...</span>
       </div>
-      <template v-else>
+      <div v-else class="tab-content-inner">
       <!-- Stats dashboard -->
       <div v-if="evolutionStats" class="evo-stats-row">
         <div class="evo-stat-card">
@@ -171,7 +175,7 @@
       </div>
 
       <!-- Crystallized skills -->
-      <div v-if="evolutionStats.crystallized.length" class="evo-section">
+      <div v-if="evolutionStats?.crystallized?.length" class="evo-section">
         <h3>已固化技能</h3>
         <div class="crystallized-list">
           <div v-for="c in evolutionStats.crystallized" :key="c.name" class="crystallized-item">
@@ -206,11 +210,11 @@
           </div>
         </div>
       </div>
-      </template>
+      </div>
     </div>
 
     <!-- 技能市场 -->
-    <div v-if="activeTab === 'market'" class="tab-content">
+    <div v-if="activeTab === 'market'" key="market" class="tab-content">
       <div class="section-header-inline">
         <h3>技能市场</h3>
       </div>
@@ -240,7 +244,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onActivated } from 'vue'
 import { useWebSocket } from '../composables/useWebSocket'
 
 const { sendRequest } = useWebSocket()
@@ -389,28 +393,11 @@ const fallbackSkillGroups: SkillGroup[] = [
   },
 ]
 
-const fallbackEvolution: EvolutionSuggestion[] = [
-  {
-    icon: '🧠', title: '上下文感知记忆',
-    description: '扩展工作记忆，自动保留跨会话的用户上下文和偏好',
-    tag: '热门', badgeClass: 'oaa-badge--error', confidence: 87, applied: false,
-  },
-  {
-    icon: '🔗', title: '工具链式调用',
-    description: '允许多个技能编排为流水线，前一个输出自动成为下一个输入',
-    tag: '新', badgeClass: 'oaa-badge--count', confidence: 73, applied: false,
-  },
-  {
-    icon: '📊', title: '分析面板',
-    description: '可视化展示技能使用指标、性能数据和演化趋势',
-    tag: '稳定', badgeClass: 'oaa-badge--success', confidence: 91, applied: true,
-  },
-  {
-    icon: '🗣', title: '多模态输入输出',
-    description: '支持图像、音频、视频在技能流水线中的输入与输出',
-    tag: '内测', badgeClass: 'oaa-badge--warning', confidence: 64, applied: false,
-  },
-]
+// Fallback evolution is empty — suggestions come exclusively from the backend.
+// SkillView.vue used to hardcode 4 suggestions here; they were removed because
+// they were never backed by real EvolutionEngine data and the "apply" button
+// was cosmetic. See FIX_PLAN.md #4.
+const fallbackEvolution: EvolutionSuggestion[] = []
 
 // ------------------------------------------------------------------
 // Reactive state
@@ -565,6 +552,11 @@ function formatDate(iso: string): string {
   }
 }
 
+
+
+// Track whether initial data load has completed at least once
+const dataLoaded = ref(false)
+
 // ------------------------------------------------------------------
 // Load data on mount
 // ------------------------------------------------------------------
@@ -594,8 +586,9 @@ onMounted(async () => {
           knowledgeCount: s.knowledge_count,
         })
       }
-      skillGroups.value = Array.from(groupMap, ([category, skills]) => ({ category, skills }))
-      allSkills.value = skills as any
+      const newGroups = Array.from(groupMap, ([category, skills]) => ({ category, skills }))
+      skillGroups.value = newGroups
+      allSkills.value = newGroups.flatMap(g => g.skills)
     }
   } catch {
     // Keep fallback data
@@ -628,6 +621,52 @@ onMounted(async () => {
   }
 
   loading.value = false
+  dataLoaded.value = true
+})
+
+onActivated(async () => {
+  if (!dataLoaded.value) return
+  try {
+    const resp = await sendRequest('get_skills')
+    if (resp.ok && Array.isArray(resp.skills)) {
+      const currentName = resp.current as string | null
+      const groupMap = new Map<string, Skill[]>()
+      for (const s of resp.skills as BackendSkill[]) {
+        const cat = s.category || '未分类'
+        if (!groupMap.has(cat)) groupMap.set(cat, [])
+        groupMap.get(cat)!.push({
+          icon: inferIcon(s.name),
+          name: s.name,
+          description: s.tools_count > 0 ? `${s.tools_count} 工具 · ${s.knowledge_count} 知识文档` : '需安装依赖或配置',
+          active: s.loaded && s.tools_count > 0,
+          current: s.name === currentName,
+          toolsCount: s.tools_count,
+          knowledgeCount: s.knowledge_count,
+        })
+      }
+      const newGroups = Array.from(groupMap, ([cat, skills]) => ({ category: cat, skills }))
+      skillGroups.value = newGroups
+      allSkills.value = newGroups.flatMap(g => g.skills)
+    }
+  } catch { /* keep current state */ }
+
+  try {
+    const resp = await sendRequest('get_evolution')
+    if (resp.ok) {
+      if (resp.stats) evolutionStats.value = resp.stats as EvolutionStats
+      if (Array.isArray(resp.suggestions) && resp.suggestions.length > 0) {
+        evolutionSuggestions.value = (resp.suggestions as BackendEvolutionItem[]).map((item, i) => ({
+          icon: '🧬',
+          title: item.skill ? `「${item.skill}」优化建议` : item.message.slice(0, 20),
+          description: item.message,
+          tag: item.type === 'optimize' ? '热门' : item.type === 'sop_refine' ? '内测' : '稳定',
+          badgeClass: tagBootstrap[i % 4],
+          confidence: item.usage_count ? Math.min(99, item.usage_count * 15) : 70,
+          applied: false,
+        }))
+      }
+    }
+  } catch { /* keep current state */ }
 })
 </script>
 
@@ -734,6 +773,11 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: var(--oaa-space-1);
+}
+
+.skill-card-wrapper {
+  display: flex;
+  flex-direction: column;
 }
 
 .skill-card {

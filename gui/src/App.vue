@@ -2,18 +2,15 @@
   <div class="app-layout">
     <Sidebar :active-tab="activeTab" @navigate="activeTab = $event" />
     <main class="main-content">
-      <ChatView v-if="activeTab === 'chat'" />
-      <SkillView v-if="activeTab === 'skills'" />
-      <ConnectionsView v-if="activeTab === 'connections'" />
-      <TaskView v-if="activeTab === 'tasks'" />
-      <FileView v-if="activeTab === 'files'" />
-      <SettingsView v-if="activeTab === 'settings'" />
+      <KeepAlive>
+        <component :is="activeComponent" />
+      </KeepAlive>
     </main>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './views/ChatView.vue'
 import SkillView from './views/SkillView.vue'
@@ -23,6 +20,17 @@ import FileView from './views/FileView.vue'
 import SettingsView from './views/SettingsView.vue'
 
 const activeTab = ref('chat')
+
+const tabComponents: Record<string, any> = {
+  chat: ChatView,
+  skills: SkillView,
+  connections: ConnectionsView,
+  tasks: TaskView,
+  files: FileView,
+  settings: SettingsView,
+}
+
+const activeComponent = computed(() => tabComponents[activeTab.value])
 </script>
 
 <style scoped>

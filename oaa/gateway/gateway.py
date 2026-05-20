@@ -1,4 +1,5 @@
 """Gateway — routes messages between channels and agent core."""
+import asyncio
 
 from ..agent.oaa_agent import OAAAgent
 from ..logging_config import get_logger
@@ -11,12 +12,14 @@ class Message:
     """Inbound message from any channel."""
 
     def __init__(self, source: str, user_id: str, content: str,
-                 metadata: dict = None, session_id: str = ""):
+                 metadata: dict = None, session_id: str = "",
+                 images: list[str] | None = None):
         self.source = source
         self.user_id = user_id
         self.content = content
         self.metadata = metadata or {}
         self.session_id = session_id
+        self.images = images or []  # base64 data URIs for multimodal LLM
 
 
 class Gateway:
@@ -62,6 +65,9 @@ class Gateway:
                 if chunk["type"] == "done":
                     response = chunk.get("content", "")
                 yield chunk
+        except asyncio.CancelledError:
+            yield {"type": "done", "content": ""}
+            return
         except Exception as exc:
             logger.error("Agent processing failed: %s", exc)
             yield {"type": "done", "content": f"处理消息时出错: {exc}"}
