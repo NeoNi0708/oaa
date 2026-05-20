@@ -179,62 +179,87 @@ class OAAApp:
             await asyncio.sleep(3600)
 
     async def _notify_desktop(self):
-        """Send startup notification to all connected Desktop GUI clients."""
-        status = self.agent._build_channel_status()
-        if status and "desktop" not in self._startup_notified:
-            self._startup_notified.add("desktop")
-            msg = f"🟢 OAA 已启动\n\n{status}\n\n随时可以通过以下通道给我布置工作。"
-            await self.desktop.notify_all(msg)
-            logger.info("Startup notification sent to Desktop GUI")
+        """Have the agent proactively check status and report to the Desktop GUI."""
+        if "desktop" in self._startup_notified:
+            return
+        self._startup_notified.add("desktop")
+        if not self.desktop._clients:
+            return
+
+        try:
+            startup_prompt = (
+                "【系统通知】服务已全部启动，所有通道就绪。"
+                "请检查当前各通道的状态，然后主动向用户打招呼，"
+                "用你平常的语气介绍你的身份、当前各通道的连接状态，"
+                "告诉用户可以通过哪些方式给你布置工作。"
+                "要热情自然，就像刚睡醒伸了个懒腰那样。"
+            )
+            async for chunk in self.agent.process_message(startup_prompt, history=[]):
+                if chunk["type"] == "llm_output":
+                    await self.desktop.notify_all(chunk["content"])
+            # Finalize with a done message to push to chat history
+            await self.desktop.notify_all("", msg_type="done")
+            logger.info("Agent startup report sent to Desktop GUI")
+        except Exception as exc:
+            logger.warning("Agent startup report failed: %s", exc)
 
     async def _notify_channel(self, channel: str):
-        """Send welcome notification through a just-connected channel."""
+        """Have the agent generate a welcome message for a just-connected channel."""
         if channel in self._startup_notified:
             return
         self._startup_notified.add(channel)
 
-        status = self.agent._build_channel_status()
-        if not status:
+        adapter = self.channel_adapters.get(channel)
+        if not adapter:
+            return
+        wechat_ok = (
+            channel == "wechat"
+            and getattr(adapter, 'is_authenticated', False)
+            and getattr(adapter, '_bot_user_id', None)
+        )
+        if not wechat_ok:
             return
 
-        # Simplify for plain-text channels
-        import re as _re
-        simple_status = _re.sub(r"[✅❌🔵]", "", status).replace("**", "").replace("``", "")
-        wechat_msg = f"OAA 已启动\n\n{simple_status}\n\n随时可以通过以上通道给我布置工作。"
+        try:
+            startup_prompt = (
+                "【系统通知】微信通道刚刚连接成功。"
+                "请检查当前各通道的状态，用你平常的语气主动向用户打招呼，"
+                "告诉他你已准备好，可以通过微信给他提供服务。"
+            )
+            response_parts = []
+            async for chunk in self.agent.process_message(startup_prompt, history=[]):
+                if chunk["type"] == "llm_output":
+                    response_parts.append(chunk["content"])
+                elif chunk["type"] == "done" and chunk.get("content"):
+                    response_parts.append(chunk["content"])
 
-        if channel == "wechat":
-            wechat = self.channel_adapters.get("wechat")
-            if wechat and getattr(wechat, 'is_authenticated', False) and wechat._bot_user_id:
-                await wechat.send_message(wechat._bot_user_id, wechat_msg)
-                logger.info("Welcome notification sent to WeChat (%s)", wechat._bot_user_id)
+            full = "".join(response_parts).strip()
+            if full:
+                import re as _re
+                simple = _re.sub(r"[🔍🔬🔧💡📊📝⏳✅❌🔵🟢]", "", full)
+                simple = simple.replace("**", "").replace("``", "")
+                await adapter.send_message(adapter._bot_user_id, simple)
+                logger.info("Agent welcome sent to WeChat (%s)", adapter._bot_user_id)
+        except Exception as exc:
+            logger.warning("Agent welcome for channel %s failed: %s", channel, exc)
 
     async def _startup_check(self):
-        """Report channel status at startup. Waits up to 30s for a Desktop GUI client."""
+        """Wait for Desktop GUI client, then have the agent report in."""
         try:
-            status = self.agent._build_channel_status()
-            if not status:
-                return
-
-            # Notify Desktop GUI — wait for client up to 30s
             if not self.desktop._clients:
                 for _ in range(15):
                     await asyncio.sleep(2)
                     if self.desktop._clients:
                         break
-            if self.desktop._clients and "desktop" not in self._startup_notified:
-                self._startup_notified.add("desktop")
-                msg = f"🟢 OAA 已启动\n\n{status}\n\n随时可以通过以下通道给我布置工作。"
-                await self.desktop.notify_all(msg)
-                logger.info("Startup notification sent to Desktop GUI (%d clients)", len(self.desktop._clients))
 
-            # Notify WeChat if already authenticated at startup
+            # Have the agent proactively report to Desktop if a client connected
+            if self.desktop._clients and "desktop" not in self._startup_notified:
+                await self._notify_desktop()
+
+            # Also notify WeChat if already authenticated at startup
             wechat = self.channel_adapters.get("wechat")
-            if wechat and getattr(wechat, 'is_authenticated', False) and wechat._bot_user_id and "wechat" not in self._startup_notified:
-                self._startup_notified.add("wechat")
-                import re as _re
-                simple = _re.sub(r"[✅❌🔵]", "", status).replace("**", "").replace("``", "")
-                await wechat.send_message(wechat._bot_user_id, f"OAA 已启动\n\n{simple}\n\n随时可以通过以上通道给我布置工作。")
-                logger.info("Startup notification sent to WeChat (%s)", wechat._bot_user_id)
+            if wechat and getattr(wechat, 'is_authenticated', False) and getattr(wechat, '_bot_user_id', None):
+                await self._notify_channel("wechat")
 
         except Exception as exc:
             logger.warning("Startup check failed: %s", exc)
