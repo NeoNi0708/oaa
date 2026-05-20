@@ -168,8 +168,8 @@ class OAAApp:
         self._startup_notified: set[str] = set()
         asyncio.create_task(self._startup_check())
 
-        # Register hook: when a Desktop GUI client connects, send startup notification
-        self.desktop._on_first_client = lambda: asyncio.create_task(self._notify_desktop())
+        # Register hook: when a Desktop GUI client connects, have agent report in
+        self.desktop._on_first_client = self._notify_desktop
 
         # Wire a callback so management.py can send welcome when a new channel authenticates
         self.agent._on_channel_ready = self._notify_channel
