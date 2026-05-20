@@ -72,8 +72,8 @@
               <span v-if="channels.wechat.botId" class="bot-id" :title="channels.wechat.botId">{{ channels.wechat.botId }}</span>
             </div>
             <div class="connection-actions">
-              <button class="oaa-btn oaa-btn--sm oaa-btn--primary" disabled title="已在线">重连</button>
-              <button class="oaa-btn oaa-btn--sm oaa-btn--secondary" disabled title="已在线">新二维码</button>
+              <button class="oaa-btn oaa-btn--sm oaa-btn--primary" @click="reconnectChannel('wechat')" :disabled="channels.wechat.reconnecting">重连</button>
+              <button class="oaa-btn oaa-btn--sm oaa-btn--secondary" @click="startQrLogin('wechat')" :disabled="channels.wechat.loading">新二维码</button>
             </div>
           </div>
           <div v-else class="offline-actions">
@@ -126,8 +126,8 @@
               <span v-if="channels.dingtalk.clientId" class="bot-id" :title="channels.dingtalk.clientId">{{ channels.dingtalk.clientId }}</span>
             </div>
             <div class="connection-actions">
-              <button class="oaa-btn oaa-btn--sm oaa-btn--primary" disabled title="已在线">重连</button>
-              <button class="oaa-btn oaa-btn--sm oaa-btn--secondary" disabled title="已在线">新二维码</button>
+              <button class="oaa-btn oaa-btn--sm oaa-btn--primary" @click="reconnectChannel('dingtalk')" :disabled="channels.dingtalk.reconnecting || channels.dingtalk.loading">重连</button>
+              <button class="oaa-btn oaa-btn--sm oaa-btn--secondary" @click="startQrLogin('dingtalk')" :disabled="channels.dingtalk.loading">新二维码</button>
             </div>
           </div>
           <div v-else class="offline-actions">
@@ -187,8 +187,8 @@
               <span v-if="channels.feishu.appId" class="bot-id" :title="channels.feishu.appId">{{ channels.feishu.appId }}</span>
             </div>
             <div class="connection-actions">
-              <button class="oaa-btn oaa-btn--sm oaa-btn--primary" disabled title="已在线">重连</button>
-              <button class="oaa-btn oaa-btn--sm oaa-btn--secondary" disabled title="已在线">新二维码</button>
+              <button class="oaa-btn oaa-btn--sm oaa-btn--primary" @click="reconnectChannel('feishu')" :disabled="channels.feishu.reconnecting || channels.feishu.loading">重连</button>
+              <button class="oaa-btn oaa-btn--sm oaa-btn--secondary" @click="startQrLogin('feishu')" :disabled="channels.feishu.loading">新二维码</button>
             </div>
           </div>
           <div v-else class="offline-actions">
