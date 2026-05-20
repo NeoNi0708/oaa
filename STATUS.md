@@ -1,6 +1,247 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-18（P0 闭环全部完成 + evolution-self_improve 深度集成）
+> 最后更新：2026-05-20 — `_do_reload` await bug 修复 + IdleInspector 冷却修正 + 自主性断点分析
+
+---
+
+## 本次会话（2026-05-20）— 自愈闭环断点修复 + 自主性分析
+
+## 本次会话（2026-05-19 续）— 微信文件发送 + IdleInspector 增强
+
+### 微信文件发送（wechat_send_file）
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `wechat_ilink.py` | +`send_file()` 方法 | AES-128-ECB 加密 → CDN 上传 → build_media_message → send_message 完整链路。自动识别图片/视频/音频/文件类型 |
+| `extended_tools.py` | +`do_wechat_send_file` | 权限确认 → 调用 adapter.send_file() |
+| `tool_schema.py` | +`wechat_send_file` schema | 参数：to(wxid) + file_path(本地路径) |
+
+**上传流程**：读取文件 → 生成随机 AES-128 密钥 → 加密文件 → iLink API 获取 CDN 上传地址 → 上传加密数据 → 构建媒体消息 → 发送到微信。
+
+### read_own_source 目录友好处理
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `tools.py:858` | `os.path.isfile` → `os.path.exists` + `os.path.isdir` 分支 | 传入目录时自动列出内容（文件大小/子目录），不再报"File not found" |
+| `tools.py` | +auto correction_log | 收到目录时自动记修正：`read_own_source 只能读文件，浏览目录请用 list_own_structure` |
+
+**根因**：二愣多次将目录路径传给 `read_own_source` 导致报错，IdleInspector 误判为工具 bug。现在目录路径也能正常返回内容列表。
+
+### IdleInspector 提案去重（Task #11）
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `idle_inspector.py` | +MD5 哈希 + `_MAX_PROPOSAL_REPEATS=3` | 同一提案最多推送 3 次，之后静默抑制 |
+| `idle_inspector.py` | +`_dedup_path` + JSON 持久化 | 重启后依然记得已发次数，不重复推送 |
+
+### IdleInspector 使用模式分析（Task #12）
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `idle_inspector.py` | +`_check_usage_patterns()` | Phase 2b 分析：① 技能使用≥5次未结晶 → 建议触发 ② SOP 跳过≥3次 → 建议移除 ③ 新结晶技能通知 ④ 工具累计失败≥3次 → 建议修复 |
+
+### 巡检通知微信推送
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `app.py` | +`_inspector_notify` 微信推送 | IdleInspector 发现优化项时，除 GUI 通知外，同时通过微信推送给机器人主人（`_bot_user_id`）。用户回复"确认"后 agent 自动执行 |
+
+**流程**：IdleInspector 检测到优化项 → 写入 `pending_proposals.md` → GUI 通知 + **微信消息推送** → 用户手机回复确认 → agent 处理消息时看到待处理提案 → 自动执行。
+
+### 工具失败记录清理
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `tool_failures.md` | 清除旧记录 | `read_own_source` 的目录误报记录已清空，避免 IdleInspector 重复触发 |
+
+---
+
+## 本次会话（2026-05-18 深夜）— 自主功能综合测试 + ModuleNotFound 自动恢复
+
+### Evolution Stats 数据格式修复
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `engine.py` | +defensive `isinstance` 检查 | `analyze_for_suggestions()` 和 `get_auto_refinements()` 中 `sop_skips` 值遍历前检查类型 — 防止 seed 数据格式错误导致 `AttributeError: 'int' object has no attribute 'items'` |
+| `engine.py` | +debug logging | `_load_stats()` 增加日志输出加载的 skill_usage 列表 |
+| `management.py` | 恢复 `skill_usage` 变量 | `_handle_get_evolution` 中 `skill_usage` 变量被意外删除导致 `NameError` — 已恢复 |
+
+**根因**：seed 数据中 `sop_skips` 值为 `{"search-executor": 2}`（int），但迭代代码期望 `dict`（`.items()`）。修复包含 seed 格式修正（→ `{"search-executor": {"web_search_failed": 2}}`）+ 防御性检查。
+
+### ModuleNotFound 自动恢复
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `loop.py` | `import re` + 模块检测 regex | `code_run`/`code_exec` 返回错误时，扫描 stdout/stderr 中 `ModuleNotFoundError`/`ImportError` 模式，提取缺失模块名 |
+| `loop.py` | +pip install recovery hint | 检测到缺失模块后注入 `[恢复提示]`：`请用 shell_run 命令安装：pip install <模块>` |
+| `loop.py` | 错误格式增强 | code 工具错误时显示 stdout/stderr 最后 8 行（traceback tail），使 LLM 能看见完整错误上下文 |
+
+**架构说明**：`_recovery_hint` 机制原本只对**抛出异常**的工具生效（line 249-257），但 `code_run`/`code_exec` 通过子进程 exit code 返回错误（不抛异常）。本次修复在异常路径之外增加了对错误结果内容的**事后扫描**，覆盖了子进程类工具的恢复盲区。
+
+### 自主功能综合测试结果
+
+| 场景 | 测试内容 | 结果 |
+|------|---------|------|
+| A | 多步骤任务执行（基准） | ✅ 4 种工具，PASS |
+| B | 工具失败自动恢复 | ✅ 替代方案执行，PASS |
+| C | 技能使用 → 进化阈值触发 | ✅ 6 条轨迹，PASS |
+| D | IdleInspector 空闲巡检 | ⚠️ 部分通过（有 LLM 输出但未完全匹配优化关键词） |
+| E | 任务中断与端点重续 | ✅ 恢复后继续执行，PASS |
+| F | self_improve 代码自修改 | ✅ 规则写入 + reload 通过 |
+| **合计** | **26/28 通过 (92%)** | 2 FAIL：A 工具错误数（4 个） + D 巡检提案格式 |
+
+### A 场景工具错误分析
+
+场景 A 的 4 个 `code_exec`/`code_run` 错误来自读取 Excel 文件时的路径问题（agent 使用 `E:/GenericAgent/data/workspace/...` 而非 `E:/GenericAgent/data/workspace/...` 的短路径变体）。ModuleNotFound 修复后这些错误应自动触发 pip install 恢复提示，预期可转为 PASS。
+
+---
+
+## 本次会话（2026-05-20）— 自愈闭环断点修复 + 自主性分析
+
+### 关键 Bug：`_do_reload` 缺失 await（自愈不生效的根因）
+
+`oaa/agent/tools.py:672`：
+
+```python
+# 修复前：
+reload_msg = self._do_reload(rel_path)  # ← 创建协程对象但从不执行
+
+# 修复后：
+reload_msg = await self._do_reload(rel_path)  # ← 实际执行模块重载
+```
+
+| 影响 | 严重度 |
+|------|--------|
+| `self_improve` 修改代码后模块**从未重载**，进程继续用旧代码 | **P0（自愈完全失效）** |
+| `rollback_change` 回滚后也**未重载**，进程继续用旧代码 | **P0（回滚完全失效）** |
+
+**修复**：
+| 文件 | 行 | 变更 |
+|------|----|------|
+| `tools.py` | 672 | `self._do_reload` → `await self._do_reload` |
+| `tools.py` | 1100-1101 | 新增 `await self._do_reload(rel)`（rollback 恢复文件后立即重载） |
+
+**影响分析**：这解释了为什么用户之前看到"已改善"但行为没变。文件写入磁盘了，pycache 清了，但 `importlib.reload` 从未被调用。所有自愈操作声称成功但实际零生效。同样，回滚也是"恢复文件不改行为"。
+
+**剩余限制**：核心模块（`loop.py`/`handler.py`/`oaa_agent.py`/`app.py`）仍然不能热重载，`reload_module` 明确阻止。修改这些模块后 agent 应告知用户需要重启。
+
+### IdleInspector 冷却修正
+
+| 文件 | 行 | 变更 | 说明 |
+|------|----|------|------|
+| `idle_inspector.py` | 52 | `_last_check: float = 0.0` → `time.time()` | 启动时从当前时间开始冷却，而非从 epoch。避免首次 `process_message` 时立即触发巡检，防止巡检提案混入启动消息 |
+| `idle_inspector.py` | 24 | `_INSPECTION_COOLDOWN = 300` → `600` | 巡检间隔从 5 分钟扩大到 10 分钟，减少推送频率 |
+
+### WeChat 启动通知 context_token 分析
+
+微信首次主动推送（启动通知）未收到的原因：iLink API 需要 `context_token` 才能路由消息到用户微信。`context_token` 只在用户主动给机器人发消息时获得（`get_updates` → 保存 `context_token`）。主动外发时 `ctx=""`，API 返回 success 但消息**不送达**。
+
+用户后续收到的消息都是在回复机器人消息之后（此时已有 context_token）。修复方向：启动通知改为延迟发送（用户首次交互时附带积压消息），或跳过微信主动通知仅推送 Desktop。
+
+### 自愈闭环断点分析（5 个问题对应根因）
+
+| # | 用户现象 | 根因 | 修复方向 |
+|---|---------|------|---------|
+| 1 | 同意修复后 agent 问"确认什么？" | 巡检提案是纯文本，无结构化 action ID。用户"确认"无法映射到修复执行 | Proposal 结构化（JSON 存储 + action 序列 + 执行引擎） |
+| 2 | "已记住忽略 wechat_contacts" 但下次巡检依然报告 | LLM 把规则写进了 HOT memory，但 `_check_usage_patterns()` 不读 HOT memory。两套系统各过各的 | IdleInspector 加可持久化忽略列表，所有 check 方法统一查 |
+| 3 | GUI 自动化：agent 说"沙箱限制了"，没自己装 pywinauto | 自主性不足。agent 应主动用 `shell_run pip install pywinauto` 解决问题而不是报告限制 | A2 Agent 自主性改造 — 系统提示词强化主动性 |
+| 4 | 重复接收相同巡检消息 | dedup 按全文 hash，但"失败 4 次"→"5 次"文本不同，hash 不同，永远命中不了 | dedup 按 tool 名 + 提案类型去重，剔除数字部分 |
+| 5 | `self_improve` 改了代码但行为不变 | `_do_reload` 缺 `await`，模块从未重载（本会话已修复） | ✅ 已修复 |
+
+### Agent 自主性现状评估
+
+**问题本质**：agent 的操作停留在"LLM 对话层"，没有转化为"系统层状态变更"。具体表现：
+
+| 场景 | agent 行为 | 实际需要的 |
+|------|-----------|-----------|
+| 用户同意修复工具 | 回复"好的，已修复" | 调用 `read_own_source` + `self_improve` + `reload_module` |
+| 用户说"忽略 xxx" | 回复"已记住"并写 HOT memory | 调用 `idle_inspector.ignore_tool("xxx")` 持久化 |
+| 用户要求 GUI 自动化 | 报告"沙箱限制" | 直接 `shell_run pip install pywinauto` 装好 |
+| 检测到 wechat_contacts 失败 | 报告"累计失败 4 次" | 自己找 wechat-cli 装好解决 |
+
+**修复原则**：
+- agent 说"好"的时候，必须通过工具调用来执行，不能靠 LLM 口头承诺
+- 每个可持久化的操作（忽略、配置、规则）都必须有对应的工具方法
+- agent 遇到缺少的依赖应该自己安装，而不是报告"缺少依赖"
+
+### 进化工厂 — 设计讨论记录
+
+用户提出的进化工厂 UI 设计方案已记录，定义到分层实现计划：
+
+**第一层（闭环基础）** — Proposal 结构化 + 执行引擎
+- JSON 存储取代 `pending_proposals.md`
+- 提案包含：`problem`（现存问题）/ `benefit`（修复后效果）/ `actions`（精确修复动作序列）/ `status`（状态机）
+- 执行引擎按 action 序列自动执行，不依赖 LLM 二次理解
+- IdleInspector 可持久化忽略列表（`ignore_tool(tool, permanent)`）
+
+**第二层（进化工厂 UI）** — GUI 交互
+- 左侧导航新增"进化工厂"
+- 两个标签页：进化请求 / 进化结果
+- 三按钮：本次忽略 / 彻底忽略 / 同意
+- WebSocket 管理 API 支持
+
+**第三层（验证与回滚）** — 闭环质量保障
+- 执行后自动验证修复效果
+- 失败回滚 + 记录
+- 验证方案详见下方
+
+### 自愈闭环 & 回滚测试方案
+
+**测试 1：自愈闭环**
+1. 在 `tools.py` 制造可控语法错误
+2. 等待 IdleInspector 提案
+3. 用户确认 → ProposalExecutor 执行 action 序列
+4. 验证：工具恢复、模块已重载（进程内即时生效）
+
+**测试 2：回滚验证**
+1. 执行一次 `self_improve`
+2. 调用 `rollback_change` 回滚
+3. 验证文件恢复 + 模块重载
+
+**测试 3：核心模块变更**
+1. 对 `oaa_agent.py` 发起 `self_improve`
+2. 应返回"需重启"提示，不能静默失败
+
+---
+
+### 设计检视发现的关键断点
+
+| # | 断点 | 影响 | 严重度 |
+|---|------|------|--------|
+| 1 | `IdleInspector` 提案只发 GUI，不进 agent 消息流 | agent 根本看不到自愈机会，所有自我优化提案成死信 | P0 |
+| 2 | `EvolutionEngine` 创建时 `llm=None` | `extract_and_crystallize` 永远返回 None，L3 结晶无法工作 | P0 |
+| 3 | 技能使用 ≥3 次无自动结晶触发 | 轨迹记了但技能不会自动固化 | P1 |
+| 4 | `self_improve` 改 Python 文件无默认语法检查 | verify 参数常被省略，改代码可能写坏语法 | P1 |
+| 5 | agent 缺少运行时健康诊断工具 | 只能查进程死活，不能查 WebSocket 端口、内存水位、错误率 | P1 |
+
+### 修复清单
+
+| # | 变更 | 文件 | 说明 |
+|---|------|------|------|
+| 1 | `self_improve` 加默认 verify | `tools.py` | 修改 `.py` 文件时自动 `python -c "import ast; ast.parse(...)"` 语法检查 |
+| 2 | EvolutionEngine 接入 LLM | `app.py` | `evolution._llm = self.agent.llm`，L3 结晶不再返回 None |
+| 3 | 自动结晶触发器 | `engine.py` | `record_skill_usage` 中 ≥3 次且无结晶 → 自动 `extract_and_crystallize` |
+| 4 | IdleInspector→Agent 回路 | `memory_manager.py`, `idle_inspector.py`, `oaa_agent.py` | 提案写入 `pending_proposals.md`，通过 `build_memory_prompt` 注入 agent 系统提示词 |
+| 5 | `health_diagnose` 工具 | `tools.py` | 检查 WS 端口、内存、错误数、进程状态 |
+
+运行完整 `test_autonomy.py` 验证 ModuleNotFound 自动恢复修复效果：
+
+```bash
+taskkill //F //FI "WINDOWTITLE eq run_app*" 2>/dev/null
+rm -f std6.out
+rm -rf "E:/GenericAgent/data/memory/trajectories"
+PYTHONUNBUFFERED=1 python test_autonomy.py
+```
+
+预期改进：
+- 场景 A 的 `code_exec` 错误 → 触发 `pip install` recovery hint → 可能转为 PASS
+- 场景 B 的 LLM RateLimitError 观察（是否为 Sensenova 模型特性）
+
+### 优先级 2 — 修复技能详情面板位置（Task #8）
+
+技能详情面板显示在被点击技能下方，而非浮动定位。
+
+### 优先级 3 — 调查自生技能数据来源及应用按钮回退问题（Task #9）
 
 ---
 
@@ -622,3 +863,124 @@ IdleInspector 只做模式检测和提案，不做决定。`code_exec` 出错时
 | `tool_schema.py` | `word_doc`+`excel_xlsx` schema 升级 | 描述从 1 行扩充到含领域规则，参数从 2-3 个扩充到 5-7 个，含枚举/类型约束 |
 
 **变更统计**：删除 5 个技能目录（3 冗余 + 2 吸收入工具），增强 2 个 OAA 工具，26 个文件无修改。
+
+---
+
+## 本次会话（2026-05-18 续）— SkillView Bug 修复 + 全功能集成测试
+
+### GUI CDP 测试（10/10 通过）
+
+新增 2 个测试场景：
+
+| # | 测试 | 说明 |
+|---|------|------|
+| 1-7 | 原 7 项测试（Chat/Skills/Connections/Tasks/Files/Settings/Return） | 全部通过 |
+| **8** | **SkillView tab switching** | 3 个标签按钮找到；evolution → market → repo 标签切换均成功 |
+| **9** | **SkillView skill detail** | 技能卡片点击后详情面板展开，显示 "self-improving-agent-3.0.5" |
+| 10 | Console errors | 0 JS 错误 |
+
+### 修复的 Bug
+
+| # | Bug | 根因 | 修复 |
+|---|-----|------|------|
+| B4 | 技能仓库一直显示加载中 | `v-if="expandedSkill === skill.name"` 在 `v-for` 同级引用循环变量 `skill` → `undefined.name` 抛 TypeError → Vue fallback 到旧 vnode 树（loading 状态），组件永久卡死 | ① `expandedSkill === skill.name` → `expandedSkill && isExpandedSkillInGroup(group)` ② `loadSkill(skill.name)` → `loadSkill(expandedSkill)` ③ 添加 `isExpandedSkillInGroup()` 安全函数 |
+| B5 | 自生技能标签点击无反应 | 同上—render 崩溃后所有 state 变更无法触发 DOM 更新 | 同上 |
+| B6 | 技能市场无法切换回仓库/自生技能 | 同上 | 同上 |
+| B7 | `<template v-else>` 兼容性 | Vue 3.4 + Vite 5 下多子节点 fragment 编译可能有边缘问题 | 替换为 `<div v-else class="tab-content-inner">` |
+| B8 | 缺少 `:key` 属性 | Vue 3 patch flag 优化下无 key 的 tab 元素可能复用旧 DOM | 添加 `key="repo/evolution/market"` |
+| B9 | `allSkills` 类型不匹配 | `allSkills.value = skills as any` 导致 `BackendSkill[]` 赋给 `Skill[]` | 改用 `newGroups.flatMap(g => g.skills)` |
+| B10 | KeepAlive 激活后数据不刷新 | 缺少 `onActivated` 生命周期钩子 | 添加 `onActivated` 异步刷新 |
+
+**文件**：`gui/src/views/SkillView.vue` | **测试**：`test_gui_cdp.py`（10 测试全部通过）
+
+### 测试结果汇总
+
+| 测试套件 | 通过/总数 |
+|---------|----------|
+| WS E2E（聊天/设置/模型切换） | 3/3 |
+| 单元测试（extended_tools / permissions） | 10/10 |
+| GUI CDP 浏览器测试 | **10/10** |
+| **合计** | **23/23** |
+
+---
+
+## 本次会话（2026-05-19）— `ai_search` 统一搜索路由工具
+
+### 背景
+
+OAA 内置的 `web_search`/`web_scan` 仅支持百度搜索，质量低、易被反爬。用户持有 Tavily / Exa / AnySearch 三个 AI 搜索 API key，需统一整合。
+
+### 实施
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `config.py` | +`SearchConfig` dataclass | 3 个字段：`tavily_api_key`/`exa_api_key`/`anysearch_api_key`，挂到 `AppConfig.search` |
+| `agent/ai_search_tool.py` | **新增** | `AiSearchTools` handler，含自动意图检测 + 引擎路由 + 故障 fallback |
+| `agent/oaa_agent.py` | 注册 `AiSearchTools` | 加入 `_MergedHandler` 后端的 `_search`，schema 加入 `_tools_schema` |
+| `~/OAA/config.json` | +`search` 段 | 写入用户提供的 3 个 API key |
+
+### 路由策略
+
+```
+ai_search(query, intent="auto", region="auto", max_results=10, domain="")
+  ├── intent="lead_gen"        → Exa（结构化输出 + 公司/人垂直索引）
+  ├── query含中文/region=cn    → AnySearch（国内站点，cn 区域）
+  ├── intent="deep_research"   → Exa Deep（多步推理 + 摘要）
+  └── 默认（general/intl）     → Tavily（最快，~180ms）
+```
+
+- **自动意图检测**：`company/email/供应商` → lead_gen；`compare/分析/对比` → deep_research；含中文 → 区域 cn
+- **故障容错**：主引擎失败自动 fallback（Tavily→Exa→AnySearch→Tavily）
+- **统一输出**：三个引擎统一返回 `{title, url, content, score}` 格式
+
+### 对比：AnySearch vs Tavily vs Exa
+
+| 维度 | Tavily | Exa | AnySearch |
+|------|--------|-----|-----------|
+| 定位 | Agent 上网层 | 结构化搜索 API | 搜索聚合网关 |
+| 核心能力 | search/extract/crawl/research | search/contents/answer/deep-search | 多 provider 路由+融合重排 |
+| 特色 | 安全过滤、内容分块、180ms | 结构化输出、公司/人垂直索引 | 22 领域、cn/intl 双区域 |
+| 定价 | 免费 1000/月，PAYG $0.008/credit | 免费 1000/月，Search $7/千次 | 匿名免费 + API Key 付费 |
+| 适用场景 | 通用搜索（最快） | 批量查公司/人（结构化） | 中文/国内/多源验证 |
+
+### 设计决策
+
+- **不做硬编码**：API key 写入 `config.json`（不在源码中），换 key 无需改代码
+- **单工具入口**：LLM 只看到一个 `ai_search`，背后自动路由，减少 LLM 选择负担
+- **非 MCP 方案**：直接实现为 OAA 内置 handler，避免 MCP Server 进程管理开销
+
+### 待优化
+
+- 当前 Exa/AnySearch/Tavily 返回字段差异通过工具层统一化，部分信息（如 quality_score）在统一过程中丢失
+- 未来可考虑增加搜索结果缓存减少重复 API 调用
+
+---
+
+## A1 — 聊天历史持久化（对话摘要存档）
+
+| 文件 | 变更 | 状态 | 说明 |
+|------|------|------|------|
+| `oaa/agent/conversation_archiver.py` | **新增** | ✅ 已完成 | ConversationArchiver 类：LLM 摘要生成 → 结构化存档 → 分层搜索 |
+| `oaa/agent/oaa_agent.py` | +3 处改动 | ✅ 已完成 | 初始化 archiver、注入 build_system_prompt、process_message 触发归档 |
+| `oaa/agent/tools.py` | +1 工具 | ✅ 已完成 | `chat_history_search` — agent 搜索历史对话摘要 |
+| `oaa/app.py` | +1 行 | ✅ 无需改动 | archiver 在 OAAAgent 内部完成初始化（已有 llm 引用） |
+
+**设计要点**：
+- 摘要格式：固定字段（用户目标/关键信息/完成事项/遗留问题），每条约 600-1000 字节
+- 触发策略：每 10 条消息 + 对话结束双重触发，asyncio.create_task 后台执行不阻塞
+- 预热机制：build_system_prompt 自动注入最近 3 条摘要到系统提示词
+- 搜索分层：① warm/conversations/ 摘要关键词匹配 → ② SQLite FTS5 原始消息，按得分合并排序
+- 容错：LLM 摘要失败静默跳过，目录自动创建，并发归档不阻塞
+
+### Bug 修复 — 用户测试反馈
+
+| # | 问题 | 根因 | 修复 |
+|---|------|------|------|
+| F1 | Agent 声称文件已保存但未调用 `file_write` | LLM 虚构操作 | `system_rules.py` 新增"禁止虚构操作"规则 |
+| F2 | Agent 说"微信未配置"拒绝发送文件 | LLM 混淆 iLink 与 wechat-cli 工具 | `oaa_agent.py`: `_build_channel_status()` 动态注入各通道连接状态到 system prompt，二愣每次醒来看到实时状态表而非静态规则；`tool_schema.py` 描述同步更新 |
+| F3 | Agent 让用户手动操作 | 违反系统规则 | 第 17 条"禁止要求用户手动操作"强化 |
+| F4 | BadRequestError 覆盖对话输出 | ① 未加入非重试列表 ② 错误直接以 done 覆盖 | `loop.py`: BadRequestError 等 7 种错误不重试 + 有历史输出时用 llm_output 追加 |
+| F5 | IdleInspector 未推送到微信 | `_bot_user_id` 未持久化，重启后为空 | `config.py` + `management.py` + `wechat_ilink.py` + `app.py` — QR 确认时保存 `ilink_user_id`，启动时恢复 |
+| F6 | IdleInspector 误报 stub 工具失败 | `wechat_contacts` 等预期错误被视为 bug | `idle_inspector.py` 加 `_STUB_TOOLS` 过滤，跳过已知 stub |
+| F7 | Agent 不了解自身运行时状态 | 无通道连接状态注入 | `oaa_agent.py` `_build_channel_status()` 动态注入各通道连接状态到 system prompt |
+| F8 | 启动后用户不知道通道状态 | 无主动通知 | `app.py` `_startup_check()` 启动后推送通道状态到 Desktop + WeChat |

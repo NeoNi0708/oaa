@@ -669,7 +669,7 @@ class AtomicTools(BaseHandler):
         # Success: clear pycache, reload, record
         self._clear_pycache(full_path)
         rel_path = os.path.relpath(full_path, OAA_ROOT)
-        reload_msg = self._do_reload(rel_path)
+        reload_msg = await self._do_reload(rel_path)
         desc = description or f"self_improve: replaced unique text in {path}"
         self._record_change(full_path, desc, backup_path)
         return {
@@ -1098,6 +1098,9 @@ class AtomicTools(BaseHandler):
             import shutil
             shutil.copy2(backup_path, src_path)
             self._clear_pycache(src_path)
+            # Reload module so rollback takes effect immediately
+            rel = os.path.relpath(src_path, OAA_ROOT)
+            reload_msg = await self._do_reload(rel)
             # Mark as rolled back in changelog
             self._record_change(src_path, f"回滚变更 #{idx}: {target['change']}", "")
 
