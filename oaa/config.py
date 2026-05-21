@@ -74,11 +74,57 @@ class AppConfig:
         "permission_level": "auto",
     })
 
+    @staticmethod
+    def _redact(value: str) -> str:
+        """Return a redacted version of a secret (show last 4 chars)."""
+        if not value or len(value) < 8:
+            return "********"
+        return value[:4] + "****" + value[-4:]
+
+    def to_redacted_dict(self) -> dict:
+        """Return a copy of the config dict with credential fields masked."""
+        data = asdict(self)
+        # Redact LLM API keys
+        if isinstance(data.get("model"), dict) and data["model"].get("api_key"):
+            data["model"]["api_key"] = self._redact(data["model"]["api_key"])
+        if isinstance(data.get("models"), dict):
+            for prov, entries in data["models"].items():
+                if isinstance(entries, list):
+                    for entry in entries:
+                        if isinstance(entry, dict) and entry.get("api_key"):
+                            entry["api_key"] = self._redact(entry["api_key"])
+                elif isinstance(entries, dict) and entries.get("api_key"):
+                    entries["api_key"] = self._redact(entries["api_key"])
+        # Redact channel secrets
+        if isinstance(data.get("wechat"), dict) and data["wechat"].get("iLink_token"):
+            data["wechat"]["iLink_token"] = self._redact(data["wechat"]["iLink_token"])
+        if isinstance(data.get("dingtalk"), dict):
+            if data["dingtalk"].get("client_secret"):
+                data["dingtalk"]["client_secret"] = self._redact(data["dingtalk"]["client_secret"])
+            if data["dingtalk"].get("client_id"):
+                data["dingtalk"]["client_id"] = self._redact(data["dingtalk"]["client_id"])
+        if isinstance(data.get("feishu"), dict):
+            if data["feishu"].get("app_secret"):
+                data["feishu"]["app_secret"] = self._redact(data["feishu"]["app_secret"])
+            if data["feishu"].get("app_id"):
+                data["feishu"]["app_id"] = self._redact(data["feishu"]["app_id"])
+        # Redact search API keys
+        if isinstance(data.get("search"), dict):
+            search_keys = ("tavily_api_key", "exa_api_key", "anysearch_api_key")
+            for key in search_keys:
+                if data["search"].get(key):
+                    data["search"][key] = self._redact(data["search"][key])
+        return data
+
     def save(self, path: str = ""):
         path = path or DEFAULT_CONFIG_PATH
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(asdict(self), f, indent=2, ensure_ascii=False)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass  # Best-effort on Windows
 
     @classmethod
     def _migrate_models(cls, raw: dict) -> dict:

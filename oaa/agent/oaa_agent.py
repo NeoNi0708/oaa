@@ -43,6 +43,7 @@ class _MergedHandler(BaseHandler):
         self._extended = extended
         self._browser = browser
         self._search = search
+        self._dynamic_tools: dict[str, dict] = {}
 
     def __getattr__(self, name: str):
         if not name.startswith("do_"):
@@ -59,8 +60,9 @@ class _MergedHandler(BaseHandler):
         # Check decorator registries on each backend
         tool_name = name[3:]  # strip "do_"
         for backend in (self._atomic, self._extended, self._browser, self._search):
-            if tool_name in backend._tool_registry:
-                return backend._tool_registry[tool_name]
+            registry = getattr(backend, '_tool_registry', {})
+            if tool_name in registry:
+                return registry[tool_name]
         # Fall back to dynamic tools
         if tool_name in self._dynamic_tools:
             return lambda args: self._extended._run_dynamic_tool(tool_name, args)

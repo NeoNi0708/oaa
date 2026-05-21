@@ -32,19 +32,22 @@ class EvolutionEngine:
 
     def _load_stats(self):
         if os.path.exists(self._stats_path):
-            with open(self._stats_path, encoding="utf-8") as f:
-                self.stats = json.load(f)
-            logger.info("EvolutionEngine loaded stats from %s (skill_usage=%s)",
-                        self._stats_path, list(self.stats.get("skill_usage", {}).keys()))
-        else:
-            self.stats = {
-                "skill_usage": {},
-                "sop_executions": {},
-                "sop_skips": {},
-                "parameter_defaults": {},
-                "crystallized": [],
-                "suggestions": [],
-            }
+            try:
+                with open(self._stats_path, encoding="utf-8") as f:
+                    self.stats = json.load(f)
+                logger.info("EvolutionEngine loaded stats from %s (skill_usage=%s)",
+                            self._stats_path, list(self.stats.get("skill_usage", {}).keys()))
+                return
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning("Failed to load evolution stats (%s) — using empty stats", exc)
+        self.stats = {
+            "skill_usage": {},
+            "sop_executions": {},
+            "sop_skips": {},
+            "parameter_defaults": {},
+            "crystallized": [],
+            "suggestions": [],
+        }
 
     def _save_stats(self):
         Path(self._stats_path).parent.mkdir(parents=True, exist_ok=True)

@@ -643,6 +643,9 @@ class AtomicTools(BaseHandler):
 
         # Verification (if command provided)
         if verify_cmd:
+            if not await self._confirm("shell_run", f"self_improve verify: {verify_cmd[:200]}"):
+                self._restore_backup(full_path, backup_path)
+                return {"status": "error", "msg": "Verify command not permitted"}
             import subprocess
             try:
                 proc = await asyncio.create_subprocess_shell(

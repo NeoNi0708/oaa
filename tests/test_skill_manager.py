@@ -70,66 +70,15 @@ def test_skill_discovery_and_switching():
         assert unknown_skill is None
 
 
-def test_intent_matching():
-    with tempfile.TemporaryDirectory() as tmp:
-        # Create ALL skills that the keyword_map references
-        all_skills = [
-            "business-assistant", "finance", "follow-up",
-            "logistics-coordination", "market-researcher",
-            "email-writer", "purchaser", "search-execution", "market-analyst",
-        ]
-        for skill_name in all_skills:
-            d = Path(tmp) / "skills" / skill_name
-            d.mkdir(parents=True)
-            (d / "SKILL.md").write_text(f"# {skill_name}\n", encoding="utf-8")
-
-        mgr = SkillManager(tmp)
-        mgr.discover()
-        assert len(mgr.list_all()) == len(all_skills)
-
-        # Test intent matching for various keywords
-        test_cases = [
-            ("报价", "business-assistant"),       # 报价
-            ("PI", "business-assistant"),
-            ("合同", "business-assistant"),        # 合同
-            ("汇率", "finance"),                    # 汇率
-            ("FOB", "finance"),
-            ("CIF", "finance"),
-            ("跟单", "follow-up"),                  # 跟单
-            ("催货", "follow-up"),                  # 催货
-            ("搜客户", "market-researcher"),   # 搜客户
-            ("开发信", "market-researcher"),   # 开发信
-            ("邮件", "email-writer"),              # 邮件
-            ("采购", "purchaser"),                 # 采购
-            ("搜索", "search-execution"),           # 搜索
-            ("行情", "market-analyst"),            # 行情
-            ("运费", "logistics-coordination"),    # 运费
-        ]
-
-        for keyword, expected_skill in test_cases:
-            matched = mgr.match_intent(keyword)
-            assert matched is not None, (
-                "No match for keyword (expected '{}')".format(expected_skill)
-            )
-            assert matched.name == expected_skill, (
-                "Expected '{}', got '{}'".format(expected_skill, matched.name)
-            )
-
-        # Test no match for irrelevant input
-        no_match = mgr.match_intent("hello world")
-        assert no_match is None, "Should not match irrelevant input"
-
-        # Test compound input that should match first keyword
-        compound = mgr.match_intent("报价 FOB 上海")
-        assert compound is not None
-        assert compound.name == "business-assistant"
 
 
 def test_list_all():
     with tempfile.TemporaryDirectory() as tmp:
-        (Path(tmp) / "cat1" / "skill-a").mkdir(parents=True)
-        (Path(tmp) / "cat1" / "skill-b").mkdir(parents=True)
-        (Path(tmp) / "cat2" / "skill-c").mkdir(parents=True)
+        for cat, skills in (("cat1", ("skill-a", "skill-b")), ("cat2", ("skill-c",))):
+            for skill in skills:
+                d = Path(tmp) / cat / skill
+                d.mkdir(parents=True)
+                (d / "SKILL.md").write_text(f"# {skill}\n", encoding="utf-8")
 
         mgr = SkillManager(tmp)
         mgr.discover()

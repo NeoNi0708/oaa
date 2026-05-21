@@ -122,9 +122,8 @@ class ManagementHandler:
     # ------------------------------------------------------------------
 
     def _handle_get_config(self, _payload: dict) -> dict:
-        """Return the full app configuration as a JSON-serializable dict."""
-        from dataclasses import asdict
-        return {"ok": True, "config": asdict(self._config)}
+        """Return the app configuration with credential fields redacted."""
+        return {"ok": True, "config": self._config.to_redacted_dict()}
 
     def _handle_save_config(self, payload: dict) -> dict:
         """Merge *payload.config* into current config and persist to disk."""
