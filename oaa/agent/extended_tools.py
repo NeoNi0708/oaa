@@ -406,15 +406,66 @@ class ExtendedTools:
         return {"status": "success", "plans": plans, "count": len(plans)}
 
     async def do_skill_search(self, args: dict) -> dict:
-        """Search ClawHub skill market (stub)."""
-        return {"status": "success", "results": [], "msg": "Skill market search stub"}
+        """Search ClawHub skill market or GitHub for reusable skills."""
+        query = args.get("query", "")
+        registry = args.get("registry", "https://mirror-cn.clawhub.com")
+        if not query:
+            return {"status": "error", "msg": "query is required"}
+        import requests
+        try:
+            resp = requests.get(f"{registry}/api/v1/search", params={"q": query}, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            results = data if isinstance(data, list) else data.get("results", data.get("skills", []))
+            return {
+                "status": "success",
+                "results": [{"slug": r.get("slug"), "name": r.get("name"), "description": r.get("description", "")} for r in results[:20]],
+                "count": len(results),
+                "source": registry,
+            }
+        except Exception as e:
+            return {"status": "error", "msg": f"搜索技能市场失败: {e}，可尝试 web_search 在 GitHub 上搜索"}
 
     async def do_skill_install(self, args: dict) -> dict:
-        """Install a skill from ClawHub (stub)."""
+        """Install a skill from ClawHub or GitHub."""
         slug = args.get("slug", "")
-        if not await self._confirm("skill_install", f"Install skill: {slug}"):
-            return {"status": "error", "msg": "Skill install not permitted"}
-        return {"status": "success", "msg": f"Skill '{slug}' install stub"}
+        url = args.get("url", "")
+        registry = args.get("registry", "https://mirror-cn.clawhub.com")
+        if not slug and not url:
+            return {"status": "error", "msg": "需要 slug（ClawHub 技能名）或 url（GitHub 地址）"}
+        import requests, io, os, tarfile, zipfile
+        if slug:
+            try:
+                resolve = requests.get(f"{registry}/api/v1/resolve", params={"slug": slug}, timeout=15)
+                resolve.raise_for_status()
+                info = resolve.json()
+                dl_path = info.get("downloadUrl", f"/api/v1/download/{slug}")
+                dl_url = f"{registry}{dl_path}" if dl_path.startswith("/") else dl_path
+                name = slug
+            except Exception as e:
+                return {"status": "error", "msg": f"解析技能 {slug} 失败: {e}"}
+        else:
+            dl_url = url
+            name = url.rstrip("/").split("/")[-1].replace(".git", "")
+        try:
+            resp = requests.get(dl_url, timeout=30)
+            resp.raise_for_status()
+            content = resp.content
+            skills_dir = os.path.join(self.data_dir, "skills", "community")
+            target = os.path.join(skills_dir, name)
+            os.makedirs(target, exist_ok=True)
+            if content[:2] == b'\x1f\x8b':
+                with tarfile.open(fileobj=io.BytesIO(content)) as tf:
+                    tf.extractall(target)
+            elif content[:4] == b'PK\x03\x04':
+                with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                    zf.extractall(target)
+            else:
+                with open(os.path.join(target, "SKILL.md"), "w", encoding="utf-8") as f:
+                    f.write(resp.text)
+            return {"status": "success", "msg": f"技能 '{name}' 已安装到 {target}", "path": target}
+        except Exception as e:
+            return {"status": "error", "msg": f"安装失败: {e}"}
 
     # ------------------------------------------------------------------
     # MCP (Model Context Protocol) management

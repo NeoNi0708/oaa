@@ -27,26 +27,23 @@ if TYPE_CHECKING:
 logger = get_logger("agent.idle_inspector")
 
 # Minimum seconds between idle inspections
-_INSPECTION_COOLDOWN = 600  # 10 minutes
+_INSPECTION_COOLDOWN = 1800  # 30 minutes (lineA — lightweight checks only)
 
 # Max times the same proposal is delivered before suppression
 _MAX_PROPOSAL_REPEATS = 3
 
 
 class IdleInspector:
-    """Checks for real tasks and improvement areas during idle time.
+    """Multi-line idle inspection: LineA(background), LineB(task-triggered), LineC(daily), LineD(immediate).
 
-    Flow:
-    1. Check TaskScheduler for due tasks -> propose execution
-    2. Check EvolutionEngine for auto-refinements -> propose self_improve
-    3. Check memory health (density, archives)
-    4. Check tool failures -> propose read_own_source + file_patch fix
-    5. Check correction patterns -> propose modify_own_prompt
-    6. All proposals stored in ProposalStore; text returned for notifications
-
-    Supports both on-demand (``inspect()``) and periodic (``start_background()``)
-    modes. The background task runs on ``_INSPECTION_COOLDOWN`` interval and
-    pushes proposals to a registered notification callback.
+    LineA — Background loop every ``_INSPECTION_COOLDOWN`` (30 min):
+        channel_health, memory_usage (lightweight, no LLM)
+    LineB — Task-triggered (对话完成 + idle ≥15 min):
+        tool_failures (current task only), usage_patterns (current task only)
+    LineC — Daily schedule (off-peak):
+        memory_health, correction_patterns
+    LineD — Immediate:
+        due_tasks (auto-execute, no confirmation needed)
     """
 
     def __init__(self, scheduler: Optional["TaskScheduler"] = None,
@@ -62,6 +59,9 @@ class IdleInspector:
         self._channel_adapters = channel_adapters or {}
         self._llm = llm
         self._last_check: float = time.time()
+        self._last_activity_time: float = time.time()
+        self._last_task_tools: set = set()
+        self._last_task_skills: set = set()
         # Background task support
         self._background_task: asyncio.Task | None = None
         self._notify_callback: Callable[[str], Coroutine] | None = None
@@ -76,6 +76,15 @@ class IdleInspector:
     def reset_cooldown(self):
         """Reset the cooldown timer so next check runs immediately."""
         self._last_check = 0.0
+
+    def set_last_activity_time(self):
+        """Record current time as last user activity (for lineB idle detection)."""
+        self._last_activity_time = time.time()
+
+    def record_task_context(self, tools: set, skills: set):
+        """Record tools/skills used in the most recent task (for lineB filtering)."""
+        self._last_task_tools = tools
+        self._last_task_skills = skills
 
     # ------------------------------------------------------------------
     # Ignore list — persistent tool/pattern suppression
@@ -138,12 +147,22 @@ class IdleInspector:
     async def start_background(self, interval: int = _INSPECTION_COOLDOWN):
         """Start the background inspection loop.
 
-        Runs ``inspect()`` every ``interval`` seconds and pushes any
-        proposal through the registered notification callback.
+        Runs an initial full-sweep inspection immediately, then continues
+        with ``inspect()`` every ``interval`` seconds, pushing any proposal
+        through the registered notification callback.
         """
         if self._background_task is not None:
             logger.warning("Background inspector already running")
             return
+
+        # Initial full-sweep: run all phases once immediately so proposals
+        # are available in EvolutionView without waiting for the first cycle.
+        self.reset_cooldown()
+        try:
+            await self._inspect_all_phases()
+        except Exception as exc:
+            logger.warning("Initial full-sweep inspection failed: %s", exc)
+
         self._background_task = asyncio.create_task(self._background_loop(interval))
         logger.info("IdleInspector background task started (interval=%ds)", interval)
 
@@ -160,98 +179,135 @@ class IdleInspector:
         logger.info("IdleInspector background task stopped")
 
     async def _background_loop(self, interval: int):
-        """Periodic inspection loop."""
+        """Periodic inspection loop — lineA(30min) + lineB(task-triggered, 15min idle)."""
         while True:
             await asyncio.sleep(interval)
             try:
+                # LineA + LineD: lightweight periodic checks
                 proposal = await self.inspect()
                 if proposal and self._notify_callback:
                     await self._notify_callback(proposal)
+
+                # LineB: task-triggered checks (only if idle >= 15 min since last task)
+                if self._last_task_tools and (time.time() - self._last_activity_time) >= 900:
+                    b_proposal = await self.inspect_line_b()
+                    if b_proposal and self._notify_callback:
+                        await self._notify_callback(b_proposal)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning("Background inspection failed: %s", exc)
 
+    async def _inspect_all_phases(self):
+        """Run all inspection phases once, creating structured proposals.
+
+        Does NOT send notifications through the callback — only populates
+        the ProposalStore so EvolutionView has data to display immediately.
+        """
+        for phase_method in [
+            self._check_due_tasks,
+            self._check_evolution_refinements,
+            self._check_usage_patterns,
+            self._check_memory_health,
+            self._check_tool_failures,
+            self._check_correction_patterns,
+            self._check_disk_usage,
+            self._check_channel_health,
+            self._check_memory_usage,
+        ]:
+            try:
+                if asyncio.iscoroutinefunction(phase_method):
+                    result = await phase_method()
+                else:
+                    result = phase_method()
+                if result and isinstance(result, str):
+                    await self._store_proposal(result)
+            except Exception as exc:
+                logger.debug("Startup phase %s: %s", phase_method.__name__, exc)
+
     async def inspect(self) -> str | None:
-        """Run idle inspection. Returns a proposal message and stores it for the agent."""
+        """Run lineA + lineD inspections (background, lightweight, every 30 min).
+
+        LineA: channel_health, memory_usage
+        LineD: due_tasks (auto-execute, no confirmation)
+        """
         now = time.time()
         if now - self._last_check < _INSPECTION_COOLDOWN:
             return None
         self._last_check = now
 
-        # Phase 1: Check for due tasks (real work)
+        # LineD: due tasks (immediate)
         proposal = self._check_due_tasks()
         if proposal:
-            await self._store_proposal(proposal)
-            return proposal
+            if await self._store_proposal(proposal):
+                return proposal
 
-        # Phase 2: Evolution-driven refinements (SOP skips, usage milestones)
-        proposal = self._check_evolution_refinements()
-        if proposal:
-            await self._store_proposal(proposal)
-            return proposal
-
-        # Phase 2b: Task/tool/skill usage analysis & improvement suggestions
-        proposal = await self._check_usage_patterns()
-        if proposal:
-            await self._store_proposal(proposal)
-            return proposal
-
-        # Phase 3: Memory health (density, archives)
-        proposal = self._check_memory_health()
-        if proposal:
-            await self._store_proposal(proposal)
-            return proposal
-
-        # Phase 4: Tool failure patterns → self_improve
-        proposal = await self._check_tool_failures()
-        if proposal:
-            await self._store_proposal(proposal)
-            return proposal
-
-        # Phase 5: Correction patterns → modify_own_prompt
-        proposal = await self._check_correction_patterns()
-        if proposal:
-            await self._store_proposal(proposal)
-            return proposal
-
-        # Phase 6: System health — disk usage
-        proposal = self._check_disk_usage()
-        if proposal:
-            await self._store_proposal(proposal)
-            return proposal
-
-        # Phase 7: Channel health
+        # LineA: channel health
         proposal = self._check_channel_health()
         if proposal:
-            await self._store_proposal(proposal)
-            return proposal
+            if await self._store_proposal(proposal):
+                return proposal
 
-        # Phase 8: Memory usage
+        # LineA: memory usage
         proposal = self._check_memory_usage()
         if proposal:
-            await self._store_proposal(proposal)
-            return proposal
+            if await self._store_proposal(proposal):
+                return proposal
 
         return None
 
-    async def _store_proposal(self, proposal_text: str):
-        """Store a proposal notification, respecting dedup limit."""
+    async def inspect_line_b(self) -> str | None:
+        """Run lineB inspections (task-triggered, filtered by last task context).
+
+        Only checks tools/skills used in the most recent task.
+        Requires 15+ min idle since last activity (checked by caller —
+        :meth:`_background_loop` checks ``_last_activity_time``).
+        """
+        proposal = await self._check_tool_failures(tool_filter=self._last_task_tools)
+        if proposal:
+            if await self._store_proposal(proposal):
+                return proposal
+
+        proposal = await self._check_usage_patterns(skill_filter=self._last_task_skills)
+        if proposal:
+            if await self._store_proposal(proposal):
+                return proposal
+
+        return None
+
+    async def _store_proposal(self, proposal_text: str, dedup_key: str = "") -> bool:
+        """Store a proposal notification, respecting dedup limit.
+
+        Args:
+            proposal_text: The notification text to display.
+            dedup_key: Stable identifier for dedup (e.g. tool name + type).
+                       If empty, derived from the emoji + first bolded item.
+        Returns:
+            True if the notification should be sent (within repeat limit),
+            False if suppressed (sent too many times already).
+        """
         if not self._memory_mgr:
-            return
-        import hashlib
-        phash = hashlib.md5(proposal_text.encode()).hexdigest()
+            return True  # allow through if we can't track
+        import hashlib, re as _re
+        if not dedup_key:
+            m = _re.search(r'([\U0001F300-\U0001FAFF]).*?\*\*(.+?)\*\*', proposal_text)
+            if m:
+                dedup_key = f"{m.group(1)}:{m.group(2)}"
+            else:
+                dedup_key = proposal_text[:80]
+        phash = hashlib.md5(dedup_key.encode()).hexdigest()
         if not self._dedup_path and self._memory_mgr:
             self.set_memory_path(str(self._memory_mgr._dir))
         self._load_dedup_tracker()
 
         count = self._proposal_tracker.get(phash, 0) + 1
         if count > _MAX_PROPOSAL_REPEATS:
-            logger.debug("Proposal %s suppressed (sent %d times)", phash, count - 1)
-            return
+            logger.info("Proposal %s suppressed (sent %d times)", dedup_key, count - 1)
+            return False
 
         self._proposal_tracker[phash] = count
         await self._save_dedup_tracker()
+        return True
 
     def _load_dedup_tracker(self):
         if self._dedup_path and os.path.exists(self._dedup_path):
@@ -294,7 +350,7 @@ class IdleInspector:
         return (
             "🔍 空闲巡检：发现以下定时任务已到执行时间：\n\n"
             + "\n".join(lines)
-            + "\n\n是否执行这些任务？请确认。"
+            + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
         )
 
     def _check_evolution_refinements(self) -> str | None:
@@ -335,10 +391,11 @@ class IdleInspector:
         return (
             "🔬 技能优化检测：发现以下可优化项：\n\n"
             + "\n\n".join(lines)
-            + "\n\n是否执行这些优化？请确认。"
+            + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
         )
 
-    async def _check_usage_patterns(self) -> str | None:
+    async def _check_usage_patterns(self, skill_filter: set[str] | None = None,
+                                    tool_filter: set[str] | None = None) -> str | None:
         """Analyze task/tool/skill usage patterns and propose improvements.
 
         Creates structured proposals for skill crystallization, SOP skips,
@@ -360,6 +417,8 @@ class IdleInspector:
             if count < 5 or skill_name in crystallized_names:
                 continue
             if self.is_tool_ignored(f"crystal:{skill_name}"):
+                continue
+            if skill_filter is not None and skill_name not in skill_filter:
                 continue
             if self._proposal_store and self._proposal_store.has_pending_for_target(f"crystal:{skill_name}", "skill_crystallize"):
                 continue
@@ -387,6 +446,8 @@ class IdleInspector:
         sop_skips = stats.get("sop_skips", {})
         for skill_name, steps in sop_skips.items():
             if not isinstance(steps, dict):
+                continue
+            if skill_filter is not None and skill_name not in skill_filter:
                 continue
             for step_name, skip_count in steps.items():
                 if skip_count < 3:
@@ -441,6 +502,8 @@ class IdleInspector:
                             continue
                         if self.is_tool_ignored(tool):
                             continue
+                        if tool_filter is not None and tool not in tool_filter:
+                            continue
                         if self._proposal_store and self._proposal_store.has_pending_for_target(tool, "tool_fix"):
                             continue
                         suggestions_text.append(
@@ -455,7 +518,7 @@ class IdleInspector:
         proposal = (
             "📊 使用模式分析：发现以下可优化项：\n\n"
             + "\n".join(f"  - {s}" for s in suggestions_text)
-            + "\n\n是否进行优化？请确认。"
+            + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
         )
         return proposal
 
@@ -504,11 +567,11 @@ class IdleInspector:
         proposal = (
             "💡 空闲分析：发现以下可改进的方向：\n\n"
             + "\n".join(f"  - {s}" for s in suggestions)
-            + "\n\n是否进行优化？请确认。"
+            + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
         )
         return proposal
 
-    async def _check_tool_failures(self) -> str | None:
+    async def _check_tool_failures(self, tool_filter: set[str] | None = None) -> str | None:
         """Check logged tool failures and create structured proposals.
 
         When a tool fails ≥2 times, creates a ``Proposal`` with structured
@@ -527,9 +590,7 @@ class IdleInspector:
             return None
 
         # Skip known stub/limitation tools
-        _STUB_TOOLS = frozenset({
-            "wechat_contacts", "wechat_history", "wechat_sessions", "wechat_search",
-        })
+        _STUB_TOOLS = frozenset()
 
         tool_counts = Counter(f["tool"] for f in failures if f["tool"] not in _STUB_TOOLS)
 
@@ -538,6 +599,9 @@ class IdleInspector:
                 continue
             # Skip ignored tools
             if self.is_tool_ignored(tool):
+                continue
+            # Skip if not in tool_filter (lineB filtering)
+            if tool_filter is not None and tool not in tool_filter:
                 continue
             # Skip if proposal already exists for this tool
             if self._proposal_store and self._proposal_store.has_pending_for_target(tool, "tool_fix"):
@@ -619,7 +683,7 @@ class IdleInspector:
             return (
                 "🔧 空闲诊断：发现以下工具存在反复失败：\n\n"
                 + "\n\n".join(lines)
-                + "\n\n是否检查并自动修复？请确认。"
+                + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
             )
 
         return None
@@ -674,7 +738,7 @@ class IdleInspector:
                 + f"  - **{lesson}**（重复 {count} 次）\n"
                 + f"    操作: 用 ``modify_own_prompt action=write section=agents`` "
                 + "在 agents 段中加入该规则"
-                + "\n\n是否更新提示词以记住这些规则？请确认。"
+                + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
             )
 
         return None
@@ -702,7 +766,7 @@ class IdleInspector:
                     "  1. 删除旧的 __pycache__ 目录\n"
                     "  2. 清理 workspace 中不再需要的临时文件\n"
                     "  3. 检查 logs 目录是否有大文件\n\n"
-                    "是否执行磁盘清理？请确认。"
+                    "回复「确认」执行 / 「忽略」跳过（24h 内有效）"
                 ).format(pct, free_gb)
         except Exception as exc:
             logger.debug("Disk usage check failed: %s", exc)
@@ -733,7 +797,7 @@ class IdleInspector:
         return (
             "通道健康检查：发现以下通道问题：\n\n"
             + "\n".join(issues)
-            + "\n\n是否检查并修复？请确认。"
+            + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
         )
 
     # ------------------------------------------------------------------
@@ -758,7 +822,7 @@ class IdleInspector:
                     "  - 检查 message history 是否过长\n"
                     "  - 确认是否有未关闭的文件句柄\n"
                     "  - 必要时重启进程释放内存\n\n"
-                    "是否执行内存检查？请确认。"
+                    "回复「确认」执行 / 「忽略」跳过（24h 内有效）"
                 ).format(rss_mb, cpu_pct)
         except Exception as exc:
             logger.debug("Memory check failed: %s", exc)

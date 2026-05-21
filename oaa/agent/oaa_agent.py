@@ -22,6 +22,7 @@ from .skill_manager import SkillManager
 from .tool_schema import ATOMIC_TOOLS_SCHEMA, BROWSER_TOOLS_SCHEMA, DINGTALK_TOOLS_SCHEMA, EXTENDED_TOOLS_SCHEMA, FEISHU_TOOLS_SCHEMA, MCP_TOOLS_SCHEMA, WECHAT_TOOLS_SCHEMA
 from .tool_decorator import collect_tool_schemas
 from .tools import AtomicTools
+from .metrics import MetricsCollector
 
 logger = get_logger("agent.oaa_agent")
 
@@ -95,6 +96,11 @@ class OAAAgent:
         # Tiered memory system (HOT + corrections + warm/ + cold/)
         self.memory = MemoryManager(os.path.join(config.data_dir, "memory"))
 
+        # Metrics collector (proactivity + LLM stats)
+        self.metrics = MetricsCollector(config.data_dir)
+        if self.permissions:
+            self.permissions.set_metrics_collector(self.metrics)
+
         # Structured proposal system (replaces pending_proposals.md)
         from .proposal import ProposalStore
         self._proposal_store = ProposalStore(os.path.join(config.data_dir, "memory"))
@@ -127,6 +133,7 @@ class OAAAgent:
         self.atomic.set_archiver(self.archiver)
         self.atomic.set_proposal_store(self._proposal_store)
         self.atomic.set_idle_inspector(self._idle_inspector)
+        self.atomic.set_wechat_cli_path(config.wechat.wechat_cli_path)
         self.extended = ExtendedTools(
             config.data_dir, permissions=permissions, wechat_adapter=wechat_adapter,
             dingtalk_client_id=config.dingtalk.client_id,
@@ -305,7 +312,15 @@ class OAAAgent:
 ## 可用技能
 
 当遇到以下领域的任务时，调用 `skill_load("技能名称")` 加载对应技能的详细操作指南。
-加载后技能会提供专业知识、SOP 流程和注意事项。如果没有列出匹配的技能，直接用现有工具完成任务即可。
+加载后技能会提供专业知识、SOP 流程和注意事项。
+
+如果没有列出匹配的技能：
+1. 先用 `skill_search` 在 ClawHub 技能市场搜索现成的技能
+2. 或在 GitHub 上用 `web_search` 搜索开源技能
+3. 找到后用 `skill_install` 安装，再用 `skill_load` 加载
+4. 如果确实没有现成的，用 `skill_create` 自己创建一个 SKILL.md
+
+**不要问用户"需要什么技能"——你自己找或自己写。**
 
 {skill_listing}
 
@@ -320,7 +335,8 @@ class OAAAgent:
 - 多步任务 → 主动 `plan_create` 规划，逐步执行，每步完后自动进入下一步
 - 和用户说话简洁直接：不要铺垫、不要复述工具输出、不要"让我试试"
 - 全部完成后用 1-2 句话总结结果即可
-- **看到待处理提案时**：用 `proposal_list` 查看 → 用 `proposal_approve` 执行 → 报告结果。不需要先问用户"是否执行"。
+- **看到待处理提案时**：说明提案内容，等待用户确认后再执行。不要擅自操作。
+- **用户回复「确认」「好」「执行」「yes」时**：如果存在待处理提案，直接用 `proposal_approve(id)` 执行提案。不要反问"要处理什么业务"。
 - **遇到缺失依赖时**：直接 `shell_run pip install <包名>` 安装，装完继续工作。不要报告"缺少依赖"。
 - **能直接解决的问题就不要报告问题**：安装包、修复配置、清理缓存——自己动手。
 
@@ -372,6 +388,12 @@ code_exec 报 ModuleNotFoundError: No module named 'openpyxl'
 
         result = base_prompt + "\n\n" + awareness
 
+        # Inject proactivity and LLM metrics
+        if self.metrics:
+            metrics_block = self.metrics.get_system_prompt_block()
+            if metrics_block:
+                result += "\n\n" + metrics_block
+
         # Inject tiered memory (HOT + recent corrections)
         memory_prompt = self.memory.build_memory_prompt()
         result += "\n\n" + memory_prompt
@@ -422,6 +444,7 @@ code_exec 报 ModuleNotFoundError: No module named 'openpyxl'
             handler=handler,
             tools_schema=self._tools_schema,
             memory_mgr=self.memory,
+            metrics_collector=self.metrics,
         )
         loop.set_skill_context(system_prompt)
 
@@ -456,14 +479,12 @@ code_exec 报 ModuleNotFoundError: No module named 'openpyxl'
                         skill_loaded = chunk.get("args", {}).get("name", "") or None
                 elif chunk["type"] == "done":
                     final_result = chunk.get("content", "")
-                    # Idle inspection: check for due tasks or improvement areas
-                    if len(user_input) > 2:
-                        try:
-                            proposal = await self._idle_inspector.inspect()
-                            if proposal:
-                                yield {"type": "llm_output", "content": "\n\n---\n\n" + proposal}
-                        except Exception as exc:
-                            logger.warning("Idle inspection failed: %s", exc)
+                    # Record activity time + task context for lineB idle detection
+                    self._idle_inspector.set_last_activity_time()
+                    if trajectory:
+                        used_tools = {t["tool"] for t in trajectory}
+                        used_skills = {skill_loaded} if skill_loaded else set()
+                        self._idle_inspector.record_task_context(used_tools, used_skills)
                 yield chunk
         except asyncio.TimeoutError:
             timed_out = True
@@ -490,6 +511,11 @@ code_exec 报 ModuleNotFoundError: No module named 'openpyxl'
                 await self.memory.add_to_hot(
                     f"用技能「{skill_loaded}」完成了: {summary}"
                 )
+
+            # Flush metrics periodically
+            if self.metrics:
+                asyncio.create_task(self.metrics.flush_tool_stats())
+                asyncio.create_task(self.metrics.flush_llm_stats())
 
             # Archive conversation summary (every 10 messages, non-blocking)
             if self.archiver and final_result and history is not None:

@@ -117,6 +117,7 @@ class AtomicTools(BaseHandler):
         self._archiver: Optional["ConversationArchiver"] = None
         self._proposal_store = None
         self._idle_inspector = None
+        self._wechat_cli_path: str = ""
 
     def _resolve_path(self, path: str) -> str:
         """Resolve path relative to workspace, checking permissions if configured."""
@@ -137,6 +138,10 @@ class AtomicTools(BaseHandler):
     def set_idle_inspector(self, inspector):
         """Inject the IdleInspector for registering tool ignores."""
         self._idle_inspector = inspector
+
+    def set_wechat_cli_path(self, path: str):
+        """Set the path to wechat-cli binary for WeChat data tools."""
+        self._wechat_cli_path = path
 
     async def dispatch(self, tool_name: str, args: dict) -> Any:
         """Dispatch tool call and record successful completions for trust tracking."""
@@ -813,22 +818,41 @@ class AtomicTools(BaseHandler):
             await self._memory_mgr.add_to_hot(msg)
         return {"status": "success", "msg": "Reflection saved"}
 
-    # --- WeChat CLI tool stubs (wechat-cli not bundled yet) ---
+    # --- WeChat CLI tools (proxy to gateway.adapters.wechat_cli.WeChatCLI) ---
+
+    async def _wechat_cli_call(self, method: str, **kwargs) -> dict:
+        """Call a WeChatCLI method, returning a standard result dict."""
+        try:
+            from ..gateway.adapters.wechat_cli import WeChatCLI
+            cli = WeChatCLI(cli_path=self._wechat_cli_path)
+            fn = getattr(cli, method, None)
+            if fn is None:
+                return {"status": "error", "msg": f"WeChatCLI 没有方法: {method}"}
+            result = await fn(**kwargs)
+            if isinstance(result, str) and result.startswith("Error:"):
+                return {"status": "error", "msg": result[6:].strip()}
+            return {"status": "success", "data": result}
+        except FileNotFoundError:
+            return {"status": "error", "msg": "wechat-cli 未安装。请先安装 wechat-cli 或设置正确的路径。"}
+        except ImportError:
+            return {"status": "error", "msg": "WeChatCLI 模块不可用"}
+        except Exception as e:
+            return {"status": "error", "msg": f"wechat-cli 调用失败: {e}"}
 
     async def do_wechat_sessions(self, args: dict) -> dict:
-        return {"status": "error", "msg": "wechat-cli 未配置。请在设置中配置微信数据目录后重试。"}
+        return await self._wechat_cli_call("sessions", limit=args.get("limit", 20))
 
     async def do_wechat_history(self, args: dict) -> dict:
-        return {"status": "error", "msg": "wechat-cli 未配置。请在设置中配置微信数据目录后重试。"}
+        return await self._wechat_cli_call("history", chat_name=args.get("name", ""), limit=args.get("limit", 20))
 
     async def do_wechat_search(self, args: dict) -> dict:
-        return {"status": "error", "msg": "wechat-cli 未配置。请在设置中配置微信数据目录后重试。"}
+        return await self._wechat_cli_call("search", keyword=args.get("keyword", ""), chat=args.get("chat", ""), limit=args.get("limit", 20))
 
     async def do_wechat_contacts(self, args: dict) -> dict:
-        return {"status": "error", "msg": "wechat-cli 未配置。请在设置中配置微信数据目录后重试。"}
+        return await self._wechat_cli_call("contacts", query=args.get("query", ""))
 
     async def do_wechat_unread(self, args: dict) -> dict:
-        return {"status": "error", "msg": "wechat-cli 未配置。请在设置中配置微信数据目录后重试。"}
+        return await self._wechat_cli_call("unread", limit=args.get("limit", 20))
 
     @agent_tool(
         name="shell_run",

@@ -238,6 +238,23 @@ EXTENDED_TOOLS_SCHEMA = [
         }, "required": ["name", "description"]}
     }},
     {"type": "function", "function": {
+        "name": "skill_search",
+        "description": "Search ClawHub skill market or GitHub for reusable skills. Returns skill slug, name, and description. Use when no local skill matches the current task — find one before creating from scratch.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Search keywords (e.g. 'web search', 'pdf generation')"},
+            "registry": {"type": "string", "description": "Optional: ClawHub registry URL (default: https://mirror-cn.clawhub.com)"},
+        }, "required": ["query"]}
+    }},
+    {"type": "function", "function": {
+        "name": "skill_install",
+        "description": "Install a skill from ClawHub (by slug) or GitHub (by URL). Downloads and extracts to skills/community/ directory, then available via skill_load.",
+        "parameters": {"type": "object", "properties": {
+            "slug": {"type": "string", "description": "ClawHub skill slug (e.g. 'web-search'), returned by skill_search"},
+            "url": {"type": "string", "description": "Alternative: GitHub repo URL (e.g. https://github.com/user/skill-name)"},
+            "registry": {"type": "string", "description": "Optional: ClawHub registry URL (default: https://mirror-cn.clawhub.com)"},
+        }, "required": []}
+    }},
+    {"type": "function", "function": {
         "name": "feishu_cli_run",
         "description": "Execute any lark-cli command. Covers all 200+ lark-cli commands across 11 business domains not exposed by individual feishu_* tools.",
         "parameters": {"type": "object", "properties": {

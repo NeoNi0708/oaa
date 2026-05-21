@@ -82,6 +82,14 @@
           <button class="oaa-btn oaa-btn--secondary" @click="addModelEntry">+ 添加模型</button>
           <span v-if="currentProviderModels.length > 0" class="model-count">{{ currentProviderModels.length }} 个配置</span>
         </div>
+        <div class="section-actions">
+          <span v-if="modelStatus" :class="['save-status', 'save-status--' + modelStatusType]">{{ modelStatus }}</span>
+          <button class="oaa-btn oaa-btn--primary" @click="saveModel" :disabled="modelSaving">
+            <svg v-if="modelSaving" class="btn-spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 10 10H12V2z"/><path d="M12 2a10 10 0 0 1 10 10h-10V2z"/></svg>
+            保存模型配置
+          </button>
+        </div>
       </section>
 
       <!-- 数据目录 -->
@@ -98,6 +106,14 @@
             <input v-model="form.dataDir" type="text" class="oaa-input" placeholder="~/OAA" />
             <button class="oaa-btn oaa-btn--secondary" @click="browseDirectory">浏览</button>
           </div>
+        </div>
+        <div class="section-actions">
+          <span v-if="workspaceStatus" :class="['save-status', 'save-status--' + workspaceStatusType]">{{ workspaceStatus }}</span>
+          <button class="oaa-btn oaa-btn--primary" @click="saveWorkspace" :disabled="workspaceSaving">
+            <svg v-if="workspaceSaving" class="btn-spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+            保存工作目录
+          </button>
         </div>
       </section>
 
@@ -136,28 +152,26 @@
             style="margin-top: 8px;"
           ></textarea>
         </div>
+        <div class="section-actions">
+          <span v-if="permissionStatus" :class="['save-status', 'save-status--' + permissionStatusType]">{{ permissionStatus }}</span>
+          <button class="oaa-btn oaa-btn--primary" @click="savePermissions" :disabled="permissionSaving">
+            <svg v-if="permissionSaving" class="btn-spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            保存权限设置
+          </button>
+        </div>
       </section>
-
-      <!-- 保存 -->
-      <div class="save-row">
-        <span v-if="saveStatus" class="save-status">{{ saveStatus }}</span>
-        <button class="oaa-btn oaa-btn--primary" @click="saveSettings" :disabled="saving">
-          <svg v-if="saving" class="btn-spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-          <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-          保存设置
-        </button>
-      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
-import { useWebSocket, type MgmtResponse } from '../composables/useWebSocket'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
+import { useWebSocket } from '../composables/useWebSocket'
 
 declare const oaa: any
 
-const { sendRequest } = useWebSocket()
+const { sendRequest, configUpdated } = useWebSocket()
 
 const providerGroups = [
   {
@@ -314,9 +328,20 @@ const defaultForm = {
 }
 
 const form = reactive({ ...defaultForm })
-const saveStatus = ref('')
-const saving = ref(false)
 const configLoading = ref(true)
+
+// Per-section save state
+const modelSaving = ref(false)
+const modelStatus = ref('')
+const modelStatusType = ref<'success' | 'error'>('success')
+
+const workspaceSaving = ref(false)
+const workspaceStatus = ref('')
+const workspaceStatusType = ref<'success' | 'error'>('success')
+
+const permissionSaving = ref(false)
+const permissionStatus = ref('')
+const permissionStatusType = ref<'success' | 'error'>('success')
 
 // Multi-model helpers
 const currentProviderModels = computed(() => form.models[form.provider] || [])
@@ -411,44 +436,6 @@ function applyConfig(backendConfig: Record<string, unknown>) {
   form.blacklistPathsText = ((perms.blacklist_paths as string[]) || []).join('\n')
 }
 
-function buildConfigPayload() {
-  // Sync the currently-edited entry into the models store
-  syncEditingEntry()
-
-  // Ensure current provider exists in models
-  const updatedModels: Record<string, ModelStoreEntry[]> = { ...form.models }
-  if (!updatedModels[form.provider] || updatedModels[form.provider].length === 0) {
-    updatedModels[form.provider] = [{
-      name: form.modelName || form.modelId || form.provider,
-      api_key: form.apiKey,
-      model_id: form.modelId,
-      base_url: form.baseUrl,
-    }]
-  }
-
-  return {
-    model: {
-      provider: form.provider,
-      plan: form.planType,
-      api_format: form.apiFormat,
-      base_url: form.baseUrl,
-      api_key: form.apiKey,
-      model_id: form.modelId,
-      max_tokens: 8192,
-      temperature: 0.7,
-    },
-    models: updatedModels,
-    data_dir: form.dataDir,
-    permissions: {
-      blacklist_paths: form.blacklistPathsText
-        .split('\n')
-        .map(s => s.trim())
-        .filter(s => s.length > 0),
-      require_confirm: form.requireConfirm,
-    },
-  }
-}
-
 // ------------------------------------------------------------------
 // Lifecycle
 // ------------------------------------------------------------------
@@ -533,46 +520,139 @@ async function browseDirectory() {
 }
 
 // ------------------------------------------------------------------
-// Save
+// Save — each section saves independently
 // ------------------------------------------------------------------
 
-async function saveSettings() {
-  saving.value = true
-  saveStatus.value = ''
+async function saveModel() {
+  syncEditingEntry()
+  modelSaving.value = true
+  modelStatus.value = ''
 
-  const configPayload = buildConfigPayload()
+  const models = { ...form.models }
+  if (!models[form.provider] || models[form.provider].length === 0) {
+    models[form.provider] = [{
+      name: form.modelName || form.modelId || form.provider,
+      api_key: form.apiKey,
+      model_id: form.modelId,
+      base_url: form.baseUrl,
+    }]
+  }
 
-  // Try WebSocket backend first
+  const payload = {
+    model: {
+      provider: form.provider,
+      plan: form.planType,
+      api_format: form.apiFormat,
+      base_url: form.baseUrl,
+      api_key: form.apiKey,
+      model_id: form.modelId,
+      max_tokens: 8192,
+      temperature: 0.7,
+    },
+    models,
+  }
+
   try {
-    const resp = await sendRequest('save_config', { config: configPayload })
+    const resp = await sendRequest('save_config', { config: payload })
     if (resp.ok) {
-      saveStatus.value = '已保存到后端'
+      modelStatus.value = '✓ 模型配置已保存'
+      modelStatusType.value = 'success'
     } else {
-      saveStatus.value = `保存失败: ${resp.error || '未知错误'}`
+      modelStatus.value = '✗ ' + (resp.error || '保存失败')
+      modelStatusType.value = 'error'
     }
-    setTimeout(() => { saveStatus.value = '' }, 3000)
-    saving.value = false
-    return
+  } catch (e: any) {
+    modelStatus.value = '✗ 网络错误: ' + (e.message || '连接失败')
+    modelStatusType.value = 'error'
+  } finally {
+    modelSaving.value = false
+    setTimeout(() => { modelStatus.value = '' }, 4000)
+  }
+}
+
+async function saveWorkspace() {
+  workspaceSaving.value = true
+  workspaceStatus.value = ''
+
+  try {
+    const resp = await sendRequest('save_config', {
+      config: { data_dir: form.dataDir },
+    })
+    if (resp.ok) {
+      workspaceStatus.value = '✓ 工作目录已保存'
+      workspaceStatusType.value = 'success'
+    } else {
+      workspaceStatus.value = '✗ ' + (resp.error || '保存失败')
+      workspaceStatusType.value = 'error'
+    }
+  } catch (e: any) {
+    workspaceStatus.value = '✗ 网络错误: ' + (e.message || '连接失败')
+    workspaceStatusType.value = 'error'
+  } finally {
+    workspaceSaving.value = false
+    setTimeout(() => { workspaceStatus.value = '' }, 4000)
+  }
+}
+
+async function savePermissions() {
+  permissionSaving.value = true
+  permissionStatus.value = ''
+
+  const payload = {
+    permissions: {
+      blacklist_paths: form.blacklistPathsText
+        .split('\n')
+        .map(s => s.trim())
+        .filter(s => s.length > 0),
+      require_confirm: form.requireConfirm,
+    },
+  }
+
+  try {
+    const resp = await sendRequest('save_config', { config: payload })
+    if (resp.ok) {
+      permissionStatus.value = '✓ 权限设置已保存'
+      permissionStatusType.value = 'success'
+    } else {
+      permissionStatus.value = '✗ ' + (resp.error || '保存失败')
+      permissionStatusType.value = 'error'
+    }
+  } catch (e: any) {
+    permissionStatus.value = '✗ 网络错误: ' + (e.message || '连接失败')
+    permissionStatusType.value = 'error'
+  } finally {
+    permissionSaving.value = false
+    setTimeout(() => { permissionStatus.value = '' }, 4000)
+  }
+}
+
+// ------------------------------------------------------------------
+// React to backend-initiated config changes
+// ------------------------------------------------------------------
+
+let configWatchStop: (() => void) | null = null
+
+onMounted(() => {
+  configWatchStop = watch(configUpdated, () => {
+    // Don't overwrite fields while user is actively saving
+    if (modelSaving.value || workspaceSaving.value || permissionSaving.value) return
+    refreshConfig()
+  })
+})
+
+onUnmounted(() => {
+  configWatchStop?.()
+})
+
+async function refreshConfig() {
+  try {
+    const resp = await sendRequest('get_config')
+    if (resp.ok && resp.config) {
+      applyConfig(resp.config as Record<string, unknown>)
+    }
   } catch {
-    // Backend not available — fall through
+    // silent — user will see stale data until next manual refresh
   }
-
-  // Electron IPC fallback
-  if (window.oaa?.config?.save) {
-    try {
-      const ok = await window.oaa.config.save(JSON.stringify(configPayload))
-      saveStatus.value = ok ? '已保存（Electron）' : '保存失败'
-      setTimeout(() => { saveStatus.value = '' }, 3000)
-      saving.value = false
-      return
-    } catch { /* fall through */ }
-  }
-
-  // localStorage fallback
-  localStorage.setItem('oaa_settings', JSON.stringify(configPayload))
-  saveStatus.value = '已保存（本地）'
-  setTimeout(() => { saveStatus.value = '' }, 3000)
-  saving.value = false
 }
 </script>
 
@@ -674,9 +754,19 @@ async function saveSettings() {
 .checkbox-text { color: var(--oaa-color-secondary); font-size: var(--oaa-text-base); }
 .checkbox-text strong { color: var(--oaa-color-primary); }
 
-/* --- Save bar --- */
-.save-row { display: flex; align-items: center; justify-content: flex-end; gap: var(--oaa-space-3); padding-top: var(--oaa-space-2); }
-.save-status { font-size: var(--oaa-text-sm); color: var(--oaa-success); }
+/* --- Section save bar --- */
+.section-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--oaa-space-3);
+  margin-top: var(--oaa-space-5);
+  padding-top: var(--oaa-space-3);
+  border-top: 1px solid var(--oaa-border-subtle);
+}
+.save-status { font-size: var(--oaa-text-sm); }
+.save-status--success { color: var(--oaa-success); }
+.save-status--error { color: var(--oaa-danger, #ef4444); }
 
 .btn-spinner {
   animation: saveSpin 0.8s linear infinite;

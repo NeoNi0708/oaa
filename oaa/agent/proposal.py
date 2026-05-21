@@ -171,7 +171,18 @@ class ProposalStore:
             for action in p.get("actions", []):
                 lines.append(f"  1. `{action['tool']}` — {action.get('description', '')}")
             lines.append("")
-        lines.append("你可以用 `proposal_approve(id)` 批准执行某个提案，或用 `proposal_ignore(id, permanent=True/False)` 忽略。")
+        lines.append("## 用户确认路由")
+        lines.append("")
+        lines.append("当**用户消息**包含「确认」「好」「执行」「yes」「可以」「是」等确认意图时：")
+        lines.append("")
+        for p in pending:
+            lines.append(f"1. 调用 `proposal_approve(\"{p['id']}\")` 执行提案「{p['title']}」")
+        lines.append("")
+        lines.append("当用户说「忽略」「不用」「no」等否定意图时：")
+        for p in pending:
+            lines.append(f"1. 调用 `proposal_ignore(\"{p['id']}\")` 忽略本次提案")
+        lines.append("")
+        lines.append("执行完毕后用 1-2 句话向用户报告结果。")
         return "\n".join(lines)
 
 

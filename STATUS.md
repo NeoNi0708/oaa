@@ -1,6 +1,100 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-21 — 下一步计划第1-4项完成，第5项(P1)全部完成
+> 最后更新：2026-05-21 — 空闲巡检重构已实现
+
+---
+
+## 本次会话（2026-05-21 续）— 空闲巡检架构重构 + 4 项 Bug 修复
+
+### 空闲巡检新架构 ✅ 已实现
+
+巡检拆为四条独立线，互不干扰：
+
+**线A — 后台循环，每 30 分钟** ✅
+- 通道健康、内存占用
+- 轻量检查，不涉及 LLM 调用，发现异常直接写提案
+- `inspect()` 方法改造完成，仅保留 channel_health + memory_usage + due_tasks
+- `_INSPECTION_COOLDOWN = 1800`（30分钟）
+
+**线B — 任务后触发（对话完成 + 空闲 ≥15 分钟）** ✅
+- 新增 `_last_activity_time` / `record_task_context()` 追踪最后活跃时间
+- 新增 `inspect_line_b()` 方法，只检查本次任务用到的工具（`tool_filter`）和技能（`skill_filter`）
+- `_background_loop` 每次循环检查空闲 ≥15 分钟后触发线B
+- `process_message` 完成后记录任务上下文
+
+**线C — 日调度（低谷时段）** ⏳ 待实现
+- 记忆健康、修正模式
+- 自主学技能（逛 GitHub/clawhub 找更好的技能/插件）
+- 长周期、重任务，涉及 LLM 调用
+- 需要单独的 cron 调度机制
+
+**线D — 即时执行** ✅
+- 定时任务到期 → 自动执行，汇报结果，无需请示
+- `_check_due_tasks()` 仍在 `inspect()` 中保留
+
+**移除：**
+- 磁盘用量 → 改每周一次 ✅（从 `inspect()` 移除，保留在 `_inspect_all_phases()` 启动扫描中）
+
+### 通知文本统一
+- 所有巡检通知末尾改为 `回复「确认」执行 / 「忽略」跳过（24h 内有效）`
+- 去重 key 改用稳定标识符（emoji + 主题名），不再因失败次数变化而重复推送
+- `_store_proposal()` 返回 bool，`inspect()` 检查返回值实现真正抑制
+
+### 提示词优化
+- 系统提示中提案路由规则改为：说明提案内容 + 等待用户确认，不擅自操作
+- 用户回复确认/否定 → 路由到 proposal_approve / proposal_ignore
+- 去除"不需要先问用户"等负面行为描述，只保留触发→动作映射
+
+### 启动优化
+- 新增 `_inspect_all_phases()`，后台启动时立即全量扫描一轮
+- 所有阶段独立运行，单个失败不影响其余
+
+### 配置文件保存按钮
+- SettingsView.vue 模型配置区新增"保存模型配置"按钮（此前 saveModel 函数无按钮绑定）
+
+---
+
+### 背景
+
+EvolutionEngine / ProposalStore / PermissionsManager / Config 等持久化模块使用同步 `json.dump`/`json.load` 写入文件，运行在主协程中阻塞事件循环。高频使用（如 IdleInspector 循环创建提案、每轮 process_message 记录轨迹）下累积延迟影响 LLM 调用响应。
+
+### 变更
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `oaa/async_io.py` | **新增** | 集中式 async 文件 I/O 工具：`async_write`/`async_read`/`async_write_json`/`async_read_json`，均通过 `loop.run_in_executor` 委派到线程池 |
+| `oaa/evolution/engine.py` | 4 方法 → async | `_save_stats`, `analyze_for_suggestions`, `accept_suggestion`, `crystallize_skill` |
+| `oaa/agent/proposal.py` | 3 方法 → async | `ProposalStore._save`, `add`, `update_status` |
+| `oaa/auth/permissions.py` | 5 方法 → async | `_save_trust`, `record_tool_success/failure`, `reset_trust`, `add_blacklist_path` |
+| `oaa/agent/idle_inspector.py` | 6 方法 → async | `_save_dedup_tracker`, `_store_proposal`, `inspect`, `_check_usage_patterns`, `_check_tool_failures`, `_check_correction_patterns` |
+| `oaa/config.py` | `save()` → async | 保留 `_save_sync()` 供 CLI 向导 |
+| `oaa/gateway/management.py` | 6 handler → async | `_handle_save_config`, `_handle_switch_model`, `_handle_apply_evolution`, `_handle_get_evolution`, `_handle_proposal_ignore`, `_inject_proposal_result` |
+| `oaa/agent/tools.py` | +await ×4 | `record_tool_success`, `update_status`, `add_to_hot` ×2 |
+| `oaa/agent/oaa_agent.py` | +await ×4 | `inspect`, `record_trajectory`, `record_skill_usage`, `add_to_hot` |
+| `oaa/agent/loop.py` | +await ×1 | `add_to_hot` |
+| `tests/test_evolution.py` | +`@pytest.mark.asyncio` + `await` | 适配 async EvolutionEngine |
+| `tests/test_proposal.py` | 全量 async 化 | 14 个测试全部改为 async |
+| `test_components.py` | `asyncio.run()` 包装 | 适配 async evolution/memory 调用 |
+
+### Bug 修复
+
+- **`async_write_json` kwargs 未转发**：`run_in_executor` 不支持 **kwargs，通过 lambda 闭包绑定修复
+
+### 同步保留的方法
+
+- `idle_inspector._save_ignore_list` / `ignore_tool` — 小数据量、被 sync 上下文调用
+- `EvolutionEngine._load_stats` / `_get_trajectories_for_skill` — 仅 `__init__` 调用
+- `ProposalStore._load` — 仅 `__init__` 调用
+- `PermissionsManager._load_trust` — 仅 `__init__` 调用
+- `config._save_sync` — CLI 向导专用
+
+### 测试结果
+
+| 测试 | 结果 |
+|------|------|
+| 全部 78 项 pytest | ✅ 通过（1 skipped，0 regression） |
+| `test_evolution.py` | ✅ PASS（无 `_save_stats` 未 await 警告） |
+| `test_proposal.py` 14 项 | ✅ 全部 PASS |
 
 ---
 
