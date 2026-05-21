@@ -1,8 +1,10 @@
 """Configuration management — JSON file backed with env var override."""
+import asyncio
 import json
 import os
 from dataclasses import asdict, dataclass, field
 
+from .async_io import async_write_json
 from .logging_config import get_logger
 
 logger = get_logger("config")
@@ -116,15 +118,20 @@ class AppConfig:
                     data["search"][key] = self._redact(data["search"][key])
         return data
 
-    def save(self, path: str = ""):
+    async def save(self, path: str = ""):
         path = path or DEFAULT_CONFIG_PATH
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(asdict(self), f, indent=2, ensure_ascii=False)
+        await async_write_json(path, asdict(self), indent=2, ensure_ascii=False)
         try:
             os.chmod(path, 0o600)
         except OSError:
             pass  # Best-effort on Windows
+
+    def _save_sync(self, path: str = ""):
+        """Sync variant for CLI contexts (wizard)."""
+        path = path or DEFAULT_CONFIG_PATH
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(asdict(self), f, indent=2, ensure_ascii=False)
 
     @classmethod
     def _migrate_models(cls, raw: dict) -> dict:

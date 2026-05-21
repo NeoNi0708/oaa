@@ -142,7 +142,7 @@ class AtomicTools(BaseHandler):
         """Dispatch tool call and record successful completions for trust tracking."""
         result = await super().dispatch(tool_name, args)
         if self.permissions and isinstance(result, dict) and result.get("status") in ("success", "ok"):
-            self.permissions.record_tool_success(tool_name)
+            await self.permissions.record_tool_success(tool_name)
         return result
 
     async def _confirm(self, operation: str, details: str = "") -> bool:
@@ -720,7 +720,7 @@ class AtomicTools(BaseHandler):
             return {"status": "error", "msg": "key_info is required"}
 
         if self._memory_mgr:
-            return self._memory_mgr.add_to_hot(key_info)
+            return await self._memory_mgr.add_to_hot(key_info)
 
         # Fallback: direct file write
         self.working_memory["key_info"] = key_info
@@ -810,7 +810,7 @@ class AtomicTools(BaseHandler):
         if lesson:
             msg += f" → Lesson: {lesson}"
         if self._memory_mgr:
-            self._memory_mgr.add_to_hot(msg)
+            await self._memory_mgr.add_to_hot(msg)
         return {"status": "success", "msg": "Reflection saved"}
 
     # --- WeChat CLI tool stubs (wechat-cli not bundled yet) ---
@@ -1500,7 +1500,7 @@ class AtomicTools(BaseHandler):
         executor = ProposalExecutor()
         # The handler is self (AtomicTools is a BaseHandler with dispatch)
         result = await executor.execute(proposal, self)
-        self._proposal_store.update_status(
+        await self._proposal_store.update_status(
             result["id"], result["status"],
             executed_at=result.get("executed_at"),
             result=result.get("result"),

@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from ..async_io import async_write_json, async_read_json
 from ..logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -49,23 +50,21 @@ class EvolutionEngine:
             "suggestions": [],
         }
 
-    def _save_stats(self):
-        Path(self._stats_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(self._stats_path, "w", encoding="utf-8") as f:
-            json.dump(self.stats, f, indent=2, ensure_ascii=False)
+    async def _save_stats(self):
+        await async_write_json(self._stats_path, self.stats, indent=2, ensure_ascii=False)
 
     def set_llm(self, llm: "LLMClient"):
         """Inject or replace the LLM client (e.g. wired after agent init)."""
         self._llm = llm
 
-    def record_skill_usage(self, skill_name: str):
+    async def record_skill_usage(self, skill_name: str):
         """Level 1: Track how often each skill is used.
 
         Auto-triggers Level 3 crystallization when the skill hits 3+ uses
         and no crystallized version exists yet.
         """
         self.stats["skill_usage"][skill_name] = self.stats["skill_usage"].get(skill_name, 0) + 1
-        self._save_stats()
+        await self._save_stats()
 
         # Auto-crystallization: ≥3 uses, has LLM, no existing crystal → fire and forget
         count = self.stats["skill_usage"][skill_name]
@@ -79,8 +78,8 @@ class EvolutionEngine:
             except RuntimeError:
                 logger.debug("No event loop for auto-crystallization of '%s'", skill_name)
 
-    def record_sop_execution(self, skill_name: str, completed_steps: list[str],
-                             skipped_steps: list[str]):
+    async def record_sop_execution(self, skill_name: str, completed_steps: list[str],
+                                    skipped_steps: list[str]):
         """Level 1: Track SOP execution patterns."""
         self.stats["sop_executions"][skill_name] = self.stats["sop_executions"].get(skill_name, 0) + 1
         for step in skipped_steps:
@@ -88,10 +87,10 @@ class EvolutionEngine:
                 self.stats["sop_skips"][skill_name] = {}
             self.stats["sop_skips"][skill_name][step] = \
                 self.stats["sop_skips"][skill_name].get(step, 0) + 1
-        self._save_stats()
+        await self._save_stats()
 
-    def record_trajectory(self, skill_name: str, user_input: str,
-                          trajectory: list[dict], result: str):
+    async def record_trajectory(self, skill_name: str, user_input: str,
+                                 trajectory: list[dict], result: str):
         """Level 3: Save execution trajectory for potential skill crystallization."""
         entry = {
             "skill": skill_name,
@@ -101,10 +100,9 @@ class EvolutionEngine:
             "result": result[:500],
         }
         fname = f"traj_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{skill_name[:20]}.json"
-        with open(os.path.join(self._trajectory_dir, fname), "w", encoding="utf-8") as f:
-            json.dump(entry, f, indent=2, ensure_ascii=False)
+        await async_write_json(os.path.join(self._trajectory_dir, fname), entry, indent=2, ensure_ascii=False)
 
-    def analyze_for_suggestions(self) -> list[dict]:
+    async def analyze_for_suggestions(self) -> list[dict]:
         """Level 2: Detect patterns and generate improvement suggestions."""
         suggestions = []
         for skill, count in self.stats["skill_usage"].items():
@@ -128,15 +126,15 @@ class EvolutionEngine:
                         "skip_count": skip_count,
                     })
         self.stats["suggestions"] = suggestions
-        self._save_stats()
+        await self._save_stats()
         return suggestions
 
-    def accept_suggestion(self, idx: int) -> bool:
+    async def accept_suggestion(self, idx: int) -> bool:
         """Accept a suggestion (user confirmed)."""
         if idx >= len(self.stats["suggestions"]):
             return False
         self.stats["suggestions"].pop(idx)
-        self._save_stats()
+        await self._save_stats()
         return True
 
     # ------------------------------------------------------------------
@@ -265,12 +263,12 @@ class EvolutionEngine:
             sop_md = result.get("sop_md", "")
             if not skill_md:
                 return None
-            return self.crystallize_skill(skill_name, skill_md, sop_md)
+            return await self.crystallize_skill(skill_name, skill_md, sop_md)
         except Exception as exc:
             logger.error("Skill crystallization failed for %s: %s", skill_name, exc)
             return None
 
-    def crystallize_skill(self, name: str, skill_md: str, sop_md: str) -> str:
+    async def crystallize_skill(self, name: str, skill_md: str, sop_md: str) -> str:
         """Level 3: Crystallize a new skill from execution patterns."""
         target = Path(self.data_dir) / "skills" / "user_evolved" / name
         target.mkdir(parents=True, exist_ok=True)
@@ -281,5 +279,5 @@ class EvolutionEngine:
             "name": name,
             "created": datetime.now().isoformat(),
         })
-        self._save_stats()
+        await self._save_stats()
         return str(target)

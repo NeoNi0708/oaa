@@ -444,7 +444,7 @@ class AgentLoop:
                 if original_request:
                     hot_msg += f" 原始请求: \"{original_request}\""
                 try:
-                    self._memory_mgr.add_to_hot(hot_msg)
+                    await self._memory_mgr.add_to_hot(hot_msg)
                 except Exception as exc:
                     logger.warning("Failed to store compaction summary: %s", exc)
 

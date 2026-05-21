@@ -15,6 +15,7 @@ import time
 from collections import Counter
 from typing import TYPE_CHECKING, Callable, Coroutine, Optional
 
+from ..async_io import async_write_json
 from ..logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -163,7 +164,7 @@ class IdleInspector:
         while True:
             await asyncio.sleep(interval)
             try:
-                proposal = self.inspect()
+                proposal = await self.inspect()
                 if proposal and self._notify_callback:
                     await self._notify_callback(proposal)
             except asyncio.CancelledError:
@@ -171,7 +172,7 @@ class IdleInspector:
             except Exception as exc:
                 logger.warning("Background inspection failed: %s", exc)
 
-    def inspect(self) -> str | None:
+    async def inspect(self) -> str | None:
         """Run idle inspection. Returns a proposal message and stores it for the agent."""
         now = time.time()
         if now - self._last_check < _INSPECTION_COOLDOWN:
@@ -181,60 +182,60 @@ class IdleInspector:
         # Phase 1: Check for due tasks (real work)
         proposal = self._check_due_tasks()
         if proposal:
-            self._store_proposal(proposal)
+            await self._store_proposal(proposal)
             return proposal
 
         # Phase 2: Evolution-driven refinements (SOP skips, usage milestones)
         proposal = self._check_evolution_refinements()
         if proposal:
-            self._store_proposal(proposal)
+            await self._store_proposal(proposal)
             return proposal
 
         # Phase 2b: Task/tool/skill usage analysis & improvement suggestions
-        proposal = self._check_usage_patterns()
+        proposal = await self._check_usage_patterns()
         if proposal:
-            self._store_proposal(proposal)
+            await self._store_proposal(proposal)
             return proposal
 
         # Phase 3: Memory health (density, archives)
         proposal = self._check_memory_health()
         if proposal:
-            self._store_proposal(proposal)
+            await self._store_proposal(proposal)
             return proposal
 
         # Phase 4: Tool failure patterns → self_improve
-        proposal = self._check_tool_failures()
+        proposal = await self._check_tool_failures()
         if proposal:
-            self._store_proposal(proposal)
+            await self._store_proposal(proposal)
             return proposal
 
         # Phase 5: Correction patterns → modify_own_prompt
-        proposal = self._check_correction_patterns()
+        proposal = await self._check_correction_patterns()
         if proposal:
-            self._store_proposal(proposal)
+            await self._store_proposal(proposal)
             return proposal
 
         # Phase 6: System health — disk usage
         proposal = self._check_disk_usage()
         if proposal:
-            self._store_proposal(proposal)
+            await self._store_proposal(proposal)
             return proposal
 
         # Phase 7: Channel health
         proposal = self._check_channel_health()
         if proposal:
-            self._store_proposal(proposal)
+            await self._store_proposal(proposal)
             return proposal
 
         # Phase 8: Memory usage
         proposal = self._check_memory_usage()
         if proposal:
-            self._store_proposal(proposal)
+            await self._store_proposal(proposal)
             return proposal
 
         return None
 
-    def _store_proposal(self, proposal_text: str):
+    async def _store_proposal(self, proposal_text: str):
         """Store a proposal notification, respecting dedup limit."""
         if not self._memory_mgr:
             return
@@ -250,7 +251,7 @@ class IdleInspector:
             return
 
         self._proposal_tracker[phash] = count
-        self._save_dedup_tracker()
+        await self._save_dedup_tracker()
 
     def _load_dedup_tracker(self):
         if self._dedup_path and os.path.exists(self._dedup_path):
@@ -260,12 +261,10 @@ class IdleInspector:
             except (json.JSONDecodeError, OSError):
                 self._proposal_tracker = {}
 
-    def _save_dedup_tracker(self):
+    async def _save_dedup_tracker(self):
         if self._dedup_path:
             try:
-                os.makedirs(os.path.dirname(self._dedup_path), exist_ok=True)
-                with open(self._dedup_path, "w", encoding="utf-8") as f:
-                    json.dump(self._proposal_tracker, f)
+                await async_write_json(self._dedup_path, self._proposal_tracker, indent=2)
             except OSError as exc:
                 logger.warning("Failed to save dedup tracker: %s", exc)
 
@@ -339,7 +338,7 @@ class IdleInspector:
             + "\n\n是否执行这些优化？请确认。"
         )
 
-    def _check_usage_patterns(self) -> str | None:
+    async def _check_usage_patterns(self) -> str | None:
         """Analyze task/tool/skill usage patterns and propose improvements.
 
         Creates structured proposals for skill crystallization, SOP skips,
@@ -372,7 +371,7 @@ class IdleInspector:
             ]
             if self._proposal_store:
                 from .proposal import Proposal, TYPE_SKILL_CRYSTALLIZE
-                self._proposal_store.add(Proposal(
+                await self._proposal_store.add(Proposal(
                     type=TYPE_SKILL_CRYSTALLIZE,
                     title=f"{skill_name} 可固化为技能",
                     problem=f"{skill_name} 已使用 {count} 次，达到结晶阈值但未生成固化技能",
@@ -406,7 +405,7 @@ class IdleInspector:
                 ]
                 if self._proposal_store:
                     from .proposal import Proposal, TYPE_SOP_OPTIMIZE
-                    self._proposal_store.add(Proposal(
+                    await self._proposal_store.add(Proposal(
                         type=TYPE_SOP_OPTIMIZE,
                         title=f"{skill_name} SOP 步骤「{step_name}」可移除",
                         problem=f"该步骤已跳过 {skip_count} 次，说明不适用或多余",
@@ -509,7 +508,7 @@ class IdleInspector:
         )
         return proposal
 
-    def _check_tool_failures(self) -> str | None:
+    async def _check_tool_failures(self) -> str | None:
         """Check logged tool failures and create structured proposals.
 
         When a tool fails ≥2 times, creates a ``Proposal`` with structured
@@ -599,7 +598,7 @@ class IdleInspector:
                     target=tool,
                     actions=actions,
                 )
-                self._proposal_store.add(prop)
+                await self._proposal_store.add(prop)
                 prop_id = prop.id
             else:
                 prop_id = ""
@@ -625,7 +624,7 @@ class IdleInspector:
 
         return None
 
-    def _check_correction_patterns(self) -> str | None:
+    async def _check_correction_patterns(self) -> str | None:
         """Check for repeated correction patterns and propose modify_own_prompt.
 
         When the same lesson appears 2+ times in recent corrections,
@@ -661,7 +660,7 @@ class IdleInspector:
             ]
             if self._proposal_store:
                 from .proposal import Proposal, TYPE_CONFIG_CHANGE
-                self._proposal_store.add(Proposal(
+                await self._proposal_store.add(Proposal(
                     type=TYPE_CONFIG_CHANGE,
                     title=f"修正模式：{lesson[:40]}",
                     problem=f"该教训重复出现 {count} 次，说明 agent 未记住",

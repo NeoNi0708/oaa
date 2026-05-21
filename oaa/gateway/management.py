@@ -125,7 +125,7 @@ class ManagementHandler:
         """Return the app configuration with credential fields redacted."""
         return {"ok": True, "config": self._config.to_redacted_dict()}
 
-    def _handle_save_config(self, payload: dict) -> dict:
+    async def _handle_save_config(self, payload: dict) -> dict:
         """Merge *payload.config* into current config and persist to disk."""
         data = payload.get("config", {})
         if not data:
@@ -221,7 +221,7 @@ class ManagementHandler:
                     "base_url": self._config.model.base_url,
                 }]
 
-        self._config.save()
+        await self._config.save()
 
         # Hot-reload LLM client so the new API key / base URL / model take effect immediately
         if self._agent is not None:
@@ -274,7 +274,7 @@ class ManagementHandler:
             "models": models,
         }
 
-    def _handle_switch_model(self, payload: dict) -> dict:
+    async def _handle_switch_model(self, payload: dict) -> dict:
         """Switch the active model without going through settings.
 
         Accepts either ``provider`` alone (picks first entry for that provider)
@@ -290,7 +290,7 @@ class ManagementHandler:
             self._config.model.api_key = ""
             self._config.model.model_id = ""
             self._config.model.base_url = ""
-            self._config.save()
+            await self._config.save()
             if self._agent is not None:
                 self._agent.llm.reconfigure(self._config.model)
             return {"ok": True}
@@ -312,7 +312,7 @@ class ManagementHandler:
             self._config.model.api_format = "anthropic"
         else:
             self._config.model.api_format = "openai"
-        self._config.save()
+        await self._config.save()
         if self._agent is not None:
             self._agent.llm.reconfigure(self._config.model)
         return {"ok": True, "model_id": self._config.model.model_id}
@@ -326,7 +326,7 @@ class ManagementHandler:
         self.set_agent_state("idle")
         return {"ok": True}
 
-    def _handle_apply_evolution(self, payload: dict) -> dict:
+    async def _handle_apply_evolution(self, payload: dict) -> dict:
         """Mark an evolution suggestion as applied and remove from pending list."""
         title = payload.get("title", "")
         if not title:
@@ -343,9 +343,8 @@ class ManagementHandler:
         for idx, s in enumerate(suggestions):
             s_title = s.get("skill", "") or s.get("message", "")[:20]
             if s_title in title or title in s.get("message", ""):
-                self._evolution.accept_suggestion(idx)
+                await self._evolution.accept_suggestion(idx)
                 break
-        self._evolution._save_stats()
         return {"ok": True}
 
     # ------------------------------------------------------------------
@@ -448,10 +447,10 @@ class ManagementHandler:
             return {"ok": False, "error": f"Skill not found: {name}"}
         return {"ok": True, "current": info.name}
 
-    def _handle_get_evolution(self, _payload: dict) -> dict:
+    async def _handle_get_evolution(self, _payload: dict) -> dict:
         """Return evolution statistics and suggestions from EvolutionEngine."""
         # Regenerate suggestions from current stats so threshold changes take effect
-        self._evolution.analyze_for_suggestions()
+        await self._evolution.analyze_for_suggestions()
         suggestions = self._evolution.stats.get("suggestions", [])
         skill_usage = self._evolution.stats.get("skill_usage", {})
 
@@ -584,7 +583,7 @@ class ManagementHandler:
         executor = ProposalExecutor()
         try:
             result = await executor.execute(proposal, handler)
-            store.update_status(
+            await store.update_status(
                 result.get("id", prop_id), result["status"],
                 executed_at=result.get("executed_at"),
                 result=result.get("result"),
@@ -592,7 +591,7 @@ class ManagementHandler:
             )
 
             # Inject execution result into HOT memory so agent sees it next turn
-            self._inject_proposal_result(prop_id, result)
+            await self._inject_proposal_result(prop_id, result)
 
             return {
                 "ok": True,
@@ -602,11 +601,11 @@ class ManagementHandler:
                 "error": result.get("error"),
             }
         except Exception as exc:
-            store.update_status(prop_id, "failed", error=str(exc))
-            self._inject_proposal_result(prop_id, {"status": "failed", "error": str(exc)})
+            await store.update_status(prop_id, "failed", error=str(exc))
+            await self._inject_proposal_result(prop_id, {"status": "failed", "error": str(exc)})
             return {"ok": False, "error": str(exc)}
 
-    def _inject_proposal_result(self, prop_id: str, result: dict):
+    async def _inject_proposal_result(self, prop_id: str, result: dict):
         """Write proposal execution result into HOT memory for agent awareness.
 
         This bridges the gap between GUI-triggered execution and the agent's
@@ -632,11 +631,11 @@ class ManagementHandler:
                 summary_parts.append(f"执行失败: {error[:100]}")
             else:
                 summary_parts.append(f"状态: {status}")
-            memory.add_to_hot(" ".join(summary_parts))
+            await memory.add_to_hot(" ".join(summary_parts))
         except Exception as exc:
             logger.debug("Failed to inject proposal result: %s", exc)
 
-    def _handle_proposal_ignore(self, payload: dict) -> dict:
+    async def _handle_proposal_ignore(self, payload: dict) -> dict:
         """Ignore a proposal by ID, optionally permanently."""
         if self._agent is None:
             return {"ok": False, "error": "Agent not initialized"}
@@ -655,8 +654,8 @@ class ManagementHandler:
         target = proposal.get("target", prop_id)
         inspector.ignore_tool(target, permanent=permanent)
         new_status = "ignored_forever" if permanent else "ignored_once"
-        store.update_status(prop_id, new_status)
-        self._inject_proposal_result(prop_id, {
+        await store.update_status(prop_id, new_status)
+        await self._inject_proposal_result(prop_id, {
             "title": proposal.get("title", ""),
             "status": new_status,
         })
@@ -731,7 +730,7 @@ class ManagementHandler:
                     self._config.wechat.ilink_user_id = result.get("ilink_user_id", self._config.wechat.ilink_user_id)
                     self._config.wechat.base_url = result.get("base_url", self._config.wechat.base_url)
                     self._config.wechat.enabled = True
-                    self._config.save()
+                    await self._config.save()
                     # Update adapter instance so it can actually send/receive
                     adapter.token = token
                     adapter.bot_id = self._config.wechat.iLink_bot_id
@@ -746,7 +745,7 @@ class ManagementHandler:
                 self._config.dingtalk.client_id = getattr(adapter, "client_id", "")
                 self._config.dingtalk.client_secret = getattr(adapter, "client_secret", "")
                 self._config.dingtalk.enabled = True
-                self._config.save()
+                await self._config.save()
                 # Start the Stream client
                 if hasattr(adapter, "start") and callable(adapter.start):
                     result_or_coro = adapter.start()
@@ -756,7 +755,7 @@ class ManagementHandler:
                 self._config.feishu.app_id = getattr(adapter, "app_id", "")
                 self._config.feishu.app_secret = getattr(adapter, "app_secret", "")
                 self._config.feishu.enabled = True
-                self._config.save()
+                await self._config.save()
                 # Start the WebSocket event client
                 if hasattr(adapter, "start") and callable(adapter.start):
                     result_or_coro = adapter.start()

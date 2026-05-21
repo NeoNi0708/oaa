@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field, asdict
 from typing import TYPE_CHECKING, Any
 
+from ..async_io import async_write_json
 from ..logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -87,11 +88,9 @@ class ProposalStore:
                 logger.warning("Failed to load proposals: %s", exc)
                 self._store = []
 
-    def _save(self):
+    async def _save(self):
         try:
-            os.makedirs(os.path.dirname(self._path), exist_ok=True)
-            with open(self._path, "w", encoding="utf-8") as f:
-                json.dump(self._store, f, indent=2, ensure_ascii=False)
+            await async_write_json(self._path, self._store, indent=2, ensure_ascii=False)
         except OSError as exc:
             logger.warning("Failed to save proposals: %s", exc)
 
@@ -99,7 +98,7 @@ class ProposalStore:
     # CRUD
     # ------------------------------------------------------------------
 
-    def add(self, proposal: Proposal) -> str:
+    async def add(self, proposal: Proposal) -> str:
         """Add a new proposal. Returns its ID."""
         if not proposal.id:
             proposal.id = _next_id()
@@ -107,7 +106,7 @@ class ProposalStore:
             proposal.created_at = time.time()
         d = asdict(proposal)
         self._store.append(d)
-        self._save()
+        await self._save()
         logger.info("Proposal created: %s [%s] %s", proposal.id, proposal.type, proposal.title)
         return proposal.id
 
@@ -117,13 +116,13 @@ class ProposalStore:
                 return p
         return None
 
-    def update_status(self, proposal_id: str, status: str, **extra) -> bool:
+    async def update_status(self, proposal_id: str, status: str, **extra) -> bool:
         """Update proposal status and optional extra fields. Returns True if found."""
         for p in self._store:
             if p["id"] == proposal_id:
                 p["status"] = status
                 p.update(extra)
-                self._save()
+                await self._save()
                 return True
         return False
 

@@ -3,6 +3,7 @@ import json
 import os
 from typing import Callable
 
+from ..async_io import async_write_json
 from ..config import AppConfig
 from ..logging_config import get_logger
 
@@ -121,13 +122,13 @@ class PermissionsManager:
         logger.warning("Unknown permission_level %r — allowing", level)
         return True
 
-    def add_blacklist_path(self, path: str):
+    async def add_blacklist_path(self, path: str):
         if "blacklist_paths" not in self.config.permissions:
             self.config.permissions["blacklist_paths"] = []
         abs_path = os.path.abspath(path)
         if abs_path not in self.config.permissions["blacklist_paths"]:
             self.config.permissions["blacklist_paths"].append(abs_path)
-            self.config.save()
+            await self.config.save()
 
     # ------------------------------------------------------------------
     # Tool trust tracking — reduce confirmation frequency
@@ -137,27 +138,27 @@ class PermissionsManager:
         """Check if a tool has been used successfully enough times to skip confirmation."""
         return self._trust_data.get(operation, 0) >= self._trust_threshold
 
-    def record_tool_success(self, tool_name: str):
+    async def record_tool_success(self, tool_name: str):
         """Increment the success count for *tool_name* and persist."""
         self._trust_data[tool_name] = self._trust_data.get(tool_name, 0) + 1
-        self._save_trust()
+        await self._save_trust()
         logger.debug("Trust count for %s: %s", tool_name, self._trust_data[tool_name])
 
-    def record_tool_failure(self, tool_name: str):
+    async def record_tool_failure(self, tool_name: str):
         """Decrement the success count for *tool_name* (floor 0) and persist."""
         current = self._trust_data.get(tool_name, 0)
         if current > 0:
             self._trust_data[tool_name] = current - 1
-            self._save_trust()
+            await self._save_trust()
             logger.debug("Trust count for %s decreased to %s", tool_name, self._trust_data[tool_name])
 
-    def reset_trust(self, tool_name: str = ""):
+    async def reset_trust(self, tool_name: str = ""):
         """Reset trust for one tool, or all tools if *tool_name* is empty."""
         if tool_name:
             self._trust_data.pop(tool_name, None)
         else:
             self._trust_data.clear()
-        self._save_trust()
+        await self._save_trust()
 
     def get_trust_summary(self) -> dict:
         """Return a copy of the current trust data for inspection."""
@@ -175,13 +176,11 @@ class PermissionsManager:
         except Exception as exc:
             logger.warning("Failed to load tool trust data: %s", exc)
 
-    def _save_trust(self):
+    async def _save_trust(self):
         """Persist trust data to JSON file."""
         if not self._trust_path:
             return
         try:
-            os.makedirs(os.path.dirname(self._trust_path), exist_ok=True)
-            with open(self._trust_path, "w", encoding="utf-8") as f:
-                json.dump(self._trust_data, f, indent=2)
+            await async_write_json(self._trust_path, self._trust_data, indent=2)
         except Exception as exc:
             logger.warning("Failed to save tool trust data: %s", exc)

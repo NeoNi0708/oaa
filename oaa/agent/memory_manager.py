@@ -2,11 +2,14 @@
 
 Inspired by self-improving skill patterns.
 """
+import asyncio
 import os
 import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+
+from ..async_io import async_write, async_read
 
 
 _HOT_MAX_LINES = 100
@@ -42,7 +45,7 @@ class MemoryManager:
             return path.read_text(encoding="utf-8").strip()
         return ""
 
-    def add_to_hot(self, entry: str) -> dict:
+    async def add_to_hot(self, entry: str) -> dict:
         """Append a new entry to HOT.md, then compact if over limit.
 
         *entry* should be a single line or short paragraph describing
@@ -54,42 +57,40 @@ class MemoryManager:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         line = f"- [{timestamp}] {entry.strip()}\n"
 
-        path = self._dir / "HOT.md"
-        existing = path.read_text(encoding="utf-8") if path.exists() else ""
-        path.write_text(existing + line, encoding="utf-8")
+        path = str(self._dir / "HOT.md")
+        existing = await async_read(path) or ""
+        await async_write(path, existing + line)
 
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = (await async_read(path) or "").splitlines()
         if len(lines) > _HOT_MAX_LINES:
-            self.compact_hot()
+            await self.compact_hot()
 
         return {"status": "success", "line_count": len(line)}
 
-    def compact_hot(self):
+    async def compact_hot(self):
         """Demote older entries from HOT.md to a dated warm/ file.
 
         Keeps the most recent ``_HOT_MAX_LINES // 2`` lines in HOT.md;
         the rest are moved to ``warm/hot-archive-<date>.md``.
         """
-        path = self._dir / "HOT.md"
-        if not path.exists():
+        path = str(self._dir / "HOT.md")
+        content = await async_read(path)
+        if content is None:
             return
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = content.splitlines()
         if len(lines) <= _HOT_MAX_LINES:
             return
 
         keep = lines[: _HOT_MAX_LINES // 2 * -1]
         demote = lines[_HOT_MAX_LINES // 2 * -1 :]
 
-        # Save kept lines back to HOT.md
-        path.write_text("\n".join(keep) + "\n", encoding="utf-8")
+        await async_write(path, "\n".join(keep) + "\n")
 
-        # Archive demoted lines to warm/
         date_str = datetime.now().strftime("%Y%m%d")
-        archive_path = self._dir / "warm" / f"hot-archive-{date_str}.md"
-        existing = archive_path.read_text(encoding="utf-8") if archive_path.exists() else ""
-        archive_path.write_text(
+        archive_path = str(self._dir / "warm" / f"hot-archive-{date_str}.md")
+        existing = (await async_read(archive_path)) or ""
+        await async_write(archive_path,
             existing + f"# Archived from HOT on {date_str}\n" + "\n".join(demote) + "\n",
-            encoding="utf-8",
         )
 
     # ------------------------------------------------------------------
@@ -101,7 +102,7 @@ class MemoryManager:
         entries = self._parse_corrections()
         return entries[-limit:]
 
-    def add_correction(self, context: str, lesson: str) -> dict:
+    async def add_correction(self, context: str, lesson: str) -> dict:
         """Log a user correction.
 
         *context* describes what the user said / what was being done.
@@ -116,20 +117,20 @@ class MemoryManager:
             f"- **Lesson**: {lesson}\n"
         )
 
-        path = self._dir / "corrections.md"
-        existing = path.read_text(encoding="utf-8") if path.exists() else ""
-        path.write_text(existing + entry, encoding="utf-8")
+        path = str(self._dir / "corrections.md")
+        existing = (await async_read(path)) or ""
+        await async_write(path, existing + entry)
 
         # Trim to _CORRECTIONS_MAX
         entries = self._parse_corrections()
         if len(entries) > _CORRECTIONS_MAX:
             trimmed = entries[-_CORRECTIONS_MAX:]
-            self._write_corrections(trimmed)
+            await self._write_corrections(trimmed)
 
         # Auto-promote: if same correction appears 3+ times, add to HOT
         similar = [e for e in self._parse_corrections() if e["lesson"] == lesson]
         if len(similar) >= 3:
-            self.add_to_hot(f"[Auto-promoted from corrections] {lesson}")
+            await self.add_to_hot(f"[Auto-promoted from corrections] {lesson}")
 
         return {"status": "success"}
 
@@ -160,16 +161,15 @@ class MemoryManager:
             entries.append({"timestamp": ts, "context": context, "lesson": lesson})
         return entries
 
-    def _write_corrections(self, entries: list[dict]):
+    async def _write_corrections(self, entries: list[dict]):
         """Overwrite corrections.md with the given entries."""
-        path = self._dir / "corrections.md"
         parts = []
         for e in entries:
             parts.append(
                 f"## {e['timestamp']}: {e['context']}\n"
                 f"- **Lesson**: {e['lesson']}\n"
             )
-        path.write_text("\n".join(parts), encoding="utf-8")
+        await async_write(str(self._dir / "corrections.md"), "\n".join(parts))
 
     # ------------------------------------------------------------------
     # Warm memory — on demand

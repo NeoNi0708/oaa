@@ -1,4 +1,5 @@
 """OAA Agent — orchestrates identity, skills, tools, and LLM into a coherent agent loop."""
+import asyncio
 import os
 from typing import AsyncGenerator, Optional
 
@@ -26,6 +27,12 @@ logger = get_logger("agent.oaa_agent")
 
 # OAA project root — used for self-modification tools
 OAA_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+
+# Outer timeout for the entire process_message pipeline (not per-LLM-call).
+# When this fires, the agent loop is cancelled and a timeout error is returned.
+# The per-LLM-call timeout in loop.py (_LLM_TIMEOUT=90s) is shorter — this is
+# the safety net for infinite tool-call loops or unresponsive tool chains.
+_PROCESS_TIMEOUT = 600  # 10 minutes
 
 
 class _MergedHandler(BaseHandler):
@@ -418,46 +425,76 @@ code_exec 报 ModuleNotFoundError: No module named 'openpyxl'
         )
         loop.set_skill_context(system_prompt)
 
+        # Run the loop with outer timeout via a queue (preserves streaming)
+        chunk_queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+
+        async def _producer():
+            try:
+                async for chunk in loop.run(user_input, history=history):
+                    await chunk_queue.put(chunk)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                await chunk_queue.put(None)  # sentinel
+
+        producer = asyncio.create_task(_producer())
+
         trajectory: list[dict] = []
         skill_loaded: str | None = None
         final_result = ""
-        async for chunk in loop.run(user_input, history=history):
-            if chunk["type"] == "tool_call":
-                trajectory.append({"tool": chunk["name"], "args": chunk.get("args", {})})
-                # Track which skill the LLM loaded for this task
-                if chunk["name"] == "skill_load" and not skill_loaded:
-                    skill_loaded = chunk.get("args", {}).get("name", "") or None
-            elif chunk["type"] == "done":
-                final_result = chunk.get("content", "")
-                # Idle inspection: check for due tasks or improvement areas
-                if len(user_input) > 2:
-                    try:
-                        proposal = self._idle_inspector.inspect()
-                        if proposal:
-                            yield {"type": "llm_output", "content": "\n\n---\n\n" + proposal}
-                    except Exception as exc:
-                        logger.warning("Idle inspection failed: %s", exc)
-            yield chunk
+        timed_out = False
 
-        # Record evolution data + HOT memory
-        if self.evolution:
-            skill_tag = skill_loaded or "default"
-            self.evolution.record_trajectory(
-                skill_tag, user_input, trajectory, final_result,
-            )
-            if skill_loaded:
-                self.evolution.record_skill_usage(skill_loaded)
+        try:
+            while True:
+                chunk = await asyncio.wait_for(chunk_queue.get(), timeout=_PROCESS_TIMEOUT)
+                if chunk is None:
+                    break
+                if chunk["type"] == "tool_call":
+                    trajectory.append({"tool": chunk["name"], "args": chunk.get("args", {})})
+                    # Track which skill the LLM loaded for this task
+                    if chunk["name"] == "skill_load" and not skill_loaded:
+                        skill_loaded = chunk.get("args", {}).get("name", "") or None
+                elif chunk["type"] == "done":
+                    final_result = chunk.get("content", "")
+                    # Idle inspection: check for due tasks or improvement areas
+                    if len(user_input) > 2:
+                        try:
+                            proposal = await self._idle_inspector.inspect()
+                            if proposal:
+                                yield {"type": "llm_output", "content": "\n\n---\n\n" + proposal}
+                        except Exception as exc:
+                            logger.warning("Idle inspection failed: %s", exc)
+                yield chunk
+        except asyncio.TimeoutError:
+            timed_out = True
+            producer.cancel()
+            msg = f"处理超时（超过{_PROCESS_TIMEOUT // 60}分钟），请重试或拆分问题"
+            logger.warning("process_message timed out after %ds", _PROCESS_TIMEOUT)
+            yield {"type": "done", "content": msg}
+        finally:
+            if not producer.done():
+                producer.cancel()
 
-        if self.memory and skill_loaded:
-            summary = (user_input[:80] + "...") if len(user_input) > 80 else user_input
-            self.memory.add_to_hot(
-                f"用技能「{skill_loaded}」完成了: {summary}"
-            )
-
-        # Archive conversation summary (every 10 messages, non-blocking)
-        if self.archiver and final_result and history is not None:
-            total_msgs = len(history) + 1  # +1 for this turn
-            if total_msgs > 0 and total_msgs % 10 == 0:
-                asyncio.create_task(
-                    self.archiver.summarize_and_archive(user_input, final_result)
+        # Post-processing — skip on timeout (trajectory may be incomplete)
+        if not timed_out:
+            if self.evolution:
+                skill_tag = skill_loaded or "default"
+                await self.evolution.record_trajectory(
+                    skill_tag, user_input, trajectory, final_result,
                 )
+                if skill_loaded:
+                    await self.evolution.record_skill_usage(skill_loaded)
+
+            if self.memory and skill_loaded:
+                summary = (user_input[:80] + "...") if len(user_input) > 80 else user_input
+                await self.memory.add_to_hot(
+                    f"用技能「{skill_loaded}」完成了: {summary}"
+                )
+
+            # Archive conversation summary (every 10 messages, non-blocking)
+            if self.archiver and final_result and history is not None:
+                total_msgs = len(history) + 1  # +1 for this turn
+                if total_msgs > 0 and total_msgs % 10 == 0:
+                    asyncio.create_task(
+                        self.archiver.summarize_and_archive(user_input, final_result)
+                    )

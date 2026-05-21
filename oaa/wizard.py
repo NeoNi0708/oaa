@@ -49,7 +49,7 @@ class SetupWizard:
 
         # Step 3: Save
         print("\n[3/3] 保存配置...")
-        self.config.save()
+        self.config._save_sync()
         print("  配置已保存到 ~/.oaa/config.json")
         print("\n\U0001F389 设置完成！启动二愣中...")
         return self.config
