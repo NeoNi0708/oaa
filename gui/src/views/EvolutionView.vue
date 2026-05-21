@@ -126,6 +126,116 @@
       </div>
     </div>
 
+    <!-- ================================ -->
+    <!-- 统计 -->
+    <!-- ================================ -->
+    <div v-if="activeTab === 'stats'" key="stats" class="tab-content">
+      <div v-if="statsLoading" class="loading-row">
+        <span class="loading-spinner"></span>
+        <span>加载统计数据...</span>
+      </div>
+
+      <template v-else-if="statsData">
+        <!-- Stats cards -->
+        <div class="stats-cards">
+          <div v-for="card in statsCards" :key="card.label" class="stat-card" :style="{ borderTopColor: card.color }">
+            <span class="stat-value" :style="{ color: card.color }">{{ card.value }}</span>
+            <span class="stat-label">{{ card.label }}</span>
+          </div>
+        </div>
+
+        <!-- Charts row -->
+        <div class="charts-row">
+          <!-- Donut chart: type distribution -->
+          <div class="chart-card">
+            <h3 class="chart-title">提案类型分布</h3>
+            <div v-if="donutSegments.length === 0" class="chart-empty">暂无数据</div>
+            <div v-else class="donut-wrapper">
+              <svg width="200" height="200" viewBox="0 0 200 200">
+                <circle cx="100" cy="100" r="60" fill="none" stroke="var(--oaa-bg-input)" stroke-width="28"/>
+                <circle v-for="seg in donutSegments" :key="seg.type"
+                  cx="100" cy="100" r="60" fill="none"
+                  :stroke="seg.color" stroke-width="28"
+                  :stroke-dasharray="`${seg.dash} ${seg.gap}`"
+                  :stroke-dashoffset="seg.offset"
+                  transform="rotate(-90 100 100)"
+                  style="transition: stroke-dasharray 0.5s;"
+                />
+              </svg>
+              <div class="donut-legend">
+                <div v-for="seg in donutSegments" :key="seg.type" class="legend-item">
+                  <span class="legend-dot" :style="{ background: seg.color }"></span>
+                  <span class="legend-label">{{ seg.label }}</span>
+                  <span class="legend-count">{{ seg.count }}</span>
+                  <span class="legend-pct">{{ (seg.pct * 100).toFixed(0) }}%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bar chart: daily trend -->
+          <div class="chart-card">
+            <h3 class="chart-title">执行趋势</h3>
+            <div v-if="barData.length === 0" class="chart-empty">暂无执行记录</div>
+            <div v-else class="bar-wrapper">
+              <div class="bar-chart">
+                <svg :width="barData.length * 40 + 20" height="160" :viewBox="`0 0 ${barData.length * 40 + 20} 160`">
+                  <g v-for="(b, i) in barData" :key="b.date">
+                    <rect :x="i * 40 + 10" :y="148 - b.h" :width="12" :height="b.h" fill="var(--oaa-green-400)" rx="2" opacity="0.85" />
+                    <rect v-if="b.fail > 0" :x="i * 40 + 10" :y="148 - (b.fail / barMaxTotal) * 120" :width="12" :height="(b.fail / barMaxTotal) * 120" fill="var(--oaa-red-400)" rx="2" opacity="0.85" />
+                    <text :x="i * 40 + 16" y="156" text-anchor="middle" font-size="9" fill="var(--oaa-color-disabled)">{{ b.date }}</text>
+                  </g>
+                </svg>
+              </div>
+              <div class="bar-legend">
+                <span class="bar-legend-item"><span class="bar-dot" style="background:var(--oaa-green-400)"></span>成功</span>
+                <span class="bar-legend-item"><span class="bar-dot" style="background:var(--oaa-red-400)"></span>失败</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bottom info section -->
+        <div class="bottom-info-row">
+          <div class="info-card">
+            <h3 class="chart-title">技能使用排行</h3>
+            <div v-if="skillRanking.length === 0" class="chart-empty">暂无数据</div>
+            <div v-else class="ranking-list">
+              <div v-for="(item, i) in skillRanking" :key="item.name" class="ranking-item">
+                <span class="ranking-idx" :class="{ gold: i === 0, silver: i === 1, bronze: i === 2 }">{{ i + 1 }}</span>
+                <span class="ranking-name">{{ item.name }}</span>
+                <span class="ranking-bar-bg">
+                  <span class="ranking-bar-fill" :style="{ width: (item.count / skillRanking[0].count * 100) + '%' }"></span>
+                </span>
+                <span class="ranking-count">{{ item.count }} 次</span>
+              </div>
+            </div>
+          </div>
+          <div class="info-card">
+            <h3 class="chart-title">已固化技能</h3>
+            <div v-if="crystallizedList.length === 0" class="chart-empty">暂无固化技能</div>
+            <div v-else class="crystal-list">
+              <div v-for="c in crystallizedList" :key="c.name" class="crystal-item">
+                <span class="crystal-icon">&#10024;</span>
+                <span class="crystal-name">{{ c.name }}</span>
+                <span class="crystal-date">{{ c.created ? c.created.slice(0, 10) : '' }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <div v-else class="empty-state">
+        <div class="empty-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3">
+            <path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/>
+          </svg>
+        </div>
+        <p class="empty-text">暂无统计数据</p>
+        <p class="empty-hint">执行进化工厂操作后将在此处展示统计信息</p>
+      </div>
+    </div>
+
     <!-- Toast notification -->
     <div v-if="toast.show" :class="['toast', toast.type]">
       {{ toast.message }}
@@ -134,7 +244,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useWebSocket } from '../composables/useWebSocket'
 
 const { sendRequest } = useWebSocket()
@@ -148,6 +258,7 @@ const toast = ref({ show: false, type: 'success', message: '' })
 const tabs = [
   { id: 'pending', icon: '📋', label: '待处理提案' },
   { id: 'history', icon: '📜', label: '执行历史' },
+  { id: 'stats', icon: '📊', label: '统计' },
 ]
 
 const pendingProposals = computed(() =>
@@ -159,6 +270,94 @@ const historyProposals = computed(() =>
 )
 
 const pendingCount = computed(() => pendingProposals.value.length)
+
+// ---- Statistics tab ----
+const statsLoading = ref(true)
+const statsData = ref<any>(null)
+
+const typeColors: Record<string, string> = {
+  tool_fix: '#ef4444',
+  install_dep: '#f59e0b',
+  sop_optimize: '#a78bfa',
+  skill_crystallize: '#22c55e',
+  config_change: '#60a5fa',
+}
+const typeLabelsAll: Record<string, string> = {
+  tool_fix: '工具修复',
+  install_dep: '安装依赖',
+  sop_optimize: 'SOP 优化',
+  skill_crystallize: '技能固化',
+  config_change: '配置变更',
+}
+
+const statsCards = computed(() => {
+  const s = statsData.value?.proposal_summary
+  if (!s) return []
+  return [
+    { label: '总提案数', value: s.total, color: 'var(--oaa-blue-400)' },
+    { label: '成功率', value: s.success_rate + '%', color: s.success_rate >= 80 ? 'var(--oaa-green-400)' : 'var(--oaa-amber-400)' },
+    { label: '待处理', value: s.pending, color: s.pending > 0 ? 'var(--oaa-amber-400)' : 'var(--oaa-color-muted)' },
+    { label: '回滚次数', value: s.rolled_back, color: s.rolled_back > 0 ? 'var(--oaa-red-400)' : 'var(--oaa-color-muted)' },
+  ]
+})
+
+// Donut chart
+const donutSegments = computed(() => {
+  const dist = statsData.value?.type_distribution || {}
+  const entries = Object.entries(dist) as [string, number][]
+  const total = entries.reduce((s, [, v]) => s + v, 0)
+  if (total === 0) return []
+  const r = 60, circ = 2 * Math.PI * r
+  let offset = 0
+  return entries.map(([type, count]) => {
+    const pct = count / total
+    const dash = pct * circ
+    const gap = circ - dash
+    const seg = { type, count, pct, label: typeLabelsAll[type] || type, color: typeColors[type] || '#888', dash, gap, offset: -offset }
+    offset += dash
+    return seg
+  })
+})
+
+// Bar chart
+const barData = computed(() => {
+  const trend = statsData.value?.daily_trend || []
+  if (trend.length === 0) return []
+  const maxVal = Math.max(...trend.map((d: any) => d.total), 1)
+  return trend.map((d: any) => ({
+    date: d.date,
+    total: d.total,
+    success: d.success,
+    fail: d.fail,
+    h: Math.max((d.total / maxVal) * 120, 4),
+  }))
+})
+const barMaxTotal = computed(() => {
+  const trend = statsData.value?.daily_trend || []
+  return Math.max(...trend.map((d: any) => d.total), 1)
+})
+
+// skill ranking
+const skillRanking = computed(() => statsData.value?.evolution?.skill_ranking || [])
+const crystallizedList = computed(() => statsData.value?.evolution?.crystallized || [])
+
+async function loadStats() {
+  statsLoading.value = true
+  try {
+    const resp = await sendRequest('get_evolution_stats')
+    if (resp.ok) {
+      statsData.value = resp
+    }
+  } catch (_e) { /* ignore */ }
+  statsLoading.value = false
+}
+
+// Tab change -> lazy load stats
+watch(activeTab, (tab) => {
+  if (tab === 'stats' && !statsData.value) {
+    loadStats()
+  }
+})
 
 const typeLabels: Record<string, string> = {
   tool_fix: '工具修复',
@@ -586,5 +785,224 @@ onMounted(() => {
 @keyframes toastIn {
   from { transform: translateY(20px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
+}
+
+/* ============================== */
+/* Statistics tab styles */
+/* ============================== */
+.stats-cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--oaa-space-4);
+  margin-bottom: var(--oaa-space-6);
+}
+.stat-card {
+  background: var(--oaa-bg-surface);
+  border: 1px solid var(--oaa-border-subtle);
+  border-radius: var(--oaa-radius-lg);
+  border-top: 3px solid;
+  padding: var(--oaa-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--oaa-space-1);
+}
+.stat-value {
+  font-size: var(--oaa-text-2xl);
+  font-weight: 700;
+  line-height: 1;
+}
+.stat-label {
+  font-size: var(--oaa-text-xs);
+  color: var(--oaa-color-muted);
+  font-weight: 500;
+}
+
+.charts-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--oaa-space-4);
+  margin-bottom: var(--oaa-space-4);
+}
+.chart-card {
+  background: var(--oaa-bg-surface);
+  border: 1px solid var(--oaa-border-subtle);
+  border-radius: var(--oaa-radius-lg);
+  padding: var(--oaa-space-4);
+}
+.chart-title {
+  font-size: var(--oaa-text-sm);
+  font-weight: 600;
+  color: var(--oaa-color-primary);
+  margin: 0 0 var(--oaa-space-3) 0;
+}
+.chart-empty {
+  font-size: var(--oaa-text-sm);
+  color: var(--oaa-color-disabled);
+  padding: var(--oaa-space-6) 0;
+  text-align: center;
+}
+
+/* Donut chart */
+.donut-wrapper {
+  display: flex;
+  align-items: center;
+  gap: var(--oaa-space-4);
+}
+.donut-legend {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oaa-space-2);
+  flex: 1;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--oaa-space-2);
+  font-size: var(--oaa-text-xs);
+}
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.legend-label {
+  color: var(--oaa-color-primary);
+  flex: 1;
+}
+.legend-count {
+  color: var(--oaa-color-secondary);
+  font-family: var(--oaa-font-mono);
+}
+.legend-pct {
+  color: var(--oaa-color-muted);
+  min-width: 32px;
+  text-align: right;
+}
+
+/* Bar chart */
+.bar-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.bar-chart {
+  overflow-x: auto;
+  width: 100%;
+}
+.bar-chart svg {
+  display: block;
+}
+.bar-legend {
+  display: flex;
+  gap: var(--oaa-space-4);
+  margin-top: var(--oaa-space-2);
+  font-size: var(--oaa-text-xs);
+  color: var(--oaa-color-secondary);
+}
+.bar-legend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--oaa-space-1);
+}
+.bar-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+/* Bottom info section */
+.bottom-info-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--oaa-space-4);
+}
+.info-card {
+  background: var(--oaa-bg-surface);
+  border: 1px solid var(--oaa-border-subtle);
+  border-radius: var(--oaa-radius-lg);
+  padding: var(--oaa-space-4);
+}
+
+/* Skill usage ranking */
+.ranking-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oaa-space-2);
+}
+.ranking-item {
+  display: flex;
+  align-items: center;
+  gap: var(--oaa-space-2);
+  font-size: var(--oaa-text-xs);
+}
+.ranking-idx {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--oaa-bg-input);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 10px;
+  color: var(--oaa-color-muted);
+  flex-shrink: 0;
+}
+.ranking-idx.gold { background: #fbbf24; color: #78350f; }
+.ranking-idx.silver { background: #cbd5e1; color: #334155; }
+.ranking-idx.bronze { background: #fb923c; color: #7c2d12; }
+.ranking-name {
+  color: var(--oaa-color-primary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ranking-bar-bg {
+  flex: 1;
+  height: 6px;
+  background: var(--oaa-bg-input);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.ranking-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--oaa-primary);
+  border-radius: 3px;
+}
+.ranking-count {
+  color: var(--oaa-color-muted);
+  min-width: 40px;
+  text-align: right;
+  font-family: var(--oaa-font-mono);
+}
+
+/* Crystallized skills */
+.crystal-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oaa-space-2);
+}
+.crystal-item {
+  display: flex;
+  align-items: center;
+  gap: var(--oaa-space-2);
+  font-size: var(--oaa-text-sm);
+}
+.crystal-icon {
+  font-size: var(--oaa-text-base);
+  flex-shrink: 0;
+}
+.crystal-name {
+  color: var(--oaa-color-primary);
+  flex: 1;
+}
+.crystal-date {
+  font-size: var(--oaa-text-xs);
+  color: var(--oaa-color-muted);
+  font-family: var(--oaa-font-mono);
 }
 </style>

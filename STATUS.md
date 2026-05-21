@@ -1,6 +1,172 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-20 — `_do_reload` await bug 修复 + IdleInspector 冷却修正 + 自主性断点分析
+> 最后更新：2026-05-21 — 下一步计划第1-4项完成，第5项(P1)全部完成
+
+---
+
+## 本次会话（2026-05-20）— 进化工厂 Layer 2 (GUI) + Layer 3 (验证回滚)
+
+### Layer 2：进化工厂 GUI 页面
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `gui/src/views/EvolutionView.vue` | **新增** 292 行 | 进化工厂全功能页面：双标签页（待处理提案 / 执行历史）、提案卡片、批准/忽略按钮、Toast 通知 |
+| `gui/src/App.vue` | +2 行 | 注册 EvolutionView 到 tabComponents |
+| `gui/src/components/Sidebar.vue` | +8 行 | 导航新增"进化工厂"项（id: evolution，位于 tasks 与 files 之间） |
+
+**EvolutionView.vue 结构：**
+
+- **待处理提案标签页**：加载中 spinner → 空状态（带 SVG 图标 + 提示文字）→ 提案卡片列表
+  - 卡片头部：类型 Badge（tool_fix/install_dep/sop_optimize/skill_crystallize/config_change → 中文化 + 彩色徽章）、标题、ID
+  - 卡片正文：问题描述（problem）、收益（benefit，绿色文字）、操作步骤（有序列表，tool 高亮 + 可选 verify 显示）
+  - 卡片底部：三个按钮 — 「批准执行」（主色，执行中显示「执行中...」+ 禁用）、「忽略本次」（次要）、「彻底忽略」（灰色悬停变红）
+- **执行历史标签页**：加载中 spinner → 空状态 → 历史卡片
+  - 卡片头部：状态 Badge（已完成/失败/已忽略/已回滚）、标题、执行时间
+  - 可折叠执行结果 JSON（格式化显示）
+  - 错误信息（红色高亮）
+- **Toast 通知**：固定底部右下角，3 秒自动消失，success（绿色）/ error（红色）
+
+**API 集成：**
+- `sendRequest('list_proposals')` → 加载全部提案，按 `created_at` 降序排列
+- `sendRequest('proposal_approve', { id })` → 批准执行，完成后刷新列表
+- `sendRequest('proposal_ignore', { id, permanent })` → 忽略（临时/永久），完成后刷新
+
+### Layer 3：验证与回滚
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `oaa/agent/proposal.py` | `ProposalExecutor.execute()` 重写 | 每步 action 支持可选 `verify` + `rollback` 字段 |
+| `oaa/agent/idle_inspector.py` | `_check_tool_failures` 增强 | 工具修复提案的 reload_module 步骤添加 verify |
+| `oaa/gateway/management.py` | +3 handler | `list_proposals`、`proposal_approve`、`proposal_ignore` |
+| `oaa/gateway/adapters/desktop.py` | +3 行 | `_MANAGEMENT_TYPES` 同步增加 |
+
+**ProposalExecutor 执行流程（提案级）：**
+
+```
+对 actions 列表中每个 action:
+  1. handler.dispatch(tool, args) → 记录结果
+  2. 如果定义了 verify:
+     a. handler.dispatch(verify.tool, verify.args)
+     b. 成功 → step.verified = True
+     c. 失败 → step.verified = False
+        → 如果定义了 rollback:
+          - handler.dispatch(rollback.tool, rollback.args)
+          - 成功 → step.rollback = "success"
+          - 失败 → step.rollback = "failed: {error}"
+        → 提案状态设为 failed, 记录错误, 立即返回
+  3. 任意 action 抛异常 → step.status = "error" → 提案设为 failed
+全部完成 → 提案 status = done, recorded executed_at
+```
+
+**verify 字段结构**（每个 action 可选）：
+```python
+{
+  "tool": "code_exec",
+  "args": {"code": "import ...; print('reload ok')"},
+  "description": "验证模块重载成功"
+}
+```
+
+**rollback 字段结构**（每个 action 可选）：
+```python
+{
+  "tool": "self_improve",
+  "args": {"path": "...", "old_content": "...", "new_content": "..."},
+  "description": "回滚文件修改"
+}
+```
+
+**IdleInspector 集成**：`_check_tool_failures()` 中工具修复提案的 reload_module 步骤自带 verify：`{tool: "code_exec", args: {code: "import <模块>; print('reload ok')"}}`，验证模块加载无报错。
+
+**Management API 端点：**
+- `list_proposals(status?)` → `{ proposals[], count }`
+- `proposal_approve(id)` → 异步执行，`{ proposal_id, proposal_status, result?, error? }`
+- `proposal_ignore(id, permanent=false)` → `{ proposal_id, status: ignored_once/ignored_forever }`
+
+### 已提交
+
+```
+8712658 feat: evolution factory layer 2+3 — GUI page + verification & rollback
+7 files changed, 765 insertions, 17 deletions
+```
+
+### 测试结果
+
+| 测试 | 结果 | 说明 |
+|------|------|------|
+| GUI 页面加载 | ✅ | EvolutionView 双标签页正常渲染 |
+| 提案列表加载 | ✅ | list_proposals 返回完整提案列表 |
+| 提案批准执行 | ✅ | ProposalExecutor 按 action 序列执行 |
+| 验证成功 | ✅ | verify 通过后标记 verified=True |
+| 验证失败+回滚 | ✅ | verify 失败后自动执行 rollback，标记 failed |
+| 忽略提案（临时/永久） | ✅ | 状态变为 ignored_once/ignored_forever |
+| 空状态显示 | ✅ | 无提案时显示空状态占位 |
+| 后端管理 API 端点 | ✅ | list_proposals/proposal_approve/proposal_ignore 全部正常响应 |
+| 前端构建 | ✅ | npm run build 无错误 |
+
+---
+
+### 下一步计划
+
+#### 1. 进化工厂统计标签页（第三 Tab） — ✅ 已完成 (2026-05-21)
+
+EvolutionView 新增「统计」标签页：
+
+| 需求 | 状态 |
+|------|------|
+| 数据卡片（总提案数/成功率/待处理数/回滚次数） | ✅ |
+| SVG 环形图（提案类型分布） | ✅ |
+| SVG 柱状图（每日执行趋势，成功/失败对比） | ✅ |
+| 技能使用排行 | ✅ |
+| 已固化技能列表 | ✅ |
+| 后端 `get_evolution_stats` API | ✅ |
+| `VALID_TYPES` + `_MANAGEMENT_TYPES` 注册 | ✅ |
+
+**变更文件**：`oaa/gateway/management.py`（+`_handle_get_evolution_stats`）、`oaa/gateway/adapters/desktop.py`（+`get_evolution_stats`）、`gui/src/views/EvolutionView.vue`（+stats tab template + script + CSS）
+
+
+#### 2. IdleInspector 巡检增强 — ✅ 已完成 (2026-05-21)
+
+| 场景 | 实现 |
+|------|------|
+| 磁盘空间 | ✅ `_check_disk_usage()` — `shutil.disk_usage()` 检查数据目录，>90% 报警 |
+| 通道健康 | ✅ `_check_channel_health()` — 检查各 adapter 的 `is_authenticated`/`_running` 状态和错误计数 |
+| 内存占用 | ✅ `_check_memory_usage()` — `psutil.Process().memory_info().rss`，>500MB 报警 |
+| LLM 调用统计 | 延后（P2，需 LLMClient 增加 stats 追踪能力） |
+
+**变更文件**：`oaa/agent/idle_inspector.py`（+4 项检查方法 + constructor 扩展 + inspect() 接入）、`oaa/agent/oaa_agent.py`（传递 llm + channel_adapters 依赖）
+
+#### 3. 测试计划 — ✅ P0 已完成 (2026-05-21)
+
+| 测试 | 内容 | 状态 |
+|------|------|------|
+| Layer 3 verify/rollback 单元测试 | verify 失败 → rollback 执行 → 提案标记 failed | ✅ 14 tests, all PASS |
+| Layer 3 verify 通过 → 正常完成 | verify 成功 → 提案正常 done | ✅ |
+| 提案 store 持久化测试 | 创建/读取/更新/删除/跨实例持久化 JSON | ✅ |
+| EvolutionView GUI CDP 测试 | 页面加载、标签切换、按钮点击、Toast | ⏳ P1 待完成 |
+| 管理 API 边界测试 | 无效 ID、重复操作、非法 status | ⏳ P1 待完成 |
+| IdleInspector 背景巡检集成测试 | 检测 → 创建提案 → GUI 可见 → 批准执行 | ⏳ P1 待完成 |
+
+**变更文件**：`tests/test_proposal.py`（新增，14 个测试，覆盖 ProposalStore CRUD + ProposalExecutor verify/rollback 全流程）
+
+#### 4. Proposal 执行结果的 agent 反馈回路 — ✅ 已完成 (2026-05-21)
+
+**问题**：GUI 批准执行后结果未注入 agent 上下文 → agent 不知道提案已执行、无法学习、可能重复提案。
+
+**修复**：`_handle_proposal_approve` 和 `_handle_proposal_ignore` 执行后调用 `_inject_proposal_result()`，将执行结果写入 MemoryManager.add_to_hot()。agent 下轮对话的 system prompt 中即可看到执行状态。
+
+**变更文件**：`oaa/gateway/management.py`（+`_inject_proposal_result` 方法，在 approve/ignore 后调用）
+
+#### 5. A2 Agent 自主性改造 — 剩余工作
+
+A1（聊天历史持久化）✅ 已完成。A2 大部分核心工具已就位，但 agent 的实际主动性行为仍有差距：
+
+| 剩余项 | 说明 | 优先级 | 状态 |
+|--------|------|--------|------|
+| Tool call 确认频率细粒度策略 | Permissions 增加按工具信任计数，confirm 模式下已信任的非危险操作自动跳过确认 | P1 | ✅ |
+| Agent 自主性行为强化 | System prompt 增加 5 个 few-shot 示例（修复代码/执行提案/数据处理/环境修复/依赖安装），强化主动行为模式 | P1 | ✅ |
+| 自修改循环 E2E 测试 | 8 个测试覆盖 self_improve（修改/备份/验证回滚/语法检查回滚）+ reload_module + rollback_change 全闭环 | P1 | ✅ |
+| 主动性度量指标 | 缺少量化 agent 主动行为的数据（主动调工具次数/主动修复次数 vs 被动等待确认次数），无法评估改进效果 | P2 | ⏳ |
 
 ---
 

@@ -90,15 +90,16 @@ class OAAAgent:
         from .proposal import ProposalStore
         self._proposal_store = ProposalStore(os.path.join(config.data_dir, "memory"))
 
-        # Idle inspector (needs memory + evolution + proposal_store)
+        self.llm = LLMClient(config.model)
+
+        # Idle inspector (needs memory + evolution + proposal_store + llm)
         self._idle_inspector = IdleInspector(
             scheduler=scheduler,
             memory_mgr=self.memory,
             evolution=evolution,
             proposal_store=self._proposal_store,
+            llm=self.llm,
         )
-
-        self.llm = LLMClient(config.model)
 
         # Conversation archiver (structured summaries + cross-session search)
         self.archiver = ConversationArchiver(config.data_dir, llm=self.llm)
@@ -152,6 +153,8 @@ class OAAAgent:
         works, but wechat-cli stubs remain unavailable.
         """
         self._channel_adapters = adapters
+        if self._idle_inspector:
+            self._idle_inspector._channel_adapters = adapters
 
     def _build_channel_status(self) -> str:
         """Build a runtime status report of all channel adapters.
@@ -311,6 +314,47 @@ class OAAAgent:
 - **看到待处理提案时**：用 `proposal_list` 查看 → 用 `proposal_approve` 执行 → 报告结果。不需要先问用户"是否执行"。
 - **遇到缺失依赖时**：直接 `shell_run pip install <包名>` 安装，装完继续工作。不要报告"缺少依赖"。
 - **能直接解决的问题就不要报告问题**：安装包、修复配置、清理缓存——自己动手。
+
+## 行为示例
+
+以下是你应该模仿的主动行为模式（Few-Shot Examples）：
+
+**示例 1 — 修复代码问题**
+```
+用户：帮我看看为什么 tools.py 的 do_shell_run 报 NameError
+你：（直接 read_own_source 读取文件 → 发现缺少 import → self_improve 修改 → reload_module 验证）
+```
+不应当的行为：回复"我发现了缺少 import，需要我修改吗？"
+
+**示例 2 — 系统巡检**
+```
+IdleInspector 创建了一个提案："file_write 调用失败次数过多，建议增加前置目录检查"
+你：（proposal_list 查看 → proposal_approve 执行 → 报告"已执行修复提案：增加目录检查"）
+```
+不应当的行为："发现一个待处理提案，您要批准执行吗？"
+
+**示例 3 — 多步数据处理任务**
+```
+用户：把昨天的销售数据导成表格
+你：（code_exec/pandas 读数据 → excel_xlsx 生成 → 完成后"已生成销售报表，共 45 条记录，已保存到 workspace/销售报表_2026-05-20.xlsx"）
+```
+不应当的行为："我可以帮你做这个。首先，让我看看数据在哪里...（等回复）"
+
+**示例 4 — 环境修复**
+```
+用户：OAA 页面打不开了
+你：（health_diagnose → 检查端口 9765 → 发现 WebSocket 未监听 → shell_run 启动服务 → "已重启，页面应该在 10 秒内恢复"）
+```
+不应当的行为："让我检查一下状态...(报告问题但不自动修复)"
+
+**示例 5 — 依赖缺失**
+```
+code_exec 报 ModuleNotFoundError: No module named 'openpyxl'
+你：（shell_run pip install openpyxl → 重新执行原代码 → 继续后续工作）
+```
+不应当的行为："缺少 openpyxl 模块，请先运行 pip install openpyxl"
+
+每次回应时问自己：**我是在解决问题，还是在汇报问题？**
 
 ## 业务领域
 

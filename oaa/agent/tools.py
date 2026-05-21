@@ -9,7 +9,7 @@ import sys
 import tempfile
 import textwrap
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..auth.permissions import PermissionsManager
 from ..logging_config import get_logger
@@ -137,6 +137,13 @@ class AtomicTools(BaseHandler):
     def set_idle_inspector(self, inspector):
         """Inject the IdleInspector for registering tool ignores."""
         self._idle_inspector = inspector
+
+    async def dispatch(self, tool_name: str, args: dict) -> Any:
+        """Dispatch tool call and record successful completions for trust tracking."""
+        result = await super().dispatch(tool_name, args)
+        if self.permissions and isinstance(result, dict) and result.get("status") in ("success", "ok"):
+            self.permissions.record_tool_success(tool_name)
+        return result
 
     async def _confirm(self, operation: str, details: str = "") -> bool:
         """Check permission for an operation. Returns True if allowed."""

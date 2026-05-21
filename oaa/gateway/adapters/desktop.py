@@ -52,6 +52,7 @@ _MANAGEMENT_TYPES = {
     "list_proposals",
     "proposal_approve",
     "proposal_ignore",
+    "get_evolution_stats",
 }
 
 

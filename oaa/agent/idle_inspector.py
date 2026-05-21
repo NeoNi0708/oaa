@@ -51,11 +51,15 @@ class IdleInspector:
     def __init__(self, scheduler: Optional["TaskScheduler"] = None,
                  memory_mgr: Optional["MemoryManager"] = None,
                  evolution: Optional["EvolutionEngine"] = None,
-                 proposal_store: Optional["ProposalStore"] = None):
+                 proposal_store: Optional["ProposalStore"] = None,
+                 channel_adapters: Optional[dict] = None,
+                 llm: Optional[object] = None):
         self._scheduler = scheduler
         self._memory_mgr = memory_mgr
         self._evolution = evolution
         self._proposal_store = proposal_store
+        self._channel_adapters = channel_adapters or {}
+        self._llm = llm
         self._last_check: float = time.time()
         # Background task support
         self._background_task: asyncio.Task | None = None
@@ -206,6 +210,24 @@ class IdleInspector:
 
         # Phase 5: Correction patterns → modify_own_prompt
         proposal = self._check_correction_patterns()
+        if proposal:
+            self._store_proposal(proposal)
+            return proposal
+
+        # Phase 6: System health — disk usage
+        proposal = self._check_disk_usage()
+        if proposal:
+            self._store_proposal(proposal)
+            return proposal
+
+        # Phase 7: Channel health
+        proposal = self._check_channel_health()
+        if proposal:
+            self._store_proposal(proposal)
+            return proposal
+
+        # Phase 8: Memory usage
+        proposal = self._check_memory_usage()
         if proposal:
             self._store_proposal(proposal)
             return proposal
@@ -656,4 +678,89 @@ class IdleInspector:
                 + "\n\n是否更新提示词以记住这些规则？请确认。"
             )
 
+        return None
+
+    # ------------------------------------------------------------------
+    # Phase 6: Disk usage check
+    # ------------------------------------------------------------------
+
+    def _check_disk_usage(self) -> str | None:
+        """Check disk space usage of the data directory."""
+        if not self._memory_mgr:
+            return None
+        try:
+            import shutil
+            target = getattr(self._memory_mgr, '_dir', None)
+            if target is None:
+                return None
+            usage = shutil.disk_usage(str(target))
+            pct = usage.used / usage.total * 100
+            if pct > 90:
+                free_gb = usage.free / (1024**3)
+                return (
+                    "磁盘空间告警：磁盘使用率 {:.1f}%，剩余空间 {:.1f} GB\n\n"
+                    "建议清理：\n"
+                    "  1. 删除旧的 __pycache__ 目录\n"
+                    "  2. 清理 workspace 中不再需要的临时文件\n"
+                    "  3. 检查 logs 目录是否有大文件\n\n"
+                    "是否执行磁盘清理？请确认。"
+                ).format(pct, free_gb)
+        except Exception as exc:
+            logger.debug("Disk usage check failed: %s", exc)
+        return None
+
+    # ------------------------------------------------------------------
+    # Phase 7: Channel health check
+    # ------------------------------------------------------------------
+
+    def _check_channel_health(self) -> str | None:
+        """Check each communication channel's connectivity and error state."""
+        if not self._channel_adapters:
+            return None
+        issues = []
+        for name, adapter in self._channel_adapters.items():
+            try:
+                online = (getattr(adapter, 'is_authenticated', False)
+                          or getattr(adapter, '_running', False))
+                if not online:
+                    issues.append(f"  - **{name}**: 离线状态")
+                err_count = getattr(adapter, 'error_count', None) or getattr(adapter, '_error_count', 0)
+                if err_count and err_count > 0:
+                    issues.append(f"  - **{name}**: 有 {err_count} 个待处理错误")
+            except Exception as exc:
+                issues.append(f"  - **{name}**: 健康检查异常 ({exc})")
+        if not issues:
+            return None
+        return (
+            "通道健康检查：发现以下通道问题：\n\n"
+            + "\n".join(issues)
+            + "\n\n是否检查并修复？请确认。"
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 8: Process memory check
+    # ------------------------------------------------------------------
+
+    def _check_memory_usage(self) -> str | None:
+        """Check the current process's RSS memory usage (>500 MB alerts)."""
+        try:
+            try:
+                import psutil
+                proc = psutil.Process()
+                rss_mb = proc.memory_info().rss / (1024**2)
+                cpu_pct = proc.cpu_percent(interval=0.1)
+            except ImportError:
+                rss_mb = 0
+                cpu_pct = 0
+            if rss_mb > 500:
+                return (
+                    "内存使用告警：当前进程占用 {:.0f} MB (CPU: {:.0f}%)\n\n"
+                    "超过 500 MB 阈值，建议：\n"
+                    "  - 检查 message history 是否过长\n"
+                    "  - 确认是否有未关闭的文件句柄\n"
+                    "  - 必要时重启进程释放内存\n\n"
+                    "是否执行内存检查？请确认。"
+                ).format(rss_mb, cpu_pct)
+        except Exception as exc:
+            logger.debug("Memory check failed: %s", exc)
         return None
