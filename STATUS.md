@@ -1,6 +1,116 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-21 — 空闲巡检4线架构 + 技能市场搜索 + WeChatCLI 实装
+> 最后更新：2026-05-22 — 自愈系统投喂+验收架构（实现中）
+
+---
+
+## 本次会话（2026-05-22）— 自愈系统投喂+验收架构
+
+### 背景
+
+当前自愈系统（IdleInspector → Proposal → ProposalExecutor）使用**固定模板**生成修复步骤（读代码→self_improve→重载模块），执行后只做语法检查，不做功能验证，无法确认修复是否真正解决了问题。`wechat_contacts` 失败5次的案例暴露了根本缺陷：提案标记为"完成"但工具仍然无法使用。
+
+### 新架构：投喂+验收包装层
+
+**核心思路**：自愈和普通任务是同一套能力——agent 已经会分析根因、选工具、执行、判断结果。唯一的区别是自愈的输出可能会修改自身代码/配置/依赖。所以不需要独立的"修复器"，只需要一个**投喂+验收**的包装层，复用 agent 已有的全部能力。
+
+**流程图：**
+```
+巡检发现问题
+  ↓
+创建 Proposal（含 problem_context）
+  ↓
+用户审批
+  ↓
+repair_loop.run(context, agent):
+  ├─ 第1次尝试
+  │   ├─ 投喂: 【自愈任务】prompt → agent.process_message()
+  │   ├─ agent 用自己的能力修复
+  │   └─ 独立验证: 重新检查原始问题是否解决
+  │       ├─ 通过 → 汇报结果
+  │       └─ 失败 → 第2次投喂（带失败历史）
+  ├─ 第2次尝试
+  │   └─ ...
+  ├─ 第3次尝试
+  │   └─ 失败 → 回滚所有变更 → 升级给人
+  └─ 结束
+```
+
+### 变更清单
+
+| 文件 | 改动 | 说明 |
+|------|------|------|
+| 新增 `oaa/agent/repair_loop.py` | ~200 行 | RepairPlan dataclass + RepairLoop（投喂+验证+重试循环+回滚） |
+| `oaa/agent/idle_inspector.py` | ~30 行 | `_check_tool_failures()` 从生成固定 actions 改为生成 `problem_context` |
+| `oaa/agent/proposal.py` | ~10 行 | Proposal 增加 `problem_context` 字段（actions 变为可选） |
+| `oaa/gateway/management.py` | ~40 行 | `proposal_approve` 有 problem_context 时走 repair_loop，否则走 ProposalExecutor |
+| `oaa/agent/tools.py` | ~40 行 | 新增 `_record_rollback_entry()` 写入 rollback_manifest.json |
+
+### 验证机制
+
+外层独立验证——重新检查原始的巡检条件：
+- 工具失败 → 重新调用工具检查返回值
+- 修正模式 → 重新查 correction 列表
+
+agent 在修复过程中自己也会做验证（比如"装好了 wechat-cli，试一下能不能查到联系人"），这是 agent 内部的验证。外层验证是独立的二次确认。
+
+### 回滚机制
+
+现有的 `self_improve` 已有文件备份（`data_dir/backups/`），但缺少统一注册表。新增 `rollback_manifest.json` 跟踪所有自愈修改：
+
+```json
+{
+  "prop_xxx": {
+    "changed_files": [
+      {"path": "oaa/agent/extended_tools.py", "backup": "backups/extended_tools.bak"}
+    ],
+    "installed_packages": ["wechat-cli"],
+    "config_changes": [{"key": "wechat.enabled", "old": false, "new": true}]
+  }
+}
+```
+
+重试3次全部失败时 → 遍历 manifest 回滚所有变更 → 恢复原始状态。
+
+### 实现状态
+
+| # | 文件 | 状态 |
+|---|------|------|
+| 1 | `oaa/agent/repair_loop.py` | ✅ 已完成 |
+| 2 | `oaa/agent/idle_inspector.py` | ✅ 已完成 |
+| 3 | `oaa/agent/proposal.py` | ✅ 已完成 |
+| 4 | `oaa/gateway/management.py` | ✅ 已完成 |
+| 5 | `oaa/agent/tools.py` | ✅ 已完成 |
+
+### 预测审查 & 修复
+
+5 人专家组（架构师、安全、性能、可靠性、魔鬼代言人）对自愈系统代码进行了多轮辩论审查，产出 8 项发现，已修复 5 项：
+
+| # | 发现 | 严重度 | 状态 |
+|---|------|--------|------|
+| H-01 | 回滚清单 key 写死 `_tool_level` → 回滚完全不生效 | 致命 | ✅ contextvars 线程传递 proposal_id |
+| H-02 | ~~agent 不能修复非代码故障~~ → **修正：不是能力边界，是判断质量** | — | ⚠️ 见下方说明 |
+| H-03 | `_tool_failure_verifier` 永远返回 True | 中等 | ✅ 改为 MemoryManager 真实检查 |
+| H-04 | 缺失验证器时静默通过 | 中等 | ✅ 改为返回 False |
+| H-05 | 管理 handler 阻塞 30-120 秒 | 中等 | ⏳ 延后 |
+| H-06 | `_feed` 无超时保护 | 中等 | ✅ `asyncio.wait_for` 300s |
+| H-07 | Proposal 双模式无校验 | 中等 | ✅ `__post_init__` 验证 |
+| H-08 | 独立验证仍是空壳 | 中等 | ⚠️ H-03 修复后已有改善 |
+
+#### H-02 修正说明
+
+**原始预测**（错的）：agent 的能力有边界，某些故障类型（缺少二进制、跨平台不兼容）无法修复。
+
+**纠正**：这不是能力边界问题，是 agent 的**判断质量和努力程度**问题：
+- `wechat_contacts` 失败是因为 agent 选错了方案（应该用 iLink 替代，而不是修 wechat-cli），不是装不了
+- 所有 CLI 工具都是面向 AI 设计的，agent 可以用 `shell_run` 安装
+- 跨平台不是问题，但 agent 需要正确识别自己运行的平台
+- 需要用户注册/提供 key 的服务，agent 应向用户说明需求并完成后续操作
+
+**对实现的影响**：
+- `repair_loop._build_feed_prompt` 约束段已重写，强化「先尽其所能，再请求协作」原则
+- 重试 prompt 按失败类型注入针对性引导（dependency_missing → 提示安装路径；method_error → 提示换方案）
+- 约束 agent 不能把所有问题抛回给用户
 
 ---
 

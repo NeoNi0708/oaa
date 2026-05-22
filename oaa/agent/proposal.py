@@ -49,19 +49,30 @@ def _next_id() -> str:
 
 @dataclass
 class Proposal:
-    """A structured self-improvement proposal with executable actions."""
+    """A structured self-improvement proposal with executable actions.
+
+    Either ``actions`` (traditional fixed-step proposals) or
+    ``problem_context`` (self-healing feed+verify proposals) is set.
+    """
     id: str = ""
     type: str = ""
     title: str = ""
     problem: str = ""
     benefit: str = ""
     target: str = ""
-    actions: list[dict] = field(default_factory=list)
+    actions: list[dict] | None = field(default_factory=list)
+    problem_context: dict | None = None
     status: str = STATUS_PENDING
     created_at: float = 0.0
     executed_at: float | None = None
     result: str | None = None
     error: str | None = None
+
+    def __post_init__(self):
+        if self.actions and self.problem_context:
+            raise ValueError(
+                "Proposal cannot have both actions and problem_context set"
+            )
 
 
 class ProposalStore:
@@ -167,9 +178,13 @@ class ProposalStore:
                 lines.append(f"- **问题**: {p['problem']}")
             if p.get("benefit"):
                 lines.append(f"- **修复后**: {p['benefit']}")
-            lines.append(f"- **操作步骤**:")
-            for action in p.get("actions", []):
-                lines.append(f"  1. `{action['tool']}` — {action.get('description', '')}")
+            actions = p.get("actions") or []
+            if actions:
+                lines.append(f"- **操作步骤**:")
+                for action in actions:
+                    lines.append(f"  1. `{action['tool']}` — {action.get('description', '')}")
+            elif p.get("problem_context"):
+                lines.append(f"- **修复方案**: agent 将自动分析根因并选择修复方案")
             lines.append("")
         lines.append("## 用户确认路由")
         lines.append("")
@@ -210,7 +225,7 @@ class ProposalExecutor:
         proposal["status"] = STATUS_RUNNING
         results = []
 
-        for i, action in enumerate(proposal.get("actions", [])):
+        for i, action in enumerate(proposal.get("actions") or []):
             tool = action.get("tool", "")
             args = action.get("args", {})
             desc = action.get("description", tool)

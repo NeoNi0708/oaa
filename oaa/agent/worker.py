@@ -105,8 +105,6 @@ class WorkerAgent:
                         break
                     if chunk["type"] == "done":
                         result_parts.append(chunk.get("content", ""))
-                    elif chunk["type"] == "llm_output":
-                        result_parts.append(chunk.get("content", ""))
 
                 if not task.cancelled:
                     task.set_result("".join(result_parts))

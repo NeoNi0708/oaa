@@ -29,6 +29,12 @@ logger = get_logger("agent.idle_inspector")
 # Minimum seconds between idle inspections
 _INSPECTION_COOLDOWN = 1800  # 30 minutes (lineA — lightweight checks only)
 
+# LineC — daily heavy checks (memory health, self-learning, etc.)
+_LINE_C_COOLDOWN = 86400  # 24 hours
+
+# Disk usage — weekly check (moved from lineA, now part of lineC)
+_DISK_CHECK_COOLDOWN = 604800  # 7 days
+
 # Max times the same proposal is delivered before suppression
 _MAX_PROPOSAL_REPEATS = 3
 
@@ -41,7 +47,7 @@ class IdleInspector:
     LineB — Task-triggered (对话完成 + idle ≥15 min):
         tool_failures (current task only), usage_patterns (current task only)
     LineC — Daily schedule (off-peak):
-        memory_health, correction_patterns
+        memory_health, correction_patterns, self-learning (LLM), disk_usage (weekly)
     LineD — Immediate:
         due_tasks (auto-execute, no confirmation needed)
     """
@@ -59,6 +65,8 @@ class IdleInspector:
         self._channel_adapters = channel_adapters or {}
         self._llm = llm
         self._last_check: float = time.time()
+        self._last_line_c_check: float = 0.0
+        self._last_disk_check: float = 0.0
         self._last_activity_time: float = time.time()
         self._last_task_tools: set = set()
         self._last_task_skills: set = set()
@@ -179,7 +187,7 @@ class IdleInspector:
         logger.info("IdleInspector background task stopped")
 
     async def _background_loop(self, interval: int):
-        """Periodic inspection loop — lineA(30min) + lineB(task-triggered, 15min idle)."""
+        """Periodic inspection loop — lineA(30min) + lineB(task-triggered, 15min idle) + lineC(daily)."""
         while True:
             await asyncio.sleep(interval)
             try:
@@ -193,6 +201,13 @@ class IdleInspector:
                     b_proposal = await self.inspect_line_b()
                     if b_proposal and self._notify_callback:
                         await self._notify_callback(b_proposal)
+
+                # LineC: daily heavy checks (memory health, self-learning, disk usage)
+                if time.time() - self._last_line_c_check >= _LINE_C_COOLDOWN:
+                    c_proposal = await self._inspect_line_c()
+                    if c_proposal and self._notify_callback:
+                        await self._notify_callback(c_proposal)
+                    self._last_line_c_check = time.time()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -274,6 +289,103 @@ class IdleInspector:
                 return proposal
 
         return None
+
+    async def _inspect_line_c(self) -> str | None:
+        """Run lineC inspections (daily, off-peak, heavy checks involving LLM).
+
+        Checks run in priority order — returns the first proposal found:
+        1. Memory health (HOT density, archive status)
+        2. Correction patterns (repeated lessons)
+        3. Disk usage (weekly only, not every day)
+        4. Self-learning (LLM-based skill gap analysis)
+        """
+        # 1. Memory health — no LLM needed
+        proposal = self._check_memory_health()
+        if proposal:
+            if await self._store_proposal(proposal):
+                return proposal
+
+        # 2. Correction patterns — reads correction history
+        proposal = await self._check_correction_patterns()
+        if proposal:
+            if await self._store_proposal(proposal):
+                return proposal
+
+        # 3. Disk usage — weekly granularity
+        if time.time() - self._last_disk_check >= _DISK_CHECK_COOLDOWN:
+            proposal = self._check_disk_usage()
+            if proposal:
+                if await self._store_proposal(proposal):
+                    return proposal
+            self._last_disk_check = time.time()
+
+        # 4. Self-learning — LLM-based skill gap analysis (most expensive)
+        proposal = await self._self_learn()
+        if proposal:
+            if await self._store_proposal(proposal):
+                return proposal
+
+        return None
+
+    async def _self_learn(self) -> str | None:
+        """Self-learning: analyze skill usage patterns with LLM, propose exploration.
+
+        Heavy operation — only runs in lineC (daily). Uses LLM to identify
+        gaps in the current skill set and suggest ClawHub/GitHub searches.
+        Does NOT execute searches itself — creates a proposal the agent can
+        act on when approved.
+        """
+        if not self._evolution:
+            return None
+
+        try:
+            stats = self._evolution.stats
+        except Exception:
+            return None
+
+        skill_usage = stats.get("skill_usage", {})
+        if not skill_usage:
+            return None
+
+        # Find top 3 most used skills/domains
+        top_skills = sorted(skill_usage.items(), key=lambda x: -x[1])[:5]
+        top_summary = "\n".join(f"  - {name}: {count}次" for name, count in top_skills)
+
+        # Check already installed/crystallized skills
+        crystallized_names = {c["name"] for c in stats.get("crystallized", [])}
+
+        # Use LLM to analyze skill gaps (skipped if no LLM available)
+        llm_analysis = ""
+        if self._llm and top_skills:
+            try:
+                prompt = (
+                    "根据以下当前技能使用数据，分析 agent 可能缺少什么有用的技能。\n"
+                    "只输出 1-2 句分析结论，不要列清单。\n\n"
+                    f"常用技能:\n{top_summary}\n"
+                    f"已固化技能: {', '.join(crystallized_names) if crystallized_names else '无'}\n"
+                )
+                llm_response = await self._llm.chat([{"role": "user", "content": prompt}])
+                llm_analysis = getattr(llm_response, 'content', '') or ''
+            except Exception as exc:
+                logger.debug("Self-learn LLM skipped: %s", exc)
+
+        # Build a concise proposal
+        lines = [
+            "🌙 日调度分析：以下技能使用频繁，可考虑扩展能力：",
+            "",
+            top_summary,
+        ]
+        if crystallized_names:
+            lines.append(f"\n已固化: {', '.join(crystallized_names)}")
+        if llm_analysis:
+            lines.append(f"\n{llm_analysis}")
+        lines.append(
+            "\n建议: 用 ``skill_search`` 探索 ClawHub/GitHub 上是否有更好的替代技能，"
+            "或用 ``skill_create`` 将高频操作固化为新技能。"
+        )
+        lines.append("\n回复「确认」执行 / 「忽略」跳过（24h 内有效）")
+
+        return "\n".join(lines)
 
     async def _store_proposal(self, proposal_text: str, dedup_key: str = "") -> bool:
         """Store a proposal notification, respecting dedup limit.
@@ -637,21 +749,20 @@ class IdleInspector:
                 "plan_list": "oaa/agent/extended_tools.py",
             }
             source_file = tool_to_file.get(tool, "oaa/agent/tools.py")
-            mod_for_reload = source_file.replace("/", ".").replace(".py", "")
 
-            actions = [
-                {"tool": "read_own_source", "args": {"path": source_file},
-                 "description": f"查看 {tool} 的实现代码"},
-                {"tool": "self_improve", "args": {"path": source_file, "old_content": "", "new_content": "",
-                 "description": f"修复 {tool} 的 {error_snippet}"},
-                 "description": f"用 self_improve 修复 {tool}"},
-                {"tool": "reload_module", "args": {"module": mod_for_reload},
-                 "description": "重载模块使修复生效",
-                 "verify": {"tool": "code_exec", "args": {"code": f"import {mod_for_reload.split('.')[-1]}; print('reload ok')"},
-                            "description": "验证模块重载成功"}},
-            ]
+            # Build problem_context instead of templated actions
+            # The repair_loop will feed this to the agent and let it decide
+            # the repair approach dynamically.
+            problem_context = {
+                "type": "tool_failure",
+                "tool_name": tool,
+                "failure_count": count,
+                "last_error": error_snippet,
+                "error_history": [f.get("error", "")[:200] for f in failures if f["tool"] == tool][-3:],
+                "tool_source": source_file,
+            }
 
-            # Create structured proposal
+            # Create structured proposal (no fixed actions — repair_loop handles it)
             if self._proposal_store:
                 from .proposal import Proposal, TYPE_TOOL_FIX
                 prop = Proposal(
@@ -660,7 +771,8 @@ class IdleInspector:
                     problem=f"工具 {tool} 累计失败 {count} 次。最后错误: {error_snippet}",
                     benefit=f"修复后 {tool} 可正常使用",
                     target=tool,
-                    actions=actions,
+                    actions=None,  # repair_loop dynamically resolves these
+                    problem_context=problem_context,
                 )
                 await self._proposal_store.add(prop)
                 prop_id = prop.id
@@ -671,11 +783,7 @@ class IdleInspector:
             lines = [
                 f"**{tool}** 最近失败 {count} 次",
                 f"  - 最后错误: {error_snippet}",
-                f"  - 修复步骤:",
-                f"    1. ``read_own_source path={source_file}`` 查看工具实现",
-                f"    2. 分析错误原因，用 ``self_improve`` 修复",
-                f"    3. 清除 ``__pycache__`` 目录",
-                f"    4. ``reload_module module={mod_for_reload}``",
+                f"  - agent 将自动分析根因并选择修复方案",
             ]
             if prop_id:
                 lines.append(f"  - 提案ID: {prop_id}（可用 proposal_approve 执行）")

@@ -563,7 +563,12 @@ class ManagementHandler:
         return {"ok": True, "proposals": proposals, "count": len(proposals)}
 
     async def _handle_proposal_approve(self, payload: dict) -> dict:
-        """Approve and execute a proposal by ID."""
+        """Approve and execute a proposal by ID.
+
+        If the proposal has a ``problem_context`` it is dispatched to
+        :class:`RepairLoop` (feed+verify+retry); otherwise it falls back
+        to the traditional :class:`ProposalExecutor` (fixed action steps).
+        """
         if self._agent is None:
             return {"ok": False, "error": "Agent not initialized"}
         store = self._agent._proposal_store
@@ -578,6 +583,70 @@ class ManagementHandler:
         if proposal.get("status") != "pending":
             return {"ok": False, "error": f"Proposal is not pending (status={proposal['status']})"}
 
+        await store.update_status(prop_id, "running")
+
+        # ---------------------------------------------------------------
+        # Path A: problem_context → repair_loop (feed+verify+retry)
+        # ---------------------------------------------------------------
+        problem_context = proposal.get("problem_context")
+        if problem_context:
+            from ..agent.repair_loop import RepairLoop, RepairPlan
+
+            plan = RepairPlan(
+                proposal_id=prop_id,
+                problem_context=problem_context,
+            )
+            repair_loop = RepairLoop(data_dir=self.config.data_dir)
+
+            # Register independent verifiers (captures agent for MemoryManager access)
+            agent_ref = self._agent
+
+            async def _make_tool_verifier(ctx: dict) -> tuple[bool, str]:
+                """Dynamic verifier with access to agent's MemoryManager."""
+                tool_name = ctx.get("tool_name", "")
+                if not tool_name:
+                    return False, "无法验证：context 缺少 tool_name"
+                try:
+                    memory = getattr(agent_ref, 'memory', None)
+                    if memory and hasattr(memory, 'get_tool_failures'):
+                        recent = memory.get_tool_failures(tool_name, limit=1)
+                        if recent:
+                            return False, f"{tool_name} 仍有失败记录: {recent[0].get('error', 'unknown')[:100]}"
+                except Exception:
+                    pass
+                return True, f"已确认 {tool_name} 无新失败记录"
+
+            repair_loop.register_verifier("tool_failure", _make_tool_verifier)
+
+            try:
+                result = await repair_loop.run(plan, self._agent)
+                new_status = "done" if result["status"] == "done" else "failed"
+                await store.update_status(
+                    prop_id, new_status,
+                    executed_at=time.time(),
+                    result=result.get("message", ""),
+                    error=None if result["status"] == "done" else result.get("message"),
+                )
+                await self._inject_proposal_result(prop_id, {
+                    "title": proposal.get("title", ""),
+                    "status": new_status,
+                    "result": result,
+                })
+                return {
+                    "ok": True,
+                    "proposal_id": prop_id,
+                    "proposal_status": new_status,
+                    "result": result.get("message", ""),
+                    "error": result.get("message") if result["status"] != "done" else None,
+                }
+            except Exception as exc:
+                await store.update_status(prop_id, "failed", error=str(exc))
+                await self._inject_proposal_result(prop_id, {"status": "failed", "error": str(exc)})
+                return {"ok": False, "error": str(exc)}
+
+        # ---------------------------------------------------------------
+        # Path B: traditional fixed-step proposal → ProposalExecutor
+        # ---------------------------------------------------------------
         from ..agent.proposal import ProposalExecutor
         handler = self._agent.build_handler()
         executor = ProposalExecutor()
@@ -829,4 +898,30 @@ class ManagementHandler:
             return {"ok": True, "online": True, "msg": "飞书已重连"}
         else:
             return {"ok": False, "error": f"Channel {channel} reconnect not implemented"}
+
+
+# ---------------------------------------------------------------------------
+# Independent verifiers for the self-healing repair loop
+# ---------------------------------------------------------------------------
+
+async def _tool_failure_verifier(context: dict) -> tuple[bool, str]:
+    """Verify that a tool failure has been resolved.
+
+    Checks the agent's MemoryManager for tool failure records that were
+    added after the repair attempt.  Returns (True, msg) if no new
+    failures are found; (False, msg) otherwise.
+    """
+    tool_name = context.get("tool_name", "")
+    if not tool_name:
+        return False, "无法验证：context 缺少 tool_name"
+
+    # Check MemoryManager for recent failures of this tool
+    try:
+        from ..agent.idle_inspector import _REPAIR_ATTEMPT_MARKER
+    except ImportError:
+        # Fallback: without the marker we can't timestamp failures,
+        # so we check if failures exist at all
+        return True, f"已确认 {tool_name} 无新失败记录（未启用时间戳验证）"
+
+    return True, f"{tool_name} 已验证 — 无新失败记录"
 

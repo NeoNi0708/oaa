@@ -1,0 +1,366 @@
+"""Repair loop — feed+verify+retry wrapper for self-healing.
+
+The repair loop takes a problem context, feeds it to the agent via its
+existing process_message loop, then independently verifies the result.
+On failure, it retries up to ``max_retries`` times with failure history
+injected.  All failures trigger automatic rollback via the rollback manifest.
+"""
+import asyncio
+import contextvars
+import json
+import os
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from ..logging_config import get_logger
+
+logger = get_logger("agent.repair_loop")
+
+# ContextVar for threading the active proposal ID through the tool layer
+# into AtomicTools._record_rollback_entry().  Set by RepairLoop.run()
+# and read by record_rollback_entry().
+_active_proposal_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "active_proposal_id", default=""
+)
+
+
+def get_active_proposal_id() -> str:
+    """Return the proposal ID for the currently executing repair loop.
+
+    Returns the empty string when no repair loop is active (normal operation).
+    """
+    return _active_proposal_id.get()
+
+
+VerifyFn = Any  # Callable[[dict], Awaitable[tuple[bool, str]]]
+
+
+@dataclass
+class RepairPlan:
+    """Tracks a self-healing repair attempt across retries."""
+
+    proposal_id: str
+    problem_context: dict
+    attempt: int = 1
+    max_retries: int = 3
+    failure_history: list = field(default_factory=list)
+    rollback_manifest: dict = field(default_factory=dict)
+
+
+class RepairLoop:
+    """Self-healing execution loop — feed → execute → verify → retry/rollback.
+
+    Usage::
+
+        loop = RepairLoop(data_dir)
+        loop.register_verifier("tool_failure", my_verifier_fn)
+        plan = RepairPlan(proposal_id="prop_xxx", problem_context={...})
+        result = await loop.run(plan, agent)
+    """
+
+    def __init__(self, data_dir: str, feed_timeout: float = 300.0):
+        self.data_dir = data_dir
+        self._feed_timeout = feed_timeout
+        self._verifiers: dict[str, VerifyFn] = {}
+        self._manifest_path = os.path.join(data_dir, "rollback_manifest.json")
+
+    def register_verifier(self, problem_type: str, fn: VerifyFn):
+        """Register an independent verifier for *problem_type*.
+
+        The verifier receives the original ``problem_context`` and must
+        return ``(passed: bool, message: str)``.
+        """
+        self._verifiers[problem_type] = fn
+
+    async def run(self, plan: RepairPlan, agent) -> dict:
+        """Execute the self-healing flow.  Returns ``{"status": ..., ...}``."""
+        token = _active_proposal_id.set(plan.proposal_id)
+        try:
+            return await self._run_impl(plan, agent)
+        finally:
+            _active_proposal_id.reset(token)
+
+    async def _run_impl(self, plan: RepairPlan, agent) -> dict:
+        """Internal implementation — called by ``run()`` with contextvar set."""
+        while plan.attempt <= plan.max_retries:
+            # Build context for this attempt (includes failure history on retry)
+            prompt = self._build_feed_prompt(plan)
+
+            # Feed → agent fixes the problem using its own capabilities
+            await self._feed(agent, prompt)
+
+            # Independent verification
+            passed, message = await self._verify(plan)
+            if passed:
+                self._set_manifest_status(plan.proposal_id, "done")
+                return {
+                    "status": "done",
+                    "message": message,
+                    "attempts": plan.attempt,
+                }
+
+            # Analyse failure and prepare for retry
+            failure_type = self._classify_failure(message)
+            plan.failure_history.append({
+                "attempt": plan.attempt,
+                "failure_type": failure_type,
+                "detail": message,
+            })
+            logger.info(
+                "Repair attempt %d/%d failed (%s): %.80s",
+                plan.attempt, plan.max_retries, failure_type, message,
+            )
+            plan.attempt += 1
+
+        # All retries exhausted → rollback
+        await self._rollback(plan)
+        return {
+            "status": "failed",
+            "message": f"{plan.max_retries} 次重试全部失败，已回滚所有变更",
+            "attempts": plan.attempt - 1,
+            "failure_history": plan.failure_history,
+        }
+
+    # ------------------------------------------------------------------
+    # Feed prompt construction
+    # ------------------------------------------------------------------
+
+    def _build_feed_prompt(self, plan: RepairPlan) -> str:
+        """Build the self-healing prompt fed to the agent."""
+        ctx = plan.problem_context
+        ptype = ctx.get("type", "unknown")
+
+        parts = [
+            "【自愈任务】{}".format(ptype),
+            "━" * 50,
+            "agent 检测到以下问题需要处理：\n",
+        ]
+
+        if ptype == "tool_failure":
+            parts.extend([
+                "工具 **{}** 累计失败 **{}** 次".format(
+                    ctx.get("tool_name", "?"), ctx.get("failure_count", 0),
+                ),
+                "最后错误：{}".format(ctx.get("last_error", "")),
+            ])
+        else:
+            parts.append(json.dumps(ctx, ensure_ascii=False, indent=2))
+
+        # Retry context — inject failure-type-specific guidance
+        if plan.failure_history:
+            last = plan.failure_history[-1]
+            ftype = last.get("failure_type", "")
+            parts.extend([
+                "",
+                "⚠️ 上次修复尝试失败（第 {} 次）：".format(last["attempt"]),
+                "  失败原因：{}".format(last.get("detail", "")[:200]),
+                "  失败类型：{}".format(ftype),
+            ])
+
+            if ftype == "dependency_missing":
+                parts.extend([
+                    "",
+                    "上次你尝试安装依赖但未成功。可选方案：",
+                    "  - 用 pip / npm / winget / 包管理器安装",
+                    "  - 从 GitHub 或其他来源下载（web_search → curl/wget）",
+                    "  - 换一个已有替代方案（如有）",
+                    "  - 请求用户协助注册相关服务（如需要 API key/后台配置）",
+                ])
+            elif ftype == "method_error":
+                parts.append("上次的修复方案本身有问题，请换一种方法重试。")
+            else:
+                parts.append("请换一种方案重试，不要重复已经失败的做法。")
+
+        parts.extend([
+            "",
+            "请完成以下步骤：",
+            "1. 诊断根因 — 分析错误信息，判断是缺依赖、调用方式错误、权限不够还是服务不可达",
+            "2. 制定修复方案 — 可能的方案包括：",
+            "   a. 安装依赖或外部工具（pip / npm / web_search 搜索下载）",
+            "   b. 更换实现方式（用其他已有工具完成同一任务）",
+            "   c. 修改代码（self_improve）",
+            "   d. 请求用户提供必要信息（API key、注册、后台配置）",
+            "3. 执行修复 — 使用可用工具完成修复",
+            "4. 验证修复 — 重新检查原始问题是否解决",
+            "5. 输出结果 — 总结做了什么、结果如何",
+            "",
+            "约束：",
+            "- 做修复时，不要只盯着故障工具本身，先看有没有其他方式可以解决问题",
+            "- 能用已有工具解决的问题，优先用已有工具",
+            "- 已有工具不满足时，先尝试安装/搜索新工具，不要立刻放弃",
+            "- 自己能做的事（安装、改代码、搜索方案、切换工具）必须自己先做",
+            "- 试过所有自己能用的方法还不行，才需要请求用户协助",
+            "- 请求用户协助时，必须说清楚：已尝试了什么、卡在哪、需要用户做什么",
+            "- 每次修改会自动记录备份，无需担心改坏",
+        ])
+        return "\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # Feed execution
+    # ------------------------------------------------------------------
+
+    async def _feed(self, agent, prompt: str) -> str:
+        """Feed *prompt* into the agent and collect the full response."""
+        parts: list[str] = []
+        try:
+            async def _collect():
+                async for chunk in agent.process_message(prompt, history=[]):
+                    if chunk["type"] == "llm_output":
+                        parts.append(chunk["content"])
+                    elif chunk["type"] == "done":
+                        parts.append(chunk.get("content", ""))
+
+            await asyncio.wait_for(_collect(), timeout=self._feed_timeout)
+        except asyncio.TimeoutError:
+            logger.error("Repair feed timed out after %ds", self._feed_timeout)
+            parts.append("\n\n[修复超时 — 已中断]")
+        except Exception as exc:
+            logger.error("Repair feed failed: %s", exc)
+            parts.append(f"\n\n[修复执行异常: {exc}]")
+        return "".join(parts).strip()
+
+    # ------------------------------------------------------------------
+    # Independent verification
+    # ------------------------------------------------------------------
+
+    async def _verify(self, plan: RepairPlan) -> tuple[bool, str]:
+        """Run the registered verifier for this problem type."""
+        ctx = plan.problem_context
+        ptype = ctx.get("type", "tool_failure")
+        verifier = self._verifiers.get(ptype)
+        if verifier is None:
+            logger.error("No verifier registered for '%s' — verification failed", ptype)
+            return False, "未注册验证器 — 无法确认修复结果"
+        try:
+            return await verifier(ctx)
+        except Exception as exc:
+            logger.error("Verifier for '%s' raised: %s", ptype, exc)
+            return False, f"验证过程异常: {exc}"
+
+    # ------------------------------------------------------------------
+    # Rollback
+    # ------------------------------------------------------------------
+
+    async def _rollback(self, plan: RepairPlan):
+        """Roll back every change recorded in the manifest."""
+        manifest = plan.rollback_manifest or {}
+        changes = manifest.get("changes", [])
+        if not changes:
+            logger.warning("No rollback manifest entries for %s", plan.proposal_id)
+        else:
+            # Restore file backups in reverse chronological order
+            for change in reversed(changes):
+                if change.get("type") == "file_edit" and change.get("backup"):
+                    self._restore_backup(change["path"], change["backup"])
+
+        self._set_manifest_status(plan.proposal_id, "rolled_back")
+        logger.info("Rolled back proposal %s (%d changes)", plan.proposal_id, len(changes))
+
+    @staticmethod
+    def _restore_backup(path: str, backup_path: str):
+        """Restore a single file from its backup."""
+        if not os.path.exists(backup_path):
+            logger.warning("Backup not found: %s", backup_path)
+            return
+        import shutil
+        try:
+            shutil.copy2(backup_path, path)
+            logger.info("Restored %s from backup", path)
+        except Exception as exc:
+            logger.warning("Failed to restore %s: %s", path, exc)
+
+    # ------------------------------------------------------------------
+    # Failure classification
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _classify_failure(message: str) -> str:
+        """Categorise a failure to guide the next retry strategy."""
+        low = message.lower()
+        if any(k in low for k in ("not found", "not installed", "no module",
+                                  "no such", "command not found", "cannot find")):
+            return "dependency_missing"
+        if any(k in low for k in ("typeerror", "attributeerror", "nameerror",
+                                  "syntaxerror", "valueerror")):
+            return "method_error"
+        if any(k in low for k in ("permission", "denied", "access")):
+            return "permission"
+        return "other"
+
+    # ------------------------------------------------------------------
+    # Manifest persistence
+    # ------------------------------------------------------------------
+
+    def _set_manifest_status(self, proposal_id: str, status: str):
+        """Update the status of a proposal in the rollback manifest."""
+        manifest = self._load_manifest()
+        if proposal_id in manifest:
+            manifest[proposal_id]["status"] = status
+            self._save_manifest(manifest)
+
+    def _load_manifest(self) -> dict:
+        if not os.path.exists(self._manifest_path):
+            return {}
+        try:
+            with open(self._manifest_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _save_manifest(self, manifest: dict):
+        try:
+            json_string = json.dumps(manifest, ensure_ascii=False, indent=2)
+            with open(self._manifest_path, "w", encoding="utf-8") as f:
+                f.write(json_string)
+        except OSError as exc:
+            logger.warning("Failed to save rollback manifest: %s", exc)
+
+
+def record_rollback_entry(data_dir: str, proposal_id: str, change: dict):
+    """Record a single change in the rollback manifest (thread-safe write).
+
+    Called by :meth:`AtomicTools._record_rollback_entry` after a
+    self-modifying operation (self_improve, file_write, file_patch).
+
+    When *proposal_id* is ``"_tool_level"`` (legacy sentinel), the active
+    proposal ID from the :data:`_active_proposal_id` contextvar is used
+    instead, so that changes are correctly attributed to the running repair
+    loop.
+    """
+    effective_id = proposal_id
+    if effective_id == "_tool_level" or not effective_id:
+        ctx_id = _active_proposal_id.get()
+        if ctx_id:
+            effective_id = ctx_id
+
+    manifest_path = os.path.join(data_dir, "rollback_manifest.json")
+    manifest: dict = {}
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            manifest = {}
+
+    if effective_id not in manifest:
+        manifest[effective_id] = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "active",
+            "attempts": [],
+        }
+
+    manifest[effective_id].setdefault("attempts", [])
+    # Wrap the change in an attempt envelope
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **change,
+    }
+    manifest[proposal_id]["attempts"].append(entry)
+
+    try:
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        logger.warning("Failed to write rollback manifest: %s", exc)

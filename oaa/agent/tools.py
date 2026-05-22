@@ -204,6 +204,33 @@ class AtomicTools(BaseHandler):
         except Exception as exc:
             logger.warning("Failed to record change: %s", exc)
 
+    def _record_rollback_entry(self, filepath: str, description: str, backup_path: str = ""):
+        """Record a change in the rollback manifest for self-healing tracking.
+
+        This complements ``_record_change`` (changelog.md) with a structured
+        JSON manifest that the :class:`~oaa.agent.repair_loop.RepairLoop`
+        reads to roll back changes on failure.
+        """
+        if not self._is_oaa_path(filepath):
+            return
+        try:
+            from .repair_loop import record_rollback_entry as _record
+
+            # proposal_id isn't known at the tool level — use a sentinel.
+            # The RepairLoop will link the manifest entry to the proposal
+            # when it reads the manifest during rollback.
+            rel = os.path.relpath(filepath, OAA_ROOT)
+            change = {
+                "type": "file_edit",
+                "path": rel,
+                "description": description[:200],
+            }
+            if backup_path:
+                change["backup"] = backup_path
+            _record(self.data_dir, "_tool_level", change)
+        except Exception as exc:
+            logger.debug("Failed to record rollback entry: %s", exc)
+
     def _clear_pycache(self, filepath: str):
         """Remove __pycache__ entries for the module containing *filepath*."""
         pycache_dir = os.path.join(os.path.dirname(filepath), "__pycache__")
@@ -434,6 +461,7 @@ class AtomicTools(BaseHandler):
 
             if is_oaa:
                 self._record_change(path, f"file_write ({mode})", backup_path)
+                self._record_rollback_entry(path, f"file_write ({mode})", backup_path)
                 self._clear_pycache(path)
 
             logger.info("file_write: path=%s mode=%s bytes=%d", os.path.basename(path), mode, len(content))
@@ -472,6 +500,7 @@ class AtomicTools(BaseHandler):
 
             if is_oaa:
                 self._record_change(path, "file_patch: replaced unique text", backup_path)
+                self._record_rollback_entry(path, "file_patch", backup_path)
                 self._clear_pycache(path)
 
             logger.info("file_patch: %s", os.path.basename(path))
@@ -697,6 +726,7 @@ class AtomicTools(BaseHandler):
         reload_msg = await self._do_reload(rel_path)
         desc = description or f"self_improve: replaced unique text in {path}"
         self._record_change(full_path, desc, backup_path)
+        self._record_rollback_entry(full_path, desc, backup_path)
         return {
             "status": "success",
             "msg": f"Applied to {path} and verified successfully. {reload_msg}",

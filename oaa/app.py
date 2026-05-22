@@ -233,8 +233,6 @@ class OAAApp:
             async for chunk in self.agent.process_message(startup_prompt, history=[]):
                 if chunk["type"] == "llm_output":
                     response_parts.append(chunk["content"])
-                elif chunk["type"] == "done" and chunk.get("content"):
-                    response_parts.append(chunk["content"])
 
             full = "".join(response_parts).strip()
             if full:
@@ -327,3 +325,6 @@ def main():
         app.run()
     except KeyboardInterrupt:
         print("\n[OAA] Bye!")
+
+if __name__ == "__main__":
+    main()
