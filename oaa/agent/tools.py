@@ -165,6 +165,38 @@ class AtomicTools(BaseHandler):
         norm = os.path.normpath(path)
         return any(norm.startswith(d + os.sep) or norm == d for d in _OAA_SOURCE_DIRS)
 
+    @staticmethod
+    def _resolve_source_path(path: str) -> str | None:
+        """Resolve a source path to an absolute filesystem path.
+
+        Accepts:
+        - File paths relative to OAA_ROOT (``oaa/app.py``)
+        - Python module paths (``oaa.app`` -> ``oaa/app.py``)
+        - Directories (``oaa/`` -> directory listing)
+        - Duplicate-prefix paths (``oaa/oaa/app.py`` -> ``oaa/app.py``)
+
+        Returns the absolute path, or ``None`` if nothing was found.
+        """
+        candidates = [os.path.normpath(os.path.join(OAA_ROOT, path))]
+        orig_stripped = path.lstrip(".")
+
+        # Python module path: oaa.app -> oaa/app.py
+        if "." in orig_stripped and not orig_stripped.endswith(".py"):
+            mod_path = orig_stripped.replace(".", "/") + ".py"
+            candidates.append(os.path.normpath(os.path.join(OAA_ROOT, mod_path)))
+            pkg_path = orig_stripped.replace(".", "/") + "/__init__.py"
+            candidates.append(os.path.normpath(os.path.join(OAA_ROOT, pkg_path)))
+
+        # Duplicate prefix: oaa/oaa/app.py -> oaa/app.py
+        parts = path.replace("\\", "/").split("/")
+        if len(parts) >= 2 and parts[0] == parts[1]:
+            candidates.append(os.path.normpath(os.path.join(OAA_ROOT, "/".join(parts[1:]))))
+
+        for c in candidates:
+            if c.startswith(os.path.normpath(OAA_ROOT)) and os.path.exists(c):
+                return c
+        return None
+
     def _backup_file(self, filepath: str) -> str:
         """Create a timestamped backup of *filepath* in ``data_dir/backups/``.
 
@@ -245,12 +277,24 @@ class AtomicTools(BaseHandler):
         except Exception as exc:
             logger.warning("Failed to clear pycache for %s: %s", module_name, exc)
 
-    @agent_tool(
-        name="code_run",
-        description="Execute Python/PowerShell code within workspace restrictions."
-    )
-    async def do_code_run(self, code: str, type: str = "python", timeout: int = 15, cwd: str = "") -> dict:
-        """Execute Python/PowerShell code within workspace restrictions."""
+    # code_run merged into code_exec — keep implementation for internal use
+    # but remove from LLM tool list to eliminate the code_run vs code_exec choice.
+    async def do_code_run(self, args_or_code, type: str = "python",
+                           timeout: int = 15, cwd: str = "") -> dict:
+        """Execute Python/PowerShell code within workspace restrictions.
+        Accepts either a dict (legacy calling convention) or individual params."""
+        if isinstance(args_or_code, dict):
+            code = args_or_code.get("code", "")
+            timeout = args_or_code.get("timeout", timeout)
+            type = args_or_code.get("type", type)
+            cwd = args_or_code.get("cwd", cwd)
+        else:
+            code = args_or_code
+        return await self._do_code_run_subprocess(code, timeout, type, cwd)
+
+    async def _do_code_run_subprocess(self, code: str, timeout: int = 15,
+                                       type: str = "python", cwd: str = "") -> dict:
+        """Run code in a sandboxed subprocess (legacy code_run path)."""
         code_type = type
         timeout = min(timeout, 60)
         cwd = self._resolve_path(cwd) if cwd else "."
@@ -296,14 +340,18 @@ class AtomicTools(BaseHandler):
 
     @agent_tool(
         name="code_exec",
-        description="Execute Python code in-process for agent self-extension. Allows most imports but blocks shell execution (os.system, subprocess.Popen, shutil.rmtree, etc.). Includes auto-correction layer (SyntaxError fix, NameError import injection)."
+        description="Execute Python code for data processing, analysis, computation, or script automation. Use mode='sandbox' for untrusted code or when you only need stdout/stderr output. Use mode='exec' (default) when you need the Python 'result' variable back. Blocks dangerous system operations (os.system, subprocess, etc.) — for system commands use 'shell_run' instead."
     )
-    async def do_code_exec(self, code: str, timeout: int = 15) -> dict:
+    async def do_code_exec(self, code: str, timeout: int = 15, mode: str = "exec") -> dict:
         """Execute Python code in-process for agent self-extension.
 
         Allows most imports but blocks shell execution (os.system,
         subprocess.Popen, shutil.rmtree, etc.).  Uses the ``result``
         variable convention for return values.
+
+        When *mode* is ``\"sandbox\"``, runs in a restricted subprocess
+        (equivalent to the legacy ``code_run`` tool) — useful when the
+        code is untrusted or only stdout/stderr output is needed.
 
         Includes auto-correction layer:
         - Pre-execution: fixes indentation issues (SyntaxError)
@@ -318,12 +366,15 @@ class AtomicTools(BaseHandler):
         if not code.strip():
             return {"status": "error", "msg": "No code provided"}
 
-        # Pre-execution syntax fix
+        # Sandbox mode (legacy code_run): simple subprocess, no result variable
+        if mode == "sandbox":
+            return await self._do_code_run_subprocess(code, timeout)
+
+        # Exec mode (default): auto-correction + result variable
         original_code = code
         code, fix_desc = _fix_syntax_errors(code)
         all_fixes = [fix_desc] if fix_desc else []
 
-        # Try execution, with one re-try after NameError fix
         for attempt in range(2):
             with tempfile.NamedTemporaryFile(
                 suffix=".py", delete=False, mode="w", encoding="utf-8", dir=self.data_dir
@@ -927,7 +978,7 @@ class AtomicTools(BaseHandler):
 
     @agent_tool(
         name="read_own_source",
-        description="Read OAA source code files. Use when you need to understand or debug your own implementation. Provide a file path or a glob pattern."
+        description="Read OAA source code files. Accepts file paths (oaa/app.py), Python module paths (oaa.app), or glob patterns. Use when you need to understand or debug your own implementation."
     )
     async def do_read_own_source(self, path: str = "", pattern: str = "", start_line: int = 1, line_count: int = 200) -> dict:
         """Read OAA source code files, restricted to the project root."""
@@ -954,10 +1005,8 @@ class AtomicTools(BaseHandler):
                     results[rel] = f"[error: {e}]"
             return {"status": "success", "files": results}
 
-        full_path = os.path.normpath(os.path.join(OAA_ROOT, path))
-        if not full_path.startswith(os.path.normpath(OAA_ROOT)):
-            return {"status": "error", "msg": "Path outside OAA project root"}
-        if not os.path.exists(full_path):
+        full_path = self._resolve_source_path(path)
+        if full_path is None:
             return {"status": "error", "msg": f"Path not found: {path}"}
         if os.path.isdir(full_path):
             import glob as _glob
@@ -1018,7 +1067,12 @@ class AtomicTools(BaseHandler):
         if not target_dir.startswith(os.path.normpath(OAA_ROOT)):
             return {"status": "error", "msg": "Path outside OAA project root"}
         if not os.path.isdir(target_dir):
-            return {"status": "error", "msg": f"Directory not found: {subpath}"}
+            # Try fuzzy resolution (module path, duplicate prefix)
+            resolved = self._resolve_source_path(subpath)
+            if resolved and os.path.isdir(resolved):
+                target_dir = resolved
+            else:
+                return {"status": "error", "msg": f"Directory not found: {subpath}"}
 
         tree_lines = []
         rel_root = os.path.relpath(target_dir, OAA_ROOT)

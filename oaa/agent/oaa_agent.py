@@ -384,7 +384,7 @@ code_exec 报 ModuleNotFoundError: No module named 'openpyxl'
 ## 业务领域
 
 联轴器出口业务。使用 `file_write` 保存文件到 workspace 目录，使用 `excel_xlsx` 创建表格。
-复杂数据处理用 `code_exec` 或 `code_run` 执行 Python 脚本。"""
+复杂数据处理用 `code_exec` 执行 Python 脚本。"""
 
         result = base_prompt + "\n\n" + awareness
 

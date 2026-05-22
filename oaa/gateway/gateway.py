@@ -73,8 +73,8 @@ class Gateway:
             yield {"type": "done", "content": f"处理消息时出错: {exc}"}
             return
 
-        # Save assistant response
-        if response:
+        # Save assistant response (skip system errors to avoid context pollution)
+        if response and not response.startswith("[系统错误]"):
             self.session_mgr.add_message(session_id, msg.source, "assistant", response)
 
     async def send_to_channel(self, source: str, user_id: str, content: str,

@@ -187,7 +187,12 @@ class AgentLoop:
                         return
                 if last_error:
                     if attempt < _MAX_RETRIES:
-                        delay = _BASE_DELAY * (2 ** (attempt - 1))
+                        # Timeout errors: longer delay to let server recover
+                        # Transient errors: exponential backoff starting small
+                        if err_type == "TimeoutError":
+                            delay = 30.0
+                        else:
+                            delay = _BASE_DELAY * (2 ** (attempt - 1))
                         logger.warning(
                             "LLM call failed [%s] attempt %d/%d, retrying in %.1fs: %s",
                             err_type, attempt, _MAX_RETRIES, delay, last_error,

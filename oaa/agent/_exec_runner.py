@@ -42,7 +42,7 @@ def _patch_module(mod_name: str) -> None:
             def _raise(*args, **kwargs):
                 raise RuntimeError(
                     f"{mod_name}.{original_name}() is disabled in code_exec. "
-                    f"Use code_run or shell_run for shell commands."
+                    f"Use shell_run for shell commands."
                 )
             setattr(mod, func_name, _raise)
 
@@ -59,8 +59,17 @@ _SAFE_BUILTINS: dict = {
 
 # ---- Argument parsing with optional timeout ----
 
-_ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]  # positional args
 _timeout = 30  # default timeout seconds
+_ARGS: list[str] = []
+_skip = False
+for a in sys.argv[1:]:
+    if _skip:
+        _skip = False
+        continue
+    if a == "--timeout":
+        _skip = True
+        continue
+    _ARGS.append(a)
 for i, a in enumerate(sys.argv[1:], 1):
     if a == "--timeout" and i + 1 < len(sys.argv[1:]):
         try:
