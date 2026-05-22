@@ -1,10 +1,10 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-21 — 空闲巡检重构已实现
+> 最后更新：2026-05-21 — 空闲巡检4线架构 + 技能市场搜索 + WeChatCLI 实装
 
 ---
 
-## 本次会话（2026-05-21 续）— 空闲巡检架构重构 + 4 项 Bug 修复
+## 本次会话（2026-05-21 续）— 空闲巡检4线架构 + 技能市场 + WeChatCLI 实装
 
 ### 空闲巡检新架构 ✅ 已实现
 
@@ -34,6 +34,26 @@
 
 **移除：**
 - 磁盘用量 → 改每周一次 ✅（从 `inspect()` 移除，保留在 `_inspect_all_phases()` 启动扫描中）
+
+### WeChat CLI 存根 → 真实调用 ✅
+
+| 文件 | 变更 |
+|------|------|
+| `oaa/agent/tools.py` | 5 个 `do_wechat_*` 存根改为通过 `_wechat_cli_call()` 代理到 `gateway.adapters.wechat_cli.WeChatCLI`，自动发现二进制，`FileNotFoundError` 如实报错 |
+| `oaa/agent/oaa_agent.py` | 从 `config.wechat.wechat_cli_path` 传入路径到 `AtomicTools.set_wechat_cli_path()` |
+| `oaa/agent/idle_inspector.py` | 从 `_STUB_TOOLS` 移除 wechat 工具，自愈系统可检测其失败 |
+
+### 技能市场搜索 & 安装 ✅
+
+**之前**：`skill_search` 和 `skill_install` 是存根且未注册 schema，LLM 不可见，死代码。
+
+**之后**：
+
+| 文件 | 变更 |
+|------|------|
+| `oaa/agent/tool_schema.py` | 在 `EXTENDED_TOOLS_SCHEMA` 注册 `skill_search`（query → ClawHub `/api/v1/search`）和 `skill_install`（slug → resolve → download → extract） |
+| `oaa/agent/extended_tools.py` | `do_skill_search` 调用 ClawHub API `/api/v1/search?q=...`；`do_skill_install` 调用 `/api/v1/resolve` 获取下载 URL → `requests` 下载 → 自动识别 zip/tar.gz/SKILL.md → 解压到 `skills/community/` |
+| `oaa/agent/oaa_agent.py` | 系统提示词「可用技能」段更新：没有匹配技能时先搜 ClawHub/GitHub，再自己创建，不问用户 |
 
 ### 通知文本统一
 - 所有巡检通知末尾改为 `回复「确认」执行 / 「忽略」跳过（24h 内有效）`
@@ -1244,3 +1264,34 @@ ai_search(query, intent="auto", region="auto", max_results=10, domain="")
 | F6 | IdleInspector 误报 stub 工具失败 | `wechat_contacts` 等预期错误被视为 bug | `idle_inspector.py` 加 `_STUB_TOOLS` 过滤，跳过已知 stub |
 | F7 | Agent 不了解自身运行时状态 | 无通道连接状态注入 | `oaa_agent.py` `_build_channel_status()` 动态注入各通道连接状态到 system prompt |
 | F8 | 启动后用户不知道通道状态 | 无主动通知 | `app.py` `_startup_check()` 启动后推送通道状态到 Desktop + WeChat |
+
+---
+
+## 待完成
+
+### P0 — 线C：日调度巡检
+
+记忆健康、修正模式、自学习（逛 ClawHub/GitHub 找技能/插件）。涉及 LLM 调用，放在低谷时段。需要：
+
+| 工作项 | 说明 |
+|--------|------|
+| 日调度机制 | TaskScheduler cron 或 IdleInspector 内部 timer |
+| `inspect_line_c()` | 记忆健康检查 + 修正模式分析 + 自学习 |
+| 自学习逻辑 | 分析当前任务领域 → `skill_search` → 评估质量 → 安装 |
+| 磁盘用量周检 | 接入日调度（每周一次） |
+
+### P1 — 测试
+
+| 测试 | 说明 |
+|------|------|
+| GUI CDP 测试 | EvolutionView 页面加载、标签切换、按钮点击、Toast |
+| 管理 API 边界测试 | 无效 ID、重复操作、非法 status |
+| IdleInspector 集成测试 | 检测 → 提案 → GUI 可见 → 批准执行 |
+
+### P2 — 度量 & 小修
+
+| 工作项 | 说明 |
+|--------|------|
+| 主动性度量指标 | 量化 agent 主动行为（主动调工具 vs 被动等待确认） |
+| LLM 调用统计 | 追踪模型、耗时、finish_reason、错误率 |
+| 技能详情面板位置 | 浮动定位而非固定在被点击技能下方 |

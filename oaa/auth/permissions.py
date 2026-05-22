@@ -37,9 +37,11 @@ class PermissionsManager:
         "tool_create", "skill_install", "mcp_install",
     })
 
-    def __init__(self, config: AppConfig, confirm_callback: Callable = None):
+    def __init__(self, config: AppConfig, confirm_callback: Callable = None,
+                 metrics_collector=None):
         self.config = config
         self._confirm_callback = confirm_callback
+        self._metrics = metrics_collector
         # Tool trust tracking — reduce confirmation frequency for proven tools
         self._trust_data: dict[str, int] = {}
         self._trust_threshold = 3
@@ -50,6 +52,10 @@ class PermissionsManager:
     def set_confirm_callback(self, callback: Callable):
         """Set or replace the confirmation callback (for late binding)."""
         self._confirm_callback = callback
+
+    def set_metrics_collector(self, metrics_collector):
+        """Set or replace the metrics collector (for late binding)."""
+        self._metrics = metrics_collector
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -96,31 +102,50 @@ class PermissionsManager:
             # Log dangerous ops but always allow
             if self._is_dangerous(operation):
                 logger.info("Dangerous operation auto-approved [%s]: %s", operation, details)
+            self._report_metrics(operation, "auto_level", True)
             return True
 
         if level == "confirm":
             if not self.require_confirm(operation):
+                self._report_metrics(operation, "auto_level", True)
                 return True
             # Trusted non-dangerous tools skip confirmation
             if not self._is_dangerous(operation) and self._is_trusted(operation):
                 logger.info("Skipping confirm for trusted tool [%s]: %s", operation, details)
+                self._report_metrics(operation, "trusted", True)
                 return True
             if self._confirm_callback:
-                return await self._confirm_callback(operation, details)
+                allowed = await self._confirm_callback(operation, details)
+                self._report_metrics(operation, "confirmed" if allowed else "denied", allowed)
+                return allowed
             logger.warning("No confirm callback for required op: %s", operation)
+            self._report_metrics(operation, "denied", False)
             return False
 
         if level == "restrict":
             if self._is_dangerous(operation) or self.require_confirm(operation):
                 if self._confirm_callback:
-                    return await self._confirm_callback(operation, details)
+                    allowed = await self._confirm_callback(operation, details)
+                    self._report_metrics(operation, "confirmed" if allowed else "denied", allowed)
+                    return allowed
                 logger.warning("No confirm callback for restricted op: %s", operation)
+                self._report_metrics(operation, "denied", False)
                 return False
+            self._report_metrics(operation, "auto_level", True)
             return True
 
         # Unknown level — fall through to allow
         logger.warning("Unknown permission_level %r — allowing", level)
+        self._report_metrics(operation, "auto_level", True)
         return True
+
+    def _report_metrics(self, operation: str, decision: str, allowed: bool):
+        """Report a permission decision to the metrics collector, if attached."""
+        if self._metrics:
+            try:
+                self._metrics.record_confirm(operation, decision, allowed)
+            except Exception as exc:
+                logger.warning("Metrics record_confirm failed: %s", exc)
 
     async def add_blacklist_path(self, path: str):
         if "blacklist_paths" not in self.config.permissions:

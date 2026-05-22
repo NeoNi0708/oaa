@@ -46,6 +46,7 @@ export function useWebSocket() {
   const statusText = ref('')
   const currentTool = ref<{ name: string; args: string } | null>(null)
   const confirmRequest = ref<ConfirmRequest | null>(null)
+  const configUpdated = ref(0)  // incremented on config_updated push events
 
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let isDestroyed = false
@@ -142,6 +143,10 @@ export function useWebSocket() {
               operation: p.operation || '',
               details: p.details || '',
             }
+            break
+          }
+          case 'config_updated': {
+            configUpdated.value++
             break
           }
         }
@@ -263,6 +268,7 @@ export function useWebSocket() {
     statusText,
     currentTool,
     confirmRequest,
+    configUpdated,
     send,
     sendRequest,
     respondToConfirm,

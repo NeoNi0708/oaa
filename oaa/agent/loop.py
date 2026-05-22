@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any, AsyncGenerator, Optional, TYPE_CHECKING
 
 from ..llm import LLMClient, LLMResponse
@@ -91,6 +92,7 @@ class AgentLoop:
         max_turns: int = 70,
         max_messages: int = 60,
         memory_mgr=None,
+        metrics_collector=None,
     ):
         self.llm = llm
         self.handler = handler
@@ -98,6 +100,7 @@ class AgentLoop:
         self.max_turns = max_turns
         self._max_messages = max_messages
         self._memory_mgr = memory_mgr
+        self._metrics = metrics_collector
         self._system_prompt = "You are OAA Agent."
         self._last_llm_content = ""
         self._continuation_count = 0
@@ -146,8 +149,10 @@ class AgentLoop:
             # Only retry on timeout/connection errors — API/server errors fail immediately
             response: LLMResponse | None = None
             last_error: Exception | None = None
+            _llm_start = 0.0
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
+                    _llm_start = time.time()
                     response = await asyncio.wait_for(
                         self.llm.chat(messages),
                         timeout=_LLM_TIMEOUT,
@@ -155,9 +160,11 @@ class AgentLoop:
                     last_error = None
                     break
                 except asyncio.TimeoutError:
+                    _record_llm_metrics(self._metrics, self.llm, time.time() - _llm_start if _llm_start else 0, error="TimeoutError")
                     last_error = TimeoutError("LLM call timed out")
                     err_type = "TimeoutError"
                 except Exception as exc:
+                    _record_llm_metrics(self._metrics, self.llm, time.time() - _llm_start if _llm_start else 0, error=type(exc).__name__)
                     last_error = exc
                     err_type = type(exc).__name__
                     # API/server errors are not transient — fail immediately.
@@ -198,6 +205,9 @@ class AgentLoop:
                         else:
                             yield {"type": "done", "content": self._error_with_context(_friendly_error(last_error))}
                         return
+
+            # Record successful LLM call metrics
+            _record_llm_metrics(self._metrics, self.llm, time.time() - _llm_start if _llm_start else 0, response=response)
 
             content = (response.content or "") if response else ""
             tool_calls = response.tool_calls if response else []
@@ -273,6 +283,14 @@ class AgentLoop:
                         "_recovery_hint": _recovery_hint(tool_name, str(exc), err_cat),
                     }
                 yield {"type": "tool_result", "name": tool_name, "result": result}
+
+                # Record tool success/failure metrics
+                if self._metrics:
+                    try:
+                        is_error = isinstance(result, dict) and result.get("status") == "error"
+                        self._metrics.record_tool_result(tool_name, success=not is_error)
+                    except Exception as exc:
+                        logger.warning("Failed to record tool metrics: %s", exc)
 
                 # Record tool failures for self-diagnosis
                 if isinstance(result, dict) and result.get("status") == "error" and self._memory_mgr:
@@ -449,6 +467,31 @@ class AgentLoop:
                     logger.warning("Failed to store compaction summary: %s", exc)
 
         return trimmed
+
+
+def _record_llm_metrics(metrics_collector, llm, duration_ms: float, response: LLMResponse | None = None, error: str = ""):
+    """Record LLM call metrics if a collector is available."""
+    if not metrics_collector:
+        return
+    try:
+        model = getattr(getattr(llm, '_config', None), 'model_id', 'unknown')
+        if response:
+            metrics_collector.record_llm_call(
+                model=model,
+                duration_ms=duration_ms * 1000,
+                finish_reason=response.finish_reason,
+                tool_call_count=len(response.tool_calls),
+                content_length=len(response.content or ""),
+            )
+        else:
+            metrics_collector.record_llm_call(
+                model=model,
+                duration_ms=duration_ms * 1000,
+                finish_reason="",
+                error=error or "unknown",
+            )
+    except Exception as exc:
+        logger.warning("Failed to record LLM metrics: %s", exc)
 
 
 _StepOutcome = StepOutcome

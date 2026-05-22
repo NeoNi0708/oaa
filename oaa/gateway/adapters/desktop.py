@@ -225,6 +225,11 @@ class DesktopAdapter:
         result = self._management.handle(msg_type, payload)
         if asyncio.iscoroutine(result):
             result = await result
+
+        # Broadcast config_updated to other connected clients after a successful save
+        if msg_type == "save_config" and isinstance(result, dict) and result.get("ok"):
+            await self._broadcast_config_updated(websocket)
+
         await self._send_response(websocket, msg_type, request_id, result)
 
     @staticmethod
@@ -328,6 +333,19 @@ class DesktopAdapter:
         except Exception as exc:
             logger.debug("Send failed, removing client: %s", exc)
             self._clients.discard(websocket)
+
+    async def _broadcast_config_updated(self, sender_ws):
+        """Notify all connected clients (except the sender) that config changed."""
+        msg = json.dumps({
+            "type": "config_updated",
+            "payload": {"msg": "配置已更新"},
+        }, ensure_ascii=False)
+        for ws in self._clients.copy():
+            if ws != sender_ws:
+                try:
+                    await ws.send(msg)
+                except Exception:
+                    self._clients.discard(ws)
 
     async def notify_all(self, content: str, msg_type: str = "llm_output"):
         """Broadcast a notification to all connected GUI clients.
