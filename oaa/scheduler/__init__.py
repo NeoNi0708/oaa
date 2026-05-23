@@ -33,6 +33,7 @@ class TaskScheduler:
         self._tasks_file = self.tasks_dir / "tasks.json"
         self._tasks: list[dict] = self._load()
         self._running = False
+        self._due_callback = None  # async callable(task_dict) for auto-execution
 
     def _load(self) -> list[dict]:
         if self._tasks_file.exists():
@@ -190,16 +191,29 @@ class TaskScheduler:
     # Background loop
     # ------------------------------------------------------------------
 
+    def set_due_callback(self, callback):
+        """Register an async callback for tasks with execution_prompt."""
+        self._due_callback = callback
+
     async def start_loop(self):
-        """Background loop: checks for due tasks every 30 seconds."""
+        """Background loop: checks for due tasks every 30 seconds.
+
+        Tasks with ``execution_prompt`` are dispatched to the callback
+        immediately.  The callback runs in its own task so a slow executor
+        won't delay the next check cycle.
+        """
         self._running = True
+        _last_minute = -1  # prevent double-fire within the same minute
         while self._running:
             try:
                 due = self.get_due_tasks()
                 for task in due:
                     logger.info("Task due: %s (%s)", task["name"], task["id"])
-                    # Mark last_run
                     task["last_run"] = datetime.now().isoformat()
+                    # Auto-execute tasks that have an execution_prompt
+                    if task.get("execution_prompt") and self._due_callback:
+                        import asyncio
+                        asyncio.create_task(self._due_callback(task))
                 if due:
                     self._save()
             except Exception as exc:

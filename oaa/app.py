@@ -149,6 +149,7 @@ class OAAApp:
         logger.info("Starting worker agent...")
         await self.worker.start()
         logger.info("Starting task scheduler...")
+        self.scheduler.set_due_callback(_executor_run)
         asyncio.create_task(self.scheduler.start_loop())
 
         # Start IdleInspector background task
