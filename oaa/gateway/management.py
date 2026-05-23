@@ -5,6 +5,7 @@ Each handler receives a payload dict and returns a response dict.
 """
 import asyncio
 import time
+from collections.abc import Callable
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -36,6 +37,8 @@ VALID_TYPES = {
     "proposal_approve",
     "proposal_ignore",
     "get_evolution_stats",
+    # Metrics
+    "get_metrics",
 }
 _ = VALID_TYPES  # prevent import-stripping
 
@@ -65,6 +68,22 @@ class ManagementHandler:
         self._start_time = time.time()    # process start for uptime
         self._chat_count = 0
         self._tool_call_count = 0
+
+        # Push-notification callbacks for long-running background tasks.
+        # Each callback receives (msg_type: str, payload: dict).
+        self._notify_callbacks: list[Callable[[str, dict], None]] = []
+
+    def on_push_notification(self, callback: Callable[[str, dict], None]):
+        """Register a callback to receive push notifications from background tasks."""
+        self._notify_callbacks.append(callback)
+
+    def _push_notification(self, msg_type: str, payload: dict):
+        """Deliver a push notification to all registered callbacks."""
+        for cb in self._notify_callbacks:
+            try:
+                cb(msg_type, payload)
+            except Exception:
+                pass
 
     def set_agent_state(self, state: str):
         """Update agent cognitive state. Called from DesktopAdapter."""
@@ -454,6 +473,15 @@ class ManagementHandler:
         suggestions = self._evolution.stats.get("suggestions", [])
         skill_usage = self._evolution.stats.get("skill_usage", {})
 
+        # Mark previously-applied suggestions so frontend can persist "已应用" state
+        applied_titles = {a.get("title", "") for a in self._evolution.stats.get("applied", [])}
+        for s in suggestions:
+            s_title = s.get("skill", "") or s.get("message", "")[:20]
+            if s_title in applied_titles or any(
+                at in s.get("message", "") for at in applied_titles if at
+            ):
+                s["applied"] = True
+
         return {
             "ok": True,
             "stats": {
@@ -563,7 +591,12 @@ class ManagementHandler:
         return {"ok": True, "proposals": proposals, "count": len(proposals)}
 
     async def _handle_proposal_approve(self, payload: dict) -> dict:
-        """Approve and execute a proposal by ID.
+        """Approve and execute a proposal by ID (non-blocking).
+
+        The actual execution (repair_loop or ProposalExecutor) runs in a
+        background :class:`asyncio.Task`.  The handler returns immediately
+        after scheduling, and a push notification is delivered when the
+        task completes.
 
         If the proposal has a ``problem_context`` it is dispatched to
         :class:`RepairLoop` (feed+verify+retry); otherwise it falls back
@@ -585,94 +618,143 @@ class ManagementHandler:
 
         await store.update_status(prop_id, "running")
 
-        # ---------------------------------------------------------------
-        # Path A: problem_context → repair_loop (feed+verify+retry)
-        # ---------------------------------------------------------------
+        # Schedule background execution and return immediately
+        agent = self._agent
+        config = self._config
+        notify = self._push_notification
+        inject = self._inject_proposal_result
+
+        asyncio.create_task(self._execute_proposal_bg(
+            prop_id, proposal, agent, store, config, notify, inject,
+        ))
+
+        return {
+            "ok": True,
+            "proposal_id": prop_id,
+            "proposal_status": "running",
+        }
+
+    @staticmethod
+    async def _execute_proposal_bg(
+        prop_id: str,
+        proposal: dict,
+        agent,
+        store,
+        config,
+        notify,
+        inject_result,
+    ):
+        """Background task that runs repair_loop or ProposalExecutor."""
         problem_context = proposal.get("problem_context")
+
         if problem_context:
-            from ..agent.repair_loop import RepairLoop, RepairPlan
-
-            plan = RepairPlan(
-                proposal_id=prop_id,
-                problem_context=problem_context,
+            await ManagementHandler._run_repair_bg(
+                prop_id, proposal, problem_context,
+                agent, store, config, notify, inject_result,
             )
-            repair_loop = RepairLoop(data_dir=self.config.data_dir)
+        else:
+            await ManagementHandler._run_executor_bg(
+                prop_id, proposal,
+                agent, store, notify, inject_result,
+            )
 
-            # Register independent verifiers (captures agent for MemoryManager access)
-            agent_ref = self._agent
+    @staticmethod
+    async def _run_repair_bg(prop_id, proposal, problem_context,
+                              agent, store, config, notify, inject_result):
+        """Run repair_loop in background."""
+        from ..agent.repair_loop import RepairLoop, RepairPlan
 
-            async def _make_tool_verifier(ctx: dict) -> tuple[bool, str]:
-                """Dynamic verifier with access to agent's MemoryManager."""
-                tool_name = ctx.get("tool_name", "")
-                if not tool_name:
-                    return False, "无法验证：context 缺少 tool_name"
-                try:
-                    memory = getattr(agent_ref, 'memory', None)
-                    if memory and hasattr(memory, 'get_tool_failures'):
-                        recent = memory.get_tool_failures(tool_name, limit=1)
-                        if recent:
-                            return False, f"{tool_name} 仍有失败记录: {recent[0].get('error', 'unknown')[:100]}"
-                except Exception:
-                    pass
-                return True, f"已确认 {tool_name} 无新失败记录"
+        plan = RepairPlan(
+            proposal_id=prop_id,
+            problem_context=problem_context,
+        )
+        repair_loop = RepairLoop(data_dir=config.data_dir)
+        agent_ref = agent
 
-            repair_loop.register_verifier("tool_failure", _make_tool_verifier)
-
+        async def _make_tool_verifier(ctx: dict) -> tuple[bool, str]:
+            tool_name = ctx.get("tool_name", "")
+            if not tool_name:
+                return False, "无法验证：context 缺少 tool_name"
             try:
-                result = await repair_loop.run(plan, self._agent)
-                new_status = "done" if result["status"] == "done" else "failed"
-                await store.update_status(
-                    prop_id, new_status,
-                    executed_at=time.time(),
-                    result=result.get("message", ""),
-                    error=None if result["status"] == "done" else result.get("message"),
-                )
-                await self._inject_proposal_result(prop_id, {
-                    "title": proposal.get("title", ""),
-                    "status": new_status,
-                    "result": result,
-                })
-                return {
-                    "ok": True,
-                    "proposal_id": prop_id,
-                    "proposal_status": new_status,
-                    "result": result.get("message", ""),
-                    "error": result.get("message") if result["status"] != "done" else None,
-                }
-            except Exception as exc:
-                await store.update_status(prop_id, "failed", error=str(exc))
-                await self._inject_proposal_result(prop_id, {"status": "failed", "error": str(exc)})
-                return {"ok": False, "error": str(exc)}
+                memory = getattr(agent_ref, 'memory', None)
+                if memory and hasattr(memory, 'get_tool_failures'):
+                    recent = memory.get_tool_failures(tool_name, limit=1)
+                    if recent:
+                        return False, f"{tool_name} 仍有失败记录: {recent[0].get('error', 'unknown')[:100]}"
+            except Exception:
+                pass
+            return True, f"已确认 {tool_name} 无新失败记录"
 
-        # ---------------------------------------------------------------
-        # Path B: traditional fixed-step proposal → ProposalExecutor
-        # ---------------------------------------------------------------
-        from ..agent.proposal import ProposalExecutor
-        handler = self._agent.build_handler()
-        executor = ProposalExecutor()
+        repair_loop.register_verifier("tool_failure", _make_tool_verifier)
+
         try:
-            result = await executor.execute(proposal, handler)
+            result = await repair_loop.run(
+                plan, agent,
+                inspector=getattr(agent, '_idle_inspector', None),
+            )
+            new_status = "done" if result["status"] == "done" else "failed"
+            await store.update_status(
+                prop_id, new_status,
+                executed_at=time.time(),
+                result=result.get("message", ""),
+                error=None if result["status"] == "done" else result.get("message"),
+            )
+            await inject_result(prop_id, {
+                "title": proposal.get("title", ""),
+                "status": new_status,
+                "result": result,
+            })
+            notify("proposal_completed", {
+                "proposal_id": prop_id,
+                "proposal_status": new_status,
+                "result": result.get("message", ""),
+                "error": result.get("message") if result["status"] != "done" else None,
+            })
+        except Exception as exc:
+            await store.update_status(prop_id, "failed", error=str(exc))
+            await inject_result(prop_id, {"status": "failed", "error": str(exc)})
+            notify("proposal_completed", {
+                "proposal_id": prop_id,
+                "proposal_status": "failed",
+                "error": str(exc),
+            })
+
+    @staticmethod
+    async def _run_executor_bg(prop_id, proposal, agent, store, notify, inject_result):
+        """Run ProposalExecutor in background."""
+        from ..agent.proposal import ProposalExecutor
+        handler = agent.build_handler()
+        executor_obj = ProposalExecutor()
+
+        inspector = getattr(agent, '_idle_inspector', None)
+        if inspector:
+            inspector.pause()
+        try:
+            result = await executor_obj.execute(proposal, handler)
             await store.update_status(
                 result.get("id", prop_id), result["status"],
                 executed_at=result.get("executed_at"),
                 result=result.get("result"),
                 error=result.get("error"),
             )
-
-            # Inject execution result into HOT memory so agent sees it next turn
-            await self._inject_proposal_result(prop_id, result)
-
-            return {
-                "ok": True,
+            await inject_result(prop_id, result)
+            notify("proposal_completed", {
                 "proposal_id": prop_id,
                 "proposal_status": result["status"],
                 "result": result.get("result"),
                 "error": result.get("error"),
-            }
+            })
         except Exception as exc:
             await store.update_status(prop_id, "failed", error=str(exc))
-            await self._inject_proposal_result(prop_id, {"status": "failed", "error": str(exc)})
-            return {"ok": False, "error": str(exc)}
+            await inject_result(prop_id, {"status": "failed", "error": str(exc)})
+            notify("proposal_completed", {
+                "proposal_id": prop_id,
+                "proposal_status": "failed",
+                "error": str(exc),
+            })
+        finally:
+            if inspector:
+                inspector.resume()
 
     async def _inject_proposal_result(self, prop_id: str, result: dict):
         """Write proposal execution result into HOT memory for agent awareness.
@@ -898,6 +980,24 @@ class ManagementHandler:
             return {"ok": True, "online": True, "msg": "飞书已重连"}
         else:
             return {"ok": False, "error": f"Channel {channel} reconnect not implemented"}
+
+    # ------------------------------------------------------------------
+    # Metrics
+    # ------------------------------------------------------------------
+
+    def _handle_get_metrics(self, _payload: dict) -> dict:
+        """Return proactivity and LLM statistics from the metrics collector."""
+        if self._agent is None or self._agent.metrics is None:
+            return {"ok": False, "error": "Metrics collector not available"}
+        m = self._agent.metrics
+        tool_summary = m.get_tool_summary()
+        llm_summary = m.get_llm_summary()
+        return {
+            "ok": True,
+            "tool_metrics": tool_summary,
+            "llm_metrics": llm_summary,
+            "proactivity_ratio": tool_summary.get("proactivity_ratio", 1.0),
+        }
 
 
 # ---------------------------------------------------------------------------

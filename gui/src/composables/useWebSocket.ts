@@ -47,6 +47,7 @@ export function useWebSocket() {
   const currentTool = ref<{ name: string; args: string } | null>(null)
   const confirmRequest = ref<ConfirmRequest | null>(null)
   const configUpdated = ref(0)  // incremented on config_updated push events
+  const proposalCompleted = ref(0)  // incremented on proposal_completed push events
 
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let isDestroyed = false
@@ -104,7 +105,8 @@ export function useWebSocket() {
         // Chat / streaming chunk
         switch (data.type) {
           case 'done': {
-            const finalContent = p.content || streamingContent.value || ''
+            // Trim to prevent whitespace-only bubbles showing as empty
+            const finalContent = (p.content || streamingContent.value || '').trim()
             if (finalContent) {
               messages.value.push({ role: 'assistant', content: finalContent })
             }
@@ -147,6 +149,10 @@ export function useWebSocket() {
           }
           case 'config_updated': {
             configUpdated.value++
+            break
+          }
+          case 'proposal_completed': {
+            proposalCompleted.value++
             break
           }
         }
@@ -269,6 +275,7 @@ export function useWebSocket() {
     currentTool,
     confirmRequest,
     configUpdated,
+    proposalCompleted,
     send,
     sendRequest,
     respondToConfirm,

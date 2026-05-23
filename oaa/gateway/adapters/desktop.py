@@ -53,6 +53,7 @@ _MANAGEMENT_TYPES = {
     "proposal_approve",
     "proposal_ignore",
     "get_evolution_stats",
+    "get_metrics",
 }
 
 
@@ -77,6 +78,22 @@ class DesktopAdapter:
     def set_management_handler(self, handler: "ManagementHandler"):
         """Register the management handler for non-chat requests."""
         self._management = handler
+        # Register for push notifications from background tasks
+        handler.on_push_notification(self._broadcast_push)
+
+    def _broadcast_push(self, msg_type: str, payload: dict):
+        """Broadcast a push notification to all connected WebSocket clients."""
+        msg = json.dumps({
+            "type": msg_type,
+            "payload": payload,
+        }, ensure_ascii=False)
+        dead = set()
+        for ws in tuple(self._clients):
+            try:
+                asyncio.create_task(ws.send(msg))
+            except Exception:
+                dead.add(ws)
+        self._clients -= dead
 
     def create_confirm_callback(self) -> Callable[[str, str], Coroutine]:
         """Return an async callback suitable for ``PermissionsManager``.

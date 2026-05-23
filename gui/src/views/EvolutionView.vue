@@ -195,6 +195,70 @@
           </div>
         </div>
 
+        <!-- Proactivity metrics -->
+        <div v-if="metricsData" class="metrics-section">
+          <h3 class="section-title">主动性度量</h3>
+          <div class="stats-cards">
+            <div class="stat-card" style="border-top-color: var(--oaa-blue-400)">
+              <span class="stat-value" style="color: var(--oaa-blue-400)">{{ metricsData.tool_metrics?.total_tool_calls ?? 0 }}</span>
+              <span class="stat-label">工具调用总次数</span>
+            </div>
+            <div class="stat-card" style="border-top-color: var(--oaa-green-400)">
+              <span class="stat-value" style="color: var(--oaa-green-400)">{{ ((metricsData.proactivity_ratio ?? 1) * 100).toFixed(0) }}%</span>
+              <span class="stat-label">主动性比率</span>
+            </div>
+            <div class="stat-card" style="border-top-color: var(--oaa-yellow-400)">
+              <span class="stat-value" style="color: var(--oaa-yellow-400)">{{ metricsData.tool_metrics?.active_repairs ?? 0 }}</span>
+              <span class="stat-label">主动修复次数</span>
+            </div>
+            <div class="stat-card" style="border-top-color: var(--oaa-purple-400)">
+              <span class="stat-value" style="color: var(--oaa-purple-400)">{{ metricsData.llm_metrics?.total_calls ?? 0 }}</span>
+              <span class="stat-label">LLM 调用次数</span>
+            </div>
+          </div>
+          <div class="charts-row">
+            <div class="chart-card">
+              <h3 class="chart-title">决策分布</h3>
+              <div v-if="decisionBreakdown.length === 0" class="chart-empty">暂无数据</div>
+              <div v-else class="bar-wrapper">
+                <div class="bar-chart" style="height:120px">
+                  <svg :width="decisionBreakdown.length * 80 + 20" height="120" :viewBox="`0 0 ${decisionBreakdown.length * 80 + 20} 120`">
+                    <g v-for="(d, i) in decisionBreakdown" :key="d.label">
+                      <rect :x="i * 80 + 20" :y="119 - d.h" :width="24" :height="d.h" :fill="d.color" rx="2" opacity="0.85" />
+                      <text :x="i * 80 + 32" y="116" text-anchor="middle" font-size="10" fill="var(--oaa-color-disabled)">{{ d.label }}</text>
+                      <text :x="i * 80 + 32" :y="119 - d.h - 4" text-anchor="middle" font-size="10" :fill="d.color">{{ d.value }}</text>
+                    </g>
+                  </svg>
+                </div>
+              </div>
+            </div>
+            <div class="chart-card">
+              <h3 class="chart-title">工具成功/失败率</h3>
+              <div v-if="toolBreakdown.length === 0" class="chart-empty">暂无数据</div>
+              <div v-else class="ranking-list">
+                <div v-for="(item, i) in toolBreakdown" :key="item.name" class="ranking-item">
+                  <span class="ranking-idx">{{ i + 1 }}</span>
+                  <span class="ranking-name">{{ item.name }}</span>
+                  <span class="ranking-bar-bg">
+                    <span class="ranking-bar-fill" :style="{ width: item.pct + '%', background: item.fail > 0 ? 'var(--oaa-yellow-400)' : 'var(--oaa-green-400)' }"></span>
+                  </span>
+                  <span class="ranking-count">{{ item.ok }}/{{ item.total }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-if="metricsData.llm_metrics?.by_model" class="info-card" style="margin-top: 0">
+            <h3 class="chart-title">LLM 模型统计</h3>
+            <div class="crystal-list">
+              <div v-for="(count, model) in metricsData.llm_metrics.by_model" :key="model" class="crystal-item">
+                <span class="crystal-icon">&#129302;</span>
+                <span class="crystal-name" style="font-family: monospace; font-size: 12px">{{ model }}</span>
+                <span class="crystal-date">{{ count }} 次 | avg {{ metricsData.llm_metrics.avg_duration_ms }}ms</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Bottom info section -->
         <div class="bottom-info-row">
           <div class="info-card">
@@ -247,7 +311,7 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { useWebSocket } from '../composables/useWebSocket'
 
-const { sendRequest } = useWebSocket()
+const { sendRequest, proposalCompleted } = useWebSocket()
 
 const activeTab = ref('pending')
 const loading = ref(true)
@@ -274,6 +338,44 @@ const pendingCount = computed(() => pendingProposals.value.length)
 // ---- Statistics tab ----
 const statsLoading = ref(true)
 const statsData = ref<any>(null)
+
+// --- Proactivity metrics ---
+const metricsData = ref<any>(null)
+const decisionBreakdown = computed(() => {
+  const m = metricsData.value?.tool_metrics
+  if (!m) return []
+  const auto = m.auto || 0; const confirmed = m.confirmed || 0; const denied = m.denied || 0
+  const max = Math.max(auto, confirmed, denied, 1)
+  return [
+    { label: '自动', value: auto, h: (auto / max) * 100, color: 'var(--oaa-green-400)' },
+    { label: '确认', value: confirmed, h: (confirmed / max) * 100, color: 'var(--oaa-blue-400)' },
+    { label: '拒绝', value: denied, h: (denied / max) * 100, color: 'var(--oaa-red-400)' },
+  ]
+})
+const toolBreakdown = computed(() => {
+  const b = metricsData.value?.tool_metrics?.breakdown
+  if (!b) return []
+  return Object.entries(b)
+    .map(([name, s]: [string, any]) => ({
+      name,
+      ok: s.success || 0,
+      fail: s.failure || 0,
+      total: (s.success || 0) + (s.failure || 0),
+      pct: (s.success || 0) + (s.failure || 0) > 0
+        ? ((s.success || 0) / ((s.success || 0) + (s.failure || 0)) * 100) : 0,
+    }))
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 8)
+})
+
+async function loadMetrics() {
+  try {
+    const resp = await sendRequest('get_metrics')
+    if (resp?.ok) {
+      metricsData.value = resp
+    }
+  } catch { /* ignore - metrics may not be available */ }
+}
 
 const typeColors: Record<string, string> = {
   tool_fix: '#ef4444',
@@ -353,9 +455,13 @@ async function loadStats() {
 }
 
 // Tab change -> lazy load stats
+// Auto-refresh proposal list when background task completes
+watch(proposalCompleted, () => { loadProposals() })
+
 watch(activeTab, (tab) => {
-  if (tab === 'stats' && !statsData.value) {
-    loadStats()
+  if (tab === 'stats') {
+    if (!statsData.value) loadStats()
+    loadMetrics()
   }
 })
 
@@ -1004,5 +1110,16 @@ onMounted(() => {
   font-size: var(--oaa-text-xs);
   color: var(--oaa-color-muted);
   font-family: var(--oaa-font-mono);
+}
+
+/* Proactivity metrics */
+.metrics-section {
+  margin-bottom: var(--oaa-space-6);
+}
+.section-title {
+  font-size: var(--oaa-text-lg);
+  font-weight: 600;
+  margin-bottom: var(--oaa-space-3);
+  color: var(--oaa-color-primary);
 }
 </style>
