@@ -2123,7 +2123,7 @@ class AtomicTools(BaseHandler):
 
     @agent_tool(
         name="tool_group_load",
-        description="Load a tool group to access domain-specific tools. Available groups: wechat(8), feishu(18), dingtalk(28), schedule(5), skills(4), self_modify(7), office(2), plans(3), proposals(3), mcp(3), browser(1), github(2), diagnostics(5), chat_history(1), git(3), reflection(2). Use this when the current task needs tools outside the core set. Groups stay loaded for the session."
+        description="Load a tool group to access domain-specific tools. Available groups: wechat(8), feishu(18), dingtalk(28), schedule(3), skills(4), self_modify(7), office(2), plans(3), proposals(3), mcp(3), browser(1), github(2), diagnostics(2), chat_history(1), reflection(2). Core tools include: file ops, code exec, shell, search, memory, git, health, download, module_index. Use this when core tools aren't enough. Groups stay loaded for the session."
     )
     async def do_tool_group_load(self, group: str) -> dict:
         """Load a tool group by name, making its schemas visible to the LLM."""
@@ -2133,7 +2133,7 @@ class AtomicTools(BaseHandler):
         valid = {"wechat", "feishu", "dingtalk", "schedule", "skills",
                  "self_modify", "office", "plans", "proposals", "mcp",
                  "browser", "github", "diagnostics", "chat_history",
-                 "git", "reflection", "email"}
+                 "reflection", "email"}
         if group not in valid:
             return {"status": "error", "msg": f"未知的工具组: {group}。可用组: {', '.join(sorted(valid))}"}
         count = self._agent_ref.load_tool_group(group)

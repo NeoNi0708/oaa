@@ -68,10 +68,9 @@ _reg("dingtalk",
      "dingtalk_cli_run",
 )
 
-# --- Scheduling (5 tools) ---
+# --- Scheduling (3 tools) — create/list are core, update/delete/run stay grouped
 _reg("schedule",
-     "schedule_create", "schedule_list", "schedule_update",
-     "schedule_delete", "schedule_run",
+     "schedule_update", "schedule_delete", "schedule_run",
 )
 
 # --- Skills (4 tools) ---
@@ -115,10 +114,9 @@ _reg("github",
      "github_repo", "github_content",
 )
 
-# --- Diagnostics (5 tools) ---
+# --- Diagnostics (2 tools) — health/module/download moved to core
 _reg("diagnostics",
-     "health_diagnose", "check_self_process", "module_index",
-     "aifix", "download_file",
+     "check_self_process", "aifix",
 )
 
 # --- Chat history ---
@@ -126,10 +124,7 @@ _reg("chat_history",
      "chat_history_search",
 )
 
-# --- Git (3 tools) ---
-_reg("git",
-     "git_status", "git_diff", "git_log",
-)
+# --- Git (3 tools) — all moved to core (agent uses them constantly)
 
 # --- Email (stub) ---
 _reg("email",

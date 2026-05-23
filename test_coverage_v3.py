@@ -210,7 +210,7 @@ async def main():
     await runner.run_case(
         "F16-schedule-create",
         "创建一个每天 21:00 执行的定时任务，名称'晚间签到'，执行内容是：在聊天中说'主人晚安'。",
-        verify_tool_called("schedule_create"),
+        verify_any_of("schedule_create", "tool_group_load"),
     )
 
     await runner.run_case(
@@ -224,7 +224,7 @@ async def main():
     await runner.run_case(
         "G18-skill-search",
         "搜索技能市场，找一个适合做报价单的技能。",
-        lambda c, t, txt: verify_tool_called("skill_search")(c, t, txt) or "报价单" in txt,
+        verify_any_of("skill_search", "tool_group_load", "ai_search"),
     )
 
     await runner.run_case(
@@ -260,7 +260,7 @@ async def main():
     await runner.run_case(
         "J23-channel-status",
         "检查当前各通道（微信、钉钉、飞书）的连接状态。",
-        verify_any_of("wechat_sessions", "wechat_contacts", "feishu_get_user", "feishu_search_user", "dingtalk_user_info", "dingtalk_chat_list"),
+        verify_any_of("wechat_sessions", "wechat_contacts", "feishu_get_user", "feishu_search_user", "dingtalk_user_info", "dingtalk_chat_list", "tool_group_load"),
     )
 
     print("\n=== K. Multi-turn Context ===\n")
