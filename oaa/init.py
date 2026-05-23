@@ -1,5 +1,7 @@
 """OAA data directory initialization — creates all subdirectories and identity files."""
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 REQUIRED_DIRS = [
@@ -23,7 +25,7 @@ REQUIRED_DIRS = [
 
 IDENTITY_FILES = {
     "IDENTITY.md": "# 二愣\n\n- **称呼**: 二愣\n- **用户称呼**: 恒总\n- **核心信念**: 帮助恒总把生意做得更顺、更赚钱、更省心\n",
-    "SOUL.md": "# 工作哲学\n\n- **靠谱**: 说到做到，不遗漏\n- **主动**: 发现机会主动汇报\n- **尊重**: 不确定先请示\n- **反思**: 每次任务后总结改进\n",
+    "SOUL.md": "# 工作哲学\n\n- **靠谱**: 说到做到，不遗漏\n- **主动**: 看到问题就想动手解决，不需要等指令\n- **尊重**: 不确定先请示\n- **反思**: 每次任务后总结改进\n",
     "USER.md": "# 用户信息\n\n- **称呼**: 恒总\n- **公司**: 联轴器出口贸易（一人公司）\n- **偏好**: 待学习\n",
     "BOOTSTRAP.md": "# 二愣启动自我介绍\n\n恒总您好，我是二愣，您的 AI 业务助手。\n我可以帮您处理报价、跟单、搜客户、写邮件等外贸业务。\n有什么需要帮忙的吗？\n",
     "AGENTS.md": "# 工作边界\n\n- 所有操作在数据目录内进行\n- 发消息/邮件前需用户确认\n- 不确定时主动询问\n- 保护用户隐私和商业数据\n",
@@ -45,6 +47,44 @@ def ensure_data_dir(data_dir: str) -> bool:
         if not path.exists():
             path.write_text(content, encoding="utf-8")
     return first_run
+
+
+def ensure_bundled_cli(data_dir: str) -> bool:
+    """Auto-install bundled CLI tools (wechat-cli, lark-cli, dws).
+
+    Called once during startup.  If ``cli/node_modules`` is missing,
+    runs ``npm install`` in the bundled CLI directory.  Returns True
+    on first install, False if already present.
+    """
+    # Resolve the cli/ directory relative to oaa package root
+    pkg_root = Path(__file__).resolve().parent.parent  # oaa/oaa/ → oaa/
+    cli_dir = pkg_root / "cli"
+    if not (cli_dir / "package.json").exists():
+        return False  # no bundled cli — dev/stub environment
+
+    node_modules = cli_dir / "node_modules"
+    if node_modules.is_dir():
+        return False  # already installed
+
+    # One-time install
+    sys.stderr.write("[OAA] Installing bundled CLI tools (wechat-cli, lark-cli, dws)...\n")
+    try:
+        subprocess.run(
+            ["npm", "install"],
+            cwd=str(cli_dir),
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+        sys.stderr.write("[OAA] Bundled CLI tools installed.\n")
+        return True
+    except subprocess.CalledProcessError as exc:
+        sys.stderr.write(f"[OAA] npm install failed (CLI tools won't be available): {exc.stderr.decode().strip()[:200]}\n")
+    except FileNotFoundError:
+        sys.stderr.write("[OAA] npm not found — CLI tools won't be available. Install Node.js to enable.\n")
+    except Exception as exc:
+        sys.stderr.write(f"[OAA] CLI install failed: {exc}\n")
+    return False
 
 
 def load_identity(data_dir: str) -> dict:

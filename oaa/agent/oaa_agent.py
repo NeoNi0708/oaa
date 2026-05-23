@@ -7,7 +7,7 @@ from typing import AsyncGenerator, Optional
 from ..auth.permissions import PermissionsManager
 from ..config import AppConfig
 from ..evolution.engine import EvolutionEngine
-from ..init import ensure_data_dir, load_identity
+from ..init import ensure_bundled_cli, ensure_data_dir, load_identity
 from ..llm import LLMClient
 from ..logging_config import get_logger
 from .ai_search_tool import AiSearchTools
@@ -94,6 +94,7 @@ class OAAAgent:
                  evolution: Optional[EvolutionEngine] = None, wechat_adapter=None,
                  scheduler=None):
         ensure_data_dir(config.data_dir)
+        ensure_bundled_cli(config.data_dir)
 
         self.config = config
         self.identity: dict = load_identity(config.data_dir)
