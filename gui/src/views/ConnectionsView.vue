@@ -86,6 +86,18 @@
           </div>
           <span v-if="channels.wechat.error && !channels.wechat.qrCodeUrl && !channels.wechat.online" class="card-error">{{ channels.wechat.error }}</span>
         </div>
+        <!-- wechat-cli config -->
+        <div class="cli-config-section">
+          <div class="cli-config-header">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            <span>wechat-cli 联系人/历史/搜索</span>
+          </div>
+          <div class="credential-row">
+            <input v-model="channels.wechat.wechatCliPath" placeholder="wechat-cli 路径，如 D:\\nodejs\\node_global\\node_modules\\wechat-cli" class="oaa-input oaa-input--sm" />
+            <button class="oaa-btn oaa-btn--sm oaa-btn--primary" @click="saveWechatCliConfig">保存</button>
+          </div>
+          <span v-if="channels.wechat.cliSaved" class="scan-ok">已保存</span>
+        </div>
       </div>
 
       <!-- DingTalk -->
@@ -234,14 +246,16 @@ interface ChannelState {
   clientSecret: string
   appId: string
   appSecret: string
+  wechatCliPath: string
+  cliSaved: boolean
 }
 
 const loading = ref(true)
 
 const channels = reactive<Record<string, ChannelState>>({
-  wechat:   { online: false, loading: false, reconnecting: false, qrCodeUrl: '', qrCodeId: '', userCode: '', polling: false, scanned: false, error: '', botId: '', clientId: '', clientSecret: '', appId: '', appSecret: '' },
-  dingtalk: { online: false, loading: false, reconnecting: false, qrCodeUrl: '', qrCodeId: '', userCode: '', polling: false, scanned: false, error: '', botId: '', clientId: '', clientSecret: '', appId: '', appSecret: '' },
-  feishu:   { online: false, loading: false, reconnecting: false, qrCodeUrl: '', qrCodeId: '', userCode: '', polling: false, scanned: false, error: '', botId: '', clientId: '', clientSecret: '', appId: '', appSecret: '' },
+  wechat:   { online: false, loading: false, reconnecting: false, qrCodeUrl: '', qrCodeId: '', userCode: '', polling: false, scanned: false, error: '', botId: '', clientId: '', clientSecret: '', appId: '', appSecret: '', wechatCliPath: '', cliSaved: false },
+  dingtalk: { online: false, loading: false, reconnecting: false, qrCodeUrl: '', qrCodeId: '', userCode: '', polling: false, scanned: false, error: '', botId: '', clientId: '', clientSecret: '', appId: '', appSecret: '', wechatCliPath: '', cliSaved: false },
+  feishu:   { online: false, loading: false, reconnecting: false, qrCodeUrl: '', qrCodeId: '', userCode: '', polling: false, scanned: false, error: '', botId: '', clientId: '', clientSecret: '', appId: '', appSecret: '', wechatCliPath: '', cliSaved: false },
 })
 
 let pollTimers: Record<string, ReturnType<typeof setInterval>> = {}
@@ -262,10 +276,23 @@ onMounted(async () => {
       channels.dingtalk.clientSecret = (dt.client_secret as string) || ''
       channels.feishu.appId = (fs.app_id as string) || ''
       channels.feishu.appSecret = (fs.app_secret as string) || ''
+      channels.wechat.wechatCliPath = (wc.wechat_cli_path as string) || ''
     }
   } catch { /* use defaults */ }
   loading.value = false
 })
+
+async function saveWechatCliConfig() {
+  const ch = channels.wechat
+  ch.cliSaved = false
+  try {
+    const resp = await sendRequest('save_config', {
+      config: { wechat: { wechat_cli_path: ch.wechatCliPath } }
+    })
+    if (resp.ok) { ch.cliSaved = true; ch.error = '' }
+    else { ch.error = (resp.error as string) || '保存失败' }
+  } catch (e) { ch.error = `保存失败: ${(e as Error).message}` }
+}
 
 // ------------------------------------------------------------------
 // QR login flow
@@ -454,6 +481,33 @@ onUnmounted(() => {
 .user-code-row { display: flex; align-items: center; gap: var(--oaa-space-1); margin: 4px 0; }
 .user-code-label { font-size: var(--oaa-text-xs); color: var(--oaa-color-muted); }
 .user-code-value { font-size: var(--oaa-text-sm); font-weight: 700; color: var(--oaa-primary); font-family: var(--oaa-font-mono); letter-spacing: 2px; background: rgba(59, 130, 246, 0.1); padding: 2px 8px; border-radius: var(--oaa-radius-sm); }
+
+/* wechat-cli config section */
+.cli-config-section {
+  margin-top: var(--oaa-space-3);
+  padding-top: var(--oaa-space-3);
+  border-top: 1px solid var(--oaa-glass-border);
+}
+.cli-config-header {
+  display: flex;
+  align-items: center;
+  gap: var(--oaa-space-2);
+  font-size: var(--oaa-text-xs);
+  color: var(--oaa-color-muted);
+  margin-bottom: var(--oaa-space-2);
+}
+.cli-config-section .credential-row {
+  display: flex;
+  gap: var(--oaa-space-2);
+  width: 100%;
+  align-items: center;
+}
+.cli-config-section .oaa-input--sm {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  font-size: var(--oaa-text-xs);
+}
 
 @media (max-width: 720px) { .channel-grid { grid-template-columns: 1fr; } }
 </style>
