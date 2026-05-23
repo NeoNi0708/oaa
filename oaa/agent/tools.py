@@ -109,6 +109,25 @@ def _fix_name_error(code: str, stderr: str) -> tuple[str, str]:
 class AtomicTools(BaseHandler):
     """9 atomic tools from GenericAgent, adapted to async."""
 
+    # Patterns that indicate destructive or dangerous shell commands
+    _DANGEROUS_SHELL_PATTERNS = [
+        r"\brm\s+(-[rRf]+\s+)*[/~]",    # rm -rf / or rm -rf ~
+        r"\bdd\s+if=",                    # dd disk overwrite
+        r">\s*/dev/sd",                   # overwrite block device
+        r"mkfs\.",                        # format filesystem
+        r":\(\)\s*\{\s*:\|:&\s*\}\s*;",  # fork bomb
+        r"\bchmod\s+(-R\s+)?777\s+/",    # chmod 777 on root
+        r"\bcurl.*\|\s*(ba)?sh",         # curl|bash
+        r"\bwget.*\|\s*(ba)?sh",         # wget|bash
+        r"\beval\s",                      # eval injection
+    ]
+
+    _MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
+    _BLOCKED_CONTENT_TYPES = {
+        "application/x-msdownload", "application/x-msdos-program",
+        "application/x-executable", "application/octet-stream",
+    }
+
     def __init__(self, data_dir: str, permissions: Optional[PermissionsManager] = None):
         self.data_dir = data_dir
         self.permissions = permissions
@@ -117,6 +136,7 @@ class AtomicTools(BaseHandler):
         self._archiver: Optional["ConversationArchiver"] = None
         self._proposal_store = None
         self._idle_inspector = None
+        self._scheduler = None
         self._wechat_cli_path: str = ""
 
     def _resolve_path(self, path: str) -> str:
@@ -138,6 +158,10 @@ class AtomicTools(BaseHandler):
     def set_idle_inspector(self, inspector):
         """Inject the IdleInspector for registering tool ignores."""
         self._idle_inspector = inspector
+
+    def set_scheduler(self, scheduler):
+        """Inject the TaskScheduler for schedule_create/list/update/delete."""
+        self._scheduler = scheduler
 
     def set_wechat_cli_path(self, path: str):
         """Set the path to wechat-cli binary for WeChat data tools."""
@@ -340,9 +364,9 @@ class AtomicTools(BaseHandler):
 
     @agent_tool(
         name="code_exec",
-        description="Execute Python code for data processing, analysis, computation, or script automation. Use mode='sandbox' for untrusted code or when you only need stdout/stderr output. Use mode='exec' (default) when you need the Python 'result' variable back. Blocks dangerous system operations (os.system, subprocess, etc.) — for system commands use 'shell_run' instead."
+        description="Execute Python code for data processing, analysis, computation, or script automation. Use mode='sandbox' for untrusted code or when you only need stdout/stderr output. Use mode='exec' (default) when you need the Python 'result' variable back. Use async_mode=True for long-running background execution (returns task_id for status tracking). Blocks dangerous system operations (os.system, subprocess, etc.) — for system commands use 'shell_run' instead."
     )
-    async def do_code_exec(self, code: str, timeout: int = 15, mode: str = "exec") -> dict:
+    async def do_code_exec(self, code: str, timeout: int = 15, mode: str = "exec", async_mode: bool = False) -> dict:
         """Execute Python code in-process for agent self-extension.
 
         Allows most imports but blocks shell execution (os.system,
@@ -369,6 +393,10 @@ class AtomicTools(BaseHandler):
         # Sandbox mode (legacy code_run): simple subprocess, no result variable
         if mode == "sandbox":
             return await self._do_code_run_subprocess(code, timeout)
+
+        # Async mode: fire-and-forget background execution
+        if async_mode:
+            return await self._do_code_exec_async(code, timeout)
 
         # Exec mode (default): auto-correction + result variable
         original_code = code
@@ -902,9 +930,17 @@ class AtomicTools(BaseHandler):
     # --- WeChat CLI tools (proxy to gateway.adapters.wechat_cli.WeChatCLI) ---
 
     async def _wechat_cli_call(self, method: str, **kwargs) -> dict:
-        """Call a WeChatCLI method, returning a standard result dict."""
+        """Call a WeChatCLI method, returning a standard result dict.
+
+        Rediscovers the binary on every call so that if the agent installed
+        wechat-cli in the current session, the new binary is found without
+        a config reload.  When a new path is discovered that differs from
+        the configured path, the config is updated automatically.
+        """
         try:
             from ..gateway.adapters.wechat_cli import WeChatCLI
+
+            # Re-discover every call — catches newly-installed binaries
             cli = WeChatCLI(cli_path=self._wechat_cli_path)
             fn = getattr(cli, method, None)
             if fn is None:
@@ -912,6 +948,14 @@ class AtomicTools(BaseHandler):
             result = await fn(**kwargs)
             if isinstance(result, str) and result.startswith("Error:"):
                 return {"status": "error", "msg": result[6:].strip()}
+
+            # Auto-update config path when a new binary is discovered
+            if cli._binary and cli._binary != self._wechat_cli_path:
+                self._wechat_cli_path = cli._binary
+                if hasattr(self, '_config') and self._config:
+                    self._config.wechat.wechat_cli_path = cli._binary
+                    await self._config.save()
+
             return {"status": "success", "data": result}
         except FileNotFoundError:
             return {"status": "error", "msg": "wechat-cli 未安装。请先安装 wechat-cli 或设置正确的路径。"}
@@ -937,12 +981,16 @@ class AtomicTools(BaseHandler):
 
     @agent_tool(
         name="shell_run",
-        description="Execute an arbitrary shell command. Use this when you need to run CLI tools, scripts, or any system command. For Python/PowerShell code use 'code_run' instead."
+        description="Execute an arbitrary shell command. Use this when you need to run CLI tools, scripts, or any system command. For Python/PowerShell code use 'code_exec' instead."
     )
     async def do_shell_run(self, command: str, timeout: int = 60, cwd: str = "") -> dict:
         """Execute an arbitrary shell command."""
         if not command:
             return {"status": "error", "msg": "No command provided"}
+        import re
+        for pat in self._DANGEROUS_SHELL_PATTERNS:
+            if re.search(pat, command):
+                return {"status": "error", "msg": f"拒绝执行危险命令（匹配模式: {pat}）"}
         if not await self._confirm("shell_run", command[:200]):
             return {"status": "error", "msg": "Shell execution not permitted"}
         timeout = min(timeout, 300)
@@ -1638,3 +1686,598 @@ class AtomicTools(BaseHandler):
             "target": target,
             "permanent": permanent,
         }
+
+    # ------------------------------------------------------------------
+    # N4: async code_exec background execution
+    # ------------------------------------------------------------------
+
+    def _do_code_exec_async(self, code: str, timeout: int) -> dict:
+        """Fire-and-forget code execution in a background asyncio task.
+
+        Returns immediately with a task_id.  The agent can later check
+        the result by reading the output file or via task status query.
+        """
+        task_id = f"async_{int(time.time() * 1000)}"
+        output_dir = os.path.join(self.data_dir, "async_results")
+        os.makedirs(output_dir, exist_ok=True)
+        status_path = os.path.join(output_dir, f"{task_id}.json")
+
+        async def _run_async():
+            result = {"status": "running", "started": time.time(), "task_id": task_id}
+            try:
+                with open(status_path, "w", encoding="utf-8") as f:
+                    json.dump(result, f)
+                # Run in thread pool to avoid blocking event loop
+                loop = asyncio.get_event_loop()
+                # Use sandbox mode for background execution
+                exec_result = await loop.run_in_executor(
+                    None, self._run_code_exec_sync, code, timeout
+                )
+                result.update(exec_result)
+                result["status"] = "done"
+                result["finished"] = time.time()
+            except Exception as exc:
+                result["status"] = "error"
+                result["error"] = str(exc)
+            finally:
+                with open(status_path, "w", encoding="utf-8") as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2)
+
+        asyncio.create_task(_run_async())
+        return {
+            "status": "success",
+            "msg": f"代码已在后台开始执行（task_id: {task_id}）",
+            "task_id": task_id,
+            "result_path": status_path,
+        }
+
+    def _run_code_exec_sync(self, code: str, timeout: int) -> dict:
+        """Synchronous wrapper for code_exec (used by async mode thread)."""
+        import subprocess as _sp
+        try:
+            with tempfile.NamedTemporaryFile(
+                suffix=".py", delete=False, mode="w", encoding="utf-8", dir=self.data_dir
+            ) as f:
+                f.write(code)
+                tmp_path = f.name
+            result_file = tempfile.NamedTemporaryFile(delete=False, suffix=".json", dir=self.data_dir)
+            result_path = result_file.name
+            result_file.close()
+            cmd = [sys.executable, "-I", "-X", "utf8", "-u", _EXEC_RUNNER,
+                   "--timeout", str(timeout), tmp_path, result_path]
+            proc = _sp.run(cmd, capture_output=True, text=True, timeout=timeout + 5)
+            if os.path.exists(result_path):
+                with open(result_path, "r", encoding="utf-8") as rf:
+                    return json.load(rf)
+            return {"status": "success", "result": None, "stdout": proc.stdout, "stderr": proc.stderr}
+        except Exception as exc:
+            return {"status": "error", "msg": str(exc)}
+
+    # ------------------------------------------------------------------
+    # N3: aifix — standalone auto-fix tool
+    # ------------------------------------------------------------------
+
+    @agent_tool(
+        name="aifix",
+        description="Auto-detect and fix common Python code errors. Analyzes the given code for syntax errors, missing imports, and other common AI-generated code issues. Returns the fixed code with a diff-like explanation. Use this when code_exec returns errors or before writing code to disk with self_improve."
+    )
+    async def do_aifix(self, code: str) -> dict:
+        """Analyze and auto-fix common Python code errors."""
+        if not code.strip():
+            return {"status": "error", "msg": "No code provided"}
+
+        original = code
+        fixed = code
+        fixes: list[str] = []
+
+        # Stage 1: Syntax check + repair
+        fixed, syn_fix = _fix_syntax_errors(fixed)
+        if syn_fix:
+            fixes.append(f"语法修复: {syn_fix}")
+
+        # Stage 2: Compile check (catches NameError / missing imports)
+        try:
+            compile(fixed, "<aifix>", "exec")
+        except SyntaxError as e:
+            return {
+                "status": "error",
+                "msg": f"代码仍有语法错误无法自动修复: {e}",
+                "original_code": original,
+                "error_line": e.lineno,
+                "error_text": e.msg,
+            }
+        except Exception as e:
+            # Not a syntax error — try NameError fix
+            fixed2, name_fix = _fix_name_error(fixed, str(e))
+            if name_fix:
+                fixed = fixed2
+                fixes.append(f"导入补全: {name_fix}")
+
+        # Stage 3: Re-validate after all fixes
+        try:
+            compile(fixed, "<aifix>", "exec")
+        except Exception as e:
+            if fixes:
+                return {
+                    "status": "partial",
+                    "msg": f"部分修复后仍有编译错误: {e}",
+                    "fixed_code": fixed,
+                    "original_code": original,
+                    "fixes_applied": fixes,
+                }
+            return {"status": "error", "msg": f"无法自动修复: {e}", "original_code": original}
+
+        if not fixes:
+            return {"status": "success", "msg": "代码检查通过，无需修复", "code": original}
+
+        return {
+            "status": "success",
+            "msg": f"已自动修复 {len(fixes)} 处问题",
+            "original_code": original,
+            "fixed_code": fixed,
+            "fixes_applied": fixes,
+        }
+
+    # ------------------------------------------------------------------
+    # N5: file_download + github tools
+    # ------------------------------------------------------------------
+
+    @agent_tool(
+        name="download_file",
+        description="Download a file from a URL and save it locally. Returns the saved path and file size. Use for fetching assets, datasets, or any remote file that should be stored locally."
+    )
+    async def do_download_file(self, url: str, save_path: str = "") -> dict:
+        """Download a file from *url*, optionally saving to *save_path*."""
+        if not url:
+            return {"status": "error", "msg": "No URL provided"}
+        # Block non-HTTP schemes
+        if not url.startswith(("http://", "https://")):
+            return {"status": "error", "msg": f"不支持协议: {url.split('://')[0]}"}
+        try:
+            import requests as _req
+            resp = _req.get(url, stream=True, timeout=60,
+                          headers={"User-Agent": "OAA/1.0 (Windows; agent)"})
+            resp.raise_for_status()
+
+            # Size guard from Content-Length
+            cl = resp.headers.get("Content-Length", "")
+            if cl and cl.isdigit() and int(cl) > self._MAX_DOWNLOAD_SIZE:
+                return {"status": "error", "msg": f"文件过大 ({int(cl)} 字节)，上限 {self._MAX_DOWNLOAD_SIZE} 字节"}
+
+            # Content-type guard
+            ct = resp.headers.get("Content-Type", "")
+            if ct in self._BLOCKED_CONTENT_TYPES:
+                return {"status": "error", "msg": f"拒绝下载可执行文件 ({ct})"}
+
+            if not save_path:
+                cd = resp.headers.get("Content-Disposition", "")
+                fname = ""
+                if "filename=" in cd:
+                    import re as _re
+                    m = _re.search(r'filename[^;=\n]*=["\']?([^"\'\n;]*)', cd)
+                    if m:
+                        fname = m.group(1)
+                if not fname:
+                    fname = url.rsplit("/", 1)[-1].split("?")[0] or "download"
+                save_path = os.path.join(self.data_dir, "workspace", fname)
+
+            os.makedirs(os.path.dirname(save_path) or self.data_dir, exist_ok=True)
+            total = 0
+            with open(save_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+                    total += len(chunk)
+                    if total > self._MAX_DOWNLOAD_SIZE:
+                        return {"status": "error", "msg": f"下载超出大小上限 {self._MAX_DOWNLOAD_SIZE} 字节"}
+
+            return {
+                "status": "success",
+                "msg": f"已下载 {total} 字节到 {save_path}",
+                "path": save_path,
+                "size": total,
+                "content_type": ct or "unknown",
+            }
+        except Exception as exc:
+            logger.error("download_file failed: %s", exc)
+            return {"status": "error", "msg": f"下载失败: {exc}"}
+
+    @agent_tool(
+        name="github_repo",
+        description="Look up a GitHub repository by owner/repo or URL. Returns repo metadata: description, stars, forks, language, topics, and clone URL. Use to evaluate open-source tools, libraries, or skills before installing them."
+    )
+    async def do_github_repo(self, query: str) -> dict:
+        """Query GitHub API for repository information.
+
+        *query* can be: ``owner/repo`` (e.g. ``codejunkie99/ztk``), a full
+        GitHub URL, or a search keyword (returns first match).
+        """
+        if not query:
+            return {"status": "error", "msg": "No query provided"}
+        try:
+            # Normalize query
+            repo_path = query.strip()
+            # Strip URL prefixes
+            for prefix in ("https://github.com/", "github.com/"):
+                if repo_path.startswith(prefix):
+                    repo_path = repo_path[len(prefix):]
+            repo_path = repo_path.rstrip("/")
+
+            import requests as _req
+            headers = {
+                "User-Agent": "OAA/1.0",
+                "Accept": "application/vnd.github+json",
+            }
+
+            if "/" in repo_path and repo_path.count("/") == 1:
+                # Direct repo lookup
+                url = f"https://api.github.com/repos/{repo_path}"
+                resp = _req.get(url, headers=headers, timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+                return {
+                    "status": "success",
+                    "full_name": data.get("full_name"),
+                    "description": data.get("description", ""),
+                    "stars": data.get("stargazers_count", 0),
+                    "forks": data.get("forks_count", 0),
+                    "language": data.get("language", ""),
+                    "topics": data.get("topics", []),
+                    "clone_url": data.get("clone_url", ""),
+                    "html_url": data.get("html_url", ""),
+                    "open_issues": data.get("open_issues_count", 0),
+                }
+            else:
+                # Search mode
+                url = f"https://api.github.com/search/repositories?q={repo_path}&per_page=1"
+                resp = _req.get(url, headers=headers, timeout=15)
+                resp.raise_for_status()
+                search_data = resp.json()
+                items = search_data.get("items", [])
+                if not items:
+                    return {"status": "error", "msg": f"未找到匹配 '{query}' 的仓库"}
+                data = items[0]
+                return {
+                    "status": "success",
+                    "full_name": data.get("full_name"),
+                    "description": data.get("description", ""),
+                    "stars": data.get("stargazers_count", 0),
+                    "forks": data.get("forks_count", 0),
+                    "language": data.get("language", ""),
+                    "topics": data.get("topics", []),
+                    "clone_url": data.get("clone_url", ""),
+                    "html_url": data.get("html_url", ""),
+                }
+        except Exception as exc:
+            logger.error("github_repo failed: %s", exc)
+            return {"status": "error", "msg": f"GitHub 查询失败: {exc}"}
+
+    @agent_tool(
+        name="github_content",
+        description="Fetch a single file's content from a GitHub repository. Provide a GitHub file URL or 'owner/repo/path/to/file' format. Returns the file content (UTF-8 text). Use to read README, source code, or configuration files from GitHub repos without cloning."
+    )
+    async def do_github_content(self, query: str) -> dict:
+        """Fetch file content from GitHub.
+
+        *query* can be a full URL like
+        ``https://github.com/codejunkie99/ztk/blob/main/README.md`` or
+        ``owner/repo/blob/branch/path``.
+        """
+        if not query:
+            return {"status": "error", "msg": "No query provided"}
+        try:
+            # Parse query into owner/repo/ref/path
+            q = query.strip()
+            for prefix in ("https://github.com/", "github.com/"):
+                if q.startswith(prefix):
+                    q = q[len(prefix):]
+            parts = q.split("/")
+            if len(parts) < 4 or "blob" not in parts:
+                return {"status": "error", "msg": "格式错误。请用 'owner/repo/blob/branch/filepath' 或完整 URL"}
+            blob_idx = parts.index("blob")
+            owner = parts[blob_idx - 1] if blob_idx > 0 else ""
+            repo = parts[0] if blob_idx == 1 else parts[blob_idx - 1] if blob_idx > 1 else ""
+            if "/" in owner:
+                owner, repo = owner.split("/", 1)
+            ref = parts[blob_idx + 1] if blob_idx + 1 < len(parts) else "main"
+            filepath = "/".join(parts[blob_idx + 2:])
+
+            import requests as _req
+            headers = {
+                "User-Agent": "OAA/1.0",
+                "Accept": "application/vnd.github.raw+json",
+            }
+            url = f"https://api.github.com/repos/{owner}/{repo}/contents/{filepath}?ref={ref}"
+            resp = _req.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            import base64 as _b64
+            content = _b64.b64decode(data.get("content", "")).decode("utf-8", errors="replace")
+            return {
+                "status": "success",
+                "path": data.get("path", ""),
+                "size": data.get("size", 0),
+                "content": content,
+                "html_url": data.get("html_url", ""),
+            }
+        except Exception as exc:
+            logger.error("github_content failed: %s", exc)
+            return {"status": "error", "msg": f"GitHub 文件读取失败: {exc}"}
+
+    # ------------------------------------------------------------------
+    # N6: module_index — structured self-introspection
+    # ------------------------------------------------------------------
+
+    @agent_tool(
+        name="module_index",
+        description="Query the internal module structure index. Use to find which modules expose which tools, config keys, or data formats. Modes: 'list_modules' (all importable modules), 'list_tools' (all registered tools with owning module), 'list_config' (config key paths), or 'lookup' (search for a specific name/tool/config). The index is generated on first call and cached."
+    )
+    async def do_module_index(self, query: str = "", mode: str = "lookup") -> dict:
+        """Structured self-introspection index for OAA codebase.
+
+        Modes:
+        - ``list_modules`` — all importable OAA modules with brief descriptions
+        - ``list_tools`` — all registered tools grouped by module
+        - ``list_config`` — config key paths with types
+        - ``lookup`` — search for *query* across modules, tools, and config keys
+        """
+        mode = mode.strip() or "lookup"
+
+        if mode == "list_modules":
+            modules = self._build_module_list()
+            return {"status": "success", "modules": modules, "count": len(modules)}
+
+        if mode == "list_tools":
+            tools = self._build_tool_list()
+            return {"status": "success", "tools": tools, "count": len(tools)}
+
+        if mode == "list_config":
+            config_keys = self._build_config_index()
+            return {"status": "success", "config_keys": config_keys, "count": len(config_keys)}
+
+        if mode == "lookup":
+            if not query.strip():
+                return {"status": "error", "msg": "lookup 模式需要 query 参数（搜索关键字）"}
+            results = self._lookup_in_index(query.strip())
+            return {"status": "success", "query": query, "results": results}
+
+        return {"status": "error", "msg": f"未知 mode: {mode}。请用 list_modules/list_tools/list_config/lookup"}
+
+    def _build_module_list(self) -> list[dict]:
+        """Discover all OAA Python modules."""
+        import pkgutil as _pu
+        import importlib as _il
+        modules = []
+        try:
+            oaa_path = os.path.dirname(os.path.dirname(__file__))
+            for finder, name, ispkg in _pu.iter_modules([oaa_path]):
+                if not name.startswith("_"):
+                    try:
+                        mod = _il.import_module(f"oaa.{name}")
+                        doc = (getattr(mod, "__doc__", "") or "").strip()
+                        modules.append({
+                            "name": f"oaa.{name}",
+                            "package": ispkg,
+                            "description": doc[:120].split("\n")[0] if doc else "",
+                        })
+                    except Exception:
+                        modules.append({"name": f"oaa.{name}", "package": ispkg, "description": ""})
+        except Exception as exc:
+            logger.warning("_build_module_list failed: %s", exc)
+        return modules
+
+    def _build_tool_list(self) -> list[dict]:
+        """List all registered tools with schema info."""
+        tools = []
+        try:
+            from .tool_schema import ATOMIC_TOOLS_SCHEMA, EXTENDED_TOOLS_SCHEMA
+            for cat, schemas in [("atomic", ATOMIC_TOOLS_SCHEMA), ("extended", EXTENDED_TOOLS_SCHEMA)]:
+                for s in schemas:
+                    fn = s.get("function", {})
+                    tools.append({
+                        "name": fn.get("name", ""),
+                        "category": cat,
+                        "description": fn.get("description", "")[:150],
+                    })
+        except Exception:
+            pass
+        return tools
+
+    def _build_config_index(self) -> list[dict]:
+        """Extract config key structure from AppConfig."""
+        keys = []
+        try:
+            from ..config import AppConfig
+            import dataclasses as _dc
+            for field in _dc.fields(AppConfig):
+                keys.append({
+                    "key": field.name,
+                    "type": str(field.type) if field.type else "any",
+                    "default": str(field.default) if field.default is not None else "",
+                })
+        except Exception:
+            pass
+        return keys
+
+    def _lookup_in_index(self, keyword: str) -> list[dict]:
+        """Search modules + tools + config for keyword."""
+        results = []
+        q = keyword.lower()
+        for m in self._build_module_list():
+            if q in m.get("name", "").lower() or q in m.get("description", "").lower():
+                results.append({"type": "module", **m})
+        for t in self._build_tool_list():
+            if q in t.get("name", "").lower() or q in t.get("description", "").lower():
+                results.append({"type": "tool", **t})
+        for c in self._build_config_index():
+            if q in c.get("key", "").lower() or q in c.get("type", "").lower():
+                results.append({"type": "config", **c})
+        return results[:20]  # cap to prevent context blowout
+
+    # ------------------------------------------------------------------
+    # Scheduled task tools (schedule_create / list / update / delete)
+    # ------------------------------------------------------------------
+
+    @agent_tool(
+        name="schedule_create",
+        description="Create a recurring scheduled task. The agent will auto-execute the task at the specified time and deliver results to the given channels. Use this when user says '每天/每周/每月 做X' or wants periodic reminders. Before calling, confirm: task content, time, cycle, delivery channels (default: chat+wechat)."
+    )
+    async def do_schedule_create(
+        self,
+        name: str,
+        execution_prompt: str,
+        cycle: str = "daily",
+        start_hour: int = 9,
+        start_minute: int = 0,
+        description: str = "",
+        delivery_channels: list = None,
+        cycle_day: int = 0,
+    ) -> dict:
+        """Create a scheduled task.
+
+        Args:
+            name: Task name (e.g. '每日科技新闻摘要')
+            execution_prompt: What the agent should DO when the task fires.
+                Write this as a self-contained instruction that an agent
+                can follow without additional context.  Include specifics
+                like word count, data source, format requirements.
+            cycle: 'daily', 'weekly', or 'monthly'
+            start_hour: Hour (0-23) to execute
+            start_minute: Minute (0-59) to execute
+            description: Human-readable description shown in the task list
+            delivery_channels: Where to send results. Default ['chat', 'wechat'].
+                Valid: 'chat', 'wechat', 'dingtalk', 'feishu'
+            cycle_day: For weekly: 0=Mon..6=Sun. For monthly: 1-31
+        """
+        if not self._scheduler:
+            return {"status": "error", "msg": "任务调度器未初始化"}
+        if not name.strip():
+            return {"status": "error", "msg": "必须提供任务名称"}
+        if not execution_prompt.strip():
+            return {"status": "error", "msg": "必须提供 execution_prompt（任务执行指令）"}
+        if cycle not in ("daily", "weekly", "monthly"):
+            return {"status": "error", "msg": "cycle 必须是 daily/weekly/monthly"}
+
+        channels = delivery_channels or ["chat", "wechat"]
+        for ch in channels:
+            if ch not in ("chat", "wechat", "dingtalk", "feishu"):
+                return {"status": "error", "msg": f"无效的交付渠道: {ch}"}
+
+        # Check for time conflicts with existing tasks
+        conflicts = self._scheduler.find_conflicts(
+            start_hour, start_minute, cycle=cycle, cycle_day=cycle_day,
+        )
+        conflict_info = None
+        if conflicts:
+            conflict_names = ", ".join(
+                f"「{c['name']}」({c['start_hour']:02d}:{c['start_minute']:02d})"
+                for c in conflicts
+            )
+            conflict_info = {
+                "has_conflict": True,
+                "conflict_count": len(conflicts),
+                "conflict_tasks": conflict_names,
+                "warning": (
+                    f"⚠️ 同一时间段 ({start_hour:02d}:{start_minute:02d}) 已有 {len(conflicts)} 个任务：{conflict_names}。"
+                    f"所有任务将在该时间同时执行。建议与用户确认：是否仍要创建，或将新任务调整到其他时间？"
+                ),
+            }
+
+        task = self._scheduler.create({
+            "type": "reminder",
+            "name": name.strip(),
+            "description": description or name.strip(),
+            "cycle": cycle,
+            "cycle_day": cycle_day,
+            "start_hour": start_hour,
+            "start_minute": start_minute,
+            "channels": channels,
+            "execution_prompt": execution_prompt.strip(),
+            "delivery_channels": channels,
+        })
+        time_desc = f"{start_hour:02d}:{start_minute:02d}"
+        cycle_desc = {"daily": "每天", "weekly": f"每周{['一','二','三','四','五','六','日'][cycle_day]}", "monthly": f"每月{cycle_day}号"}[cycle]
+        result = {
+            "status": "success",
+            "msg": f"已创建定时任务「{name}」— {cycle_desc} {time_desc} 自动执行，交付渠道：{', '.join(channels)}",
+            "task": task,
+        }
+        if conflict_info:
+            result["conflict"] = conflict_info
+            result["msg"] += "。\n\n" + conflict_info["warning"]
+        return result
+
+    @agent_tool(
+        name="schedule_list",
+        description="List all scheduled tasks. Each task shows its name, cycle, execution time, and delivery channels. Use to review what periodic tasks are configured."
+    )
+    async def do_schedule_list(self) -> dict:
+        """List all scheduled tasks."""
+        if not self._scheduler:
+            return {"status": "error", "msg": "任务调度器未初始化"}
+        tasks = self._scheduler.list_tasks()
+        if not tasks:
+            return {"status": "success", "tasks": [], "msg": "暂无定时任务"}
+        return {"status": "success", "tasks": tasks, "count": len(tasks)}
+
+    @agent_tool(
+        name="schedule_update",
+        description="Update an existing scheduled task. Only the fields you provide will be changed. You can update: name, execution_prompt, cycle, start_hour, start_minute, description, delivery_channels, enabled."
+    )
+    async def do_schedule_update(self, id: str, **kwargs) -> dict:
+        """Update a scheduled task by ID."""
+        if not self._scheduler:
+            return {"status": "error", "msg": "任务调度器未初始化"}
+        if not id:
+            return {"status": "error", "msg": "必须提供任务 ID"}
+        updated = self._scheduler.update(id, kwargs)
+        if updated is None:
+            return {"status": "error", "msg": f"未找到任务: {id}"}
+        return {"status": "success", "msg": f"已更新任务「{updated['name']}」", "task": updated}
+
+    @agent_tool(
+        name="schedule_delete",
+        description="Delete a scheduled task by ID. This permanently removes the task — it will no longer execute. Use when user says '取消/删除 定时任务X'."
+    )
+    async def do_schedule_delete(self, id: str) -> dict:
+        """Delete a scheduled task."""
+        if not self._scheduler:
+            return {"status": "error", "msg": "任务调度器未初始化"}
+        if not id:
+            return {"status": "error", "msg": "必须提供任务 ID"}
+        deleted = self._scheduler.delete(id)
+        if not deleted:
+            return {"status": "error", "msg": f"未找到任务: {id}"}
+        return {"status": "success", "msg": f"已删除定时任务"}
+
+    @agent_tool(
+        name="schedule_run",
+        description="Manually trigger a scheduled task immediately (does not wait for its scheduled time). Use when user says '现在就执行' for a specific scheduled task."
+    )
+    async def do_schedule_run(self, id: str) -> dict:
+        """Trigger a scheduled task immediately."""
+        if not self._scheduler:
+            return {"status": "error", "msg": "任务调度器未初始化"}
+        if not id:
+            return {"status": "error", "msg": "必须提供任务 ID"}
+        task = self._scheduler.get(id)
+        if task is None:
+            return {"status": "error", "msg": f"未找到任务: {id}"}
+        if not task.get("execution_prompt", "").strip():
+            return {"status": "error", "msg": f"任务「{task['name']}」没有 execution_prompt，无法手动执行"}
+
+        # Execute the task prompt now
+        prompt = task["execution_prompt"]
+        delivery = task.get("delivery_channels", ["chat", "wechat"])
+        result = {
+            "status": "success",
+            "msg": f"已手动触发任务「{task['name']}」",
+            "task_name": task["name"],
+            "execution_prompt": prompt,
+            "delivery_channels": delivery,
+        }
+        if self._idle_inspector and self._idle_inspector._executor_callback:
+            asyncio.create_task(self._idle_inspector._executor_callback(task))
+            result["msg"] += "，正在后台执行"
+        else:
+            result["msg"] += "，但执行器未连接——请等待定时触发"
+        return result

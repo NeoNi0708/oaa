@@ -233,7 +233,7 @@
           ref="marketIframe"
           src="https://cn.clawhub-mirror.com"
           class="market-iframe"
-          sandbox="allow-scripts allow-same-origin allow-forms"
+          sandbox="allow-scripts allow-forms"
           title="技能市场"
           @load="onIframeLoad"
           @error="onIframeError"
@@ -244,7 +244,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onActivated } from 'vue'
+import { ref, computed, onMounted, onActivated, onUnmounted } from 'vue'
 import { useWebSocket } from '../composables/useWebSocket'
 
 const { sendRequest } = useWebSocket()
@@ -552,6 +552,19 @@ function formatDate(iso: string): string {
   }
 }
 
+// Click-outside handler: close expanded skill when clicking outside
+function handleClickOutside(e: MouseEvent) {
+  if (!expandedSkill.value) return
+  const target = e.target as HTMLElement
+  if (!target.closest('.skill-card-wrapper')) {
+    expandedSkill.value = null
+    skillDetail.value = null
+  }
+}
+
+onMounted(() => document.addEventListener('click', handleClickOutside))
+onUnmounted(() => document.removeEventListener('click', handleClickOutside))
+
 
 
 // Track whether initial data load has completed at least once
@@ -773,11 +786,11 @@ onActivated(async () => {
   display: flex;
   flex-direction: column;
   gap: var(--oaa-space-1);
+  overflow: visible;
 }
 
 .skill-card-wrapper {
-  display: flex;
-  flex-direction: column;
+  position: relative;
 }
 
 .skill-card {
@@ -1063,13 +1076,18 @@ onActivated(async () => {
   vertical-align: middle;
 }
 
-/* Detail panel */
+/* Detail panel — floating overlay */
 .skill-detail-panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
   background: var(--oaa-bg-surface);
   border: 1px solid var(--oaa-border-default);
   border-radius: var(--oaa-radius-lg);
-  margin: var(--oaa-space-1) 0 var(--oaa-space-2);
   padding: var(--oaa-space-4);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
   animation: fadeIn 0.2s ease;
 }
 

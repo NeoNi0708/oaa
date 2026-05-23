@@ -162,6 +162,44 @@ class OAAApp:
                 except Exception as exc:
                     logger.debug("WeChat inspector notify failed: %s", exc)
         self.agent._idle_inspector.set_notify_callback(_inspector_notify)
+
+        # Executor callback — auto-runs scheduled tasks with execution_prompt
+        async def _executor_run(task: dict):
+            prompt = task.get("execution_prompt", "")
+            name = task.get("name", "定时任务")
+            delivery = task.get("delivery_channels", ["chat", "wechat"])
+            logger.info("Executor running task: %s → channels: %s", name, delivery)
+            try:
+                # Feed the execution_prompt to the agent
+                full_prompt = (
+                    f"【定时任务执行】{name}\n\n"
+                    f"{prompt}\n\n"
+                    f"执行完成后，将结果通过以下渠道交付：{', '.join(delivery)}。"
+                    f"使用 wechat_send_text 发送微信、直接输出到对话页面。"
+                )
+                result_text = ""
+                async for chunk in self.agent.process_message(full_prompt, history=[]):
+                    if chunk["type"] == "done":
+                        result_text = chunk.get("content", "")
+                    # Let the agent stream output normally
+
+                # Deliver to WeChat
+                if "wechat" in delivery:
+                    wechat = self.channel_adapters.get("wechat")
+                    if wechat and wechat.is_authenticated and wechat._bot_user_id:
+                        try:
+                            summary = (result_text[:500] + "...") if len(result_text) > 500 else result_text
+                            await wechat.send_message(wechat._bot_user_id,
+                                f"📋 [{name}] 执行完成：\n\n{summary or '(无文本输出)'}")
+                        except Exception as exc:
+                            logger.warning("Scheduled task WeChat delivery failed: %s", exc)
+
+                # Chat delivery is automatic (process_message outputs to the loop)
+                logger.info("Scheduled task '%s' executed successfully", name)
+            except Exception as exc:
+                logger.error("Scheduled task '%s' execution failed: %s", name, exc)
+
+        self.agent._idle_inspector.set_executor_callback(_executor_run)
         await self.agent._idle_inspector.start_background()
 
         # Startup self-check: background task that waits for GUI client
@@ -174,6 +212,10 @@ class OAAApp:
 
         # Wire a callback so management.py can send welcome when a new channel authenticates
         self.agent._on_channel_ready = self._notify_channel
+
+        # Fix stale running proposals from previous session (app crash / kill)
+        if self.agent._proposal_store:
+            await self.agent._proposal_store.fix_stale_running()
 
         logger.info("OAA ready. Waiting for messages...")
         while True:
@@ -305,9 +347,15 @@ class OAAApp:
                 loop.close()
 
     def _signal_stop(self):
-        """Cancel the main asyncio task on signal."""
-        for task in asyncio.all_tasks():
-            task.cancel()
+        """Graceful shutdown on signal — stop services first, then cancel remainder."""
+        logger.info("Received stop signal, shutting down...")
+        try:
+            loop = asyncio.get_event_loop()
+            loop.create_task(self.stop())
+        except Exception as exc:
+            logger.warning("Graceful stop failed, forcing cancel: %s", exc)
+            for task in asyncio.all_tasks():
+                task.cancel()
 
 
 def main():

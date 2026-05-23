@@ -5,6 +5,7 @@ Components:
 - ``ProposalStore``: JSON persistence with CRUD + dedup by target
 - ``ProposalExecutor``: runs a proposal's action sequence via a handler
 """
+import asyncio
 import json
 import os
 import time
@@ -84,6 +85,7 @@ class ProposalStore:
     def __init__(self, store_dir: str):
         self._path = os.path.join(store_dir, "proposals.json")
         self._store: list[dict] = []
+        self._lock = asyncio.Lock()
         self._load()
 
     # ------------------------------------------------------------------
@@ -116,8 +118,9 @@ class ProposalStore:
         if not proposal.created_at:
             proposal.created_at = time.time()
         d = asdict(proposal)
-        self._store.append(d)
-        await self._save()
+        async with self._lock:
+            self._store.append(d)
+            await self._save()
         logger.info("Proposal created: %s [%s] %s", proposal.id, proposal.type, proposal.title)
         return proposal.id
 
@@ -129,12 +132,13 @@ class ProposalStore:
 
     async def update_status(self, proposal_id: str, status: str, **extra) -> bool:
         """Update proposal status and optional extra fields. Returns True if found."""
-        for p in self._store:
-            if p["id"] == proposal_id:
-                p["status"] = status
-                p.update(extra)
-                await self._save()
-                return True
+        async with self._lock:
+            for p in self._store:
+                if p["id"] == proposal_id:
+                    p["status"] = status
+                    p.update(extra)
+                    await self._save()
+                    return True
         return False
 
     def has_pending_for_target(self, target: str, ptype: str = "") -> bool:
@@ -157,6 +161,23 @@ class ProposalStore:
 
     def count_pending(self) -> int:
         return sum(1 for p in self._store if p["status"] == STATUS_PENDING)
+
+    async def fix_stale_running(self):
+        """Mark all proposals left in 'running' state as 'interrupted'.
+
+        Called at startup because a previous process may have been
+        terminated while a proposal was executing.
+        """
+        async with self._lock:
+            fixed = 0
+            for p in self._store:
+                if p.get("status") == "running":
+                    p["status"] = "interrupted"
+                    p["error"] = "应用退出，执行中断"
+                    fixed += 1
+            if fixed:
+                await self._save()
+                logger.info("ProposalStore: marked %d stale running proposals as interrupted", fixed)
 
     def has_pending(self) -> bool:
         return any(p["status"] == STATUS_PENDING for p in self._store)

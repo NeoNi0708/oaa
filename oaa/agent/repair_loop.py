@@ -74,13 +74,21 @@ class RepairLoop:
         """
         self._verifiers[problem_type] = fn
 
-    async def run(self, plan: RepairPlan, agent) -> dict:
-        """Execute the self-healing flow.  Returns ``{"status": ..., ...}``."""
+    async def run(self, plan: RepairPlan, agent, inspector=None) -> dict:
+        """Execute the self-healing flow.  Returns ``{"status": ..., ...}``.
+
+        When *inspector* (IdleInspector) is provided, inspection is paused
+        for the duration of the repair to prevent nested healing loops.
+        """
         token = _active_proposal_id.set(plan.proposal_id)
+        if inspector:
+            inspector.pause()
         try:
             return await self._run_impl(plan, agent)
         finally:
             _active_proposal_id.reset(token)
+            if inspector:
+                inspector.resume()
 
     async def _run_impl(self, plan: RepairPlan, agent) -> dict:
         """Internal implementation — called by ``run()`` with contextvar set."""
@@ -164,7 +172,7 @@ class RepairLoop:
                     "",
                     "上次你尝试安装依赖但未成功。可选方案：",
                     "  - 用 pip / npm / winget / 包管理器安装",
-                    "  - 从 GitHub 或其他来源下载（web_search → curl/wget）",
+                    "  - 从 GitHub 或其他来源下载（ai_search → curl/wget）",
                     "  - 换一个已有替代方案（如有）",
                     "  - 请求用户协助注册相关服务（如需要 API key/后台配置）",
                 ])
@@ -178,7 +186,7 @@ class RepairLoop:
             "请完成以下步骤：",
             "1. 诊断根因 — 分析错误信息，判断是缺依赖、调用方式错误、权限不够还是服务不可达",
             "2. 制定修复方案 — 可能的方案包括：",
-            "   a. 安装依赖或外部工具（pip / npm / web_search 搜索下载）",
+            "   a. 安装依赖或外部工具（pip / npm / ai_search 搜索下载）",
             "   b. 更换实现方式（用其他已有工具完成同一任务）",
             "   c. 修改代码（self_improve）",
             "   d. 请求用户提供必要信息（API key、注册、后台配置）",
@@ -357,7 +365,7 @@ def record_rollback_entry(data_dir: str, proposal_id: str, change: dict):
         "timestamp": datetime.now(timezone.utc).isoformat(),
         **change,
     }
-    manifest[proposal_id]["attempts"].append(entry)
+    manifest[effective_id]["attempts"].append(entry)
 
     try:
         with open(manifest_path, "w", encoding="utf-8") as f:

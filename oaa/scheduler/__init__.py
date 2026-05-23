@@ -22,6 +22,8 @@ class TaskScheduler:
         - id, type (fixed|reminder), name, description
         - enabled, cycle (daily|weekly|monthly), cycle_day, start_hour, start_minute
         - channels, report, report_channels, confirm_receipt
+        - execution_prompt (what the agent should DO when task fires)
+        - delivery_channels (where to send results: "chat", "wechat", "dingtalk", "feishu")
         - created_at, updated_at, last_run
     """
 
@@ -66,6 +68,8 @@ class TaskScheduler:
             "report": task.get("report", False),
             "report_channels": task.get("report_channels", []),
             "confirm_receipt": task.get("confirm_receipt", False),
+            "execution_prompt": task.get("execution_prompt", ""),
+            "delivery_channels": task.get("delivery_channels", ["chat", "wechat"]),
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
             "last_run": None,
@@ -73,6 +77,30 @@ class TaskScheduler:
         self._tasks.append(new)
         self._save()
         return new
+
+    def find_conflicts(self, start_hour: int, start_minute: int,
+                       cycle: str = "daily", cycle_day: int = 0,
+                       exclude_id: str = "") -> list[dict]:
+        """Return enabled tasks that share the same time slot.
+
+        Args:
+            start_hour, start_minute: time slot to check
+            cycle: task cycle to compare
+            cycle_day: day specifier (0-6 for weekly, 1-31 for monthly)
+            exclude_id: task ID to skip (for update, not self-conflict)
+        """
+        conflicts = []
+        for t in self._tasks:
+            if not t.get("enabled", True):
+                continue
+            if exclude_id and t["id"] == exclude_id:
+                continue
+            if (t.get("start_hour") == start_hour
+                    and t.get("start_minute") == start_minute
+                    and t.get("cycle") == cycle
+                    and t.get("cycle_day", 0) == cycle_day):
+                conflicts.append(t)
+        return conflicts
 
     def list_tasks(self, include_disabled: bool = True) -> list[dict]:
         """Return all tasks, newest first."""
@@ -94,6 +122,7 @@ class TaskScheduler:
                     "name", "description", "enabled", "type", "cycle",
                     "cycle_day", "start_hour", "start_minute", "channels",
                     "report", "report_channels", "confirm_receipt",
+                    "execution_prompt", "delivery_channels",
                 }
                 for k, v in updates.items():
                     if k in safe_keys:
@@ -146,14 +175,15 @@ class TaskScheduler:
         return True
 
     def get_due_tasks(self) -> list[dict]:
-        """Return tasks that are due right now."""
+        """Return tasks that are due right now, ordered by creation time."""
         now = datetime.now()
-        # Round seconds to zero so each minute slot fires once
         now = now.replace(second=0, microsecond=0)
         due = []
         for t in self._tasks:
             if self._is_due(t, now):
                 due.append(t)
+        # Sort by creation time so older tasks execute first
+        due.sort(key=lambda t: t.get("created_at", ""))
         return due
 
     # ------------------------------------------------------------------

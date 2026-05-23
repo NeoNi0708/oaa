@@ -90,8 +90,9 @@ export function useWebSocket() {
         const data = JSON.parse(event.data)
         const p = data.payload || {}
 
-        // Management responses — resolve pending promise
-        if (data.type && data.type.endsWith('_resp')) {
+        // Management responses — resolve pending promise.
+        // Guarded by request_id match (UUID) so unknown _resp types are harmless.
+        if (data.type && data.type.endsWith('_resp') && data.request_id) {
           const rid = data.request_id
           if (rid && pendingRequests.has(rid)) {
             const pr = pendingRequests.get(rid)!

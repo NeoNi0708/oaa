@@ -280,9 +280,10 @@ class ManagementHandler:
             else:
                 models[prov] = []
                 for entry in entries:
+                    key = entry.get("api_key", "")
                     models[prov].append({
                         "name": entry.get("name", ""),
-                        "api_key": entry.get("api_key", ""),
+                        "api_key": key[:4] + "****" + key[-4:] if len(key) > 8 else "****",
                         "model_id": entry.get("model_id", ""),
                         "base_url": entry.get("base_url", default_url),
                     })
