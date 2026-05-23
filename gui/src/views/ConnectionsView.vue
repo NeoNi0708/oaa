@@ -86,17 +86,12 @@
           </div>
           <span v-if="channels.wechat.error && !channels.wechat.qrCodeUrl && !channels.wechat.online" class="card-error">{{ channels.wechat.error }}</span>
         </div>
-        <!-- wechat-cli config -->
-        <div class="cli-config-section">
+        <!-- iLink capability summary -->
+        <div v-if="channels.wechat.online" class="cli-config-section">
           <div class="cli-config-header">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-            <span>wechat-cli 联系人/历史/搜索</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg>
+            <span>iLink 已连接 · 可用：收发消息、发送文件、正在输入状态</span>
           </div>
-          <div class="credential-row">
-            <input v-model="channels.wechat.wechatCliPath" placeholder="wechat-cli 路径，如 D:\\nodejs\\node_global\\node_modules\\wechat-cli" class="oaa-input oaa-input--sm" />
-            <button class="oaa-btn oaa-btn--sm oaa-btn--primary" @click="saveWechatCliConfig">保存</button>
-          </div>
-          <span v-if="channels.wechat.cliSaved" class="scan-ok">已保存</span>
         </div>
       </div>
 
