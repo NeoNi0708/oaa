@@ -1,6 +1,68 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-23 — Bug修复 + 能力移植 + 工具去重 + 定时任务调度 + H-05修复 + 度量可视化
+> 最后更新：2026-05-23 — 工具分组 + CLI预装 + 自愈强化 + 提案去重 + 定时任务修复 + 安全加固 + 度量可视化
+
+---
+
+## 本次会话（2026-05-23 下午）— 工具分组 + CLI预装 + 自愈强化 + 去重修复
+
+### 工具分组路由 ✅
+
+核心工具（~23个）始终可见，88个专用工具按需加载。LLM 通过 `tool_group_load` 动态加载工具组。
+
+| 文件 | 改动 |
+|------|------|
+| `oaa/agent/tool_groups.py` | **新增** — 17组/96工具映射 + 分组查询 |
+| `oaa/agent/oaa_agent.py` | 分离 `_all_tools_schema` / `_tools_schema`，`load_tool_group`/`unload_tool_group` |
+| `oaa/agent/tools.py` | `tool_group_load`/`tool_group_unload`/`tool_group_list` 三个工具 |
+
+### CLI 工具预装 ✅
+
+`cli/` 目录 bundle Node.js 便携版 + wechat-cli/lark-cli/dws。OAA 首次启动自动 `npm install`。零依赖开箱即用。
+
+| 文件 | 改动 |
+|------|------|
+| `cli/package.json` | **新增** — `@larksuite/cli` + `dws` |
+| `cli/.gitignore` | **新增** — 排除 `node_modules/` + `node/` |
+| `oaa/init.py` | `ensure_bundled_cli()` 自动检测并安装 |
+| `oaa/app.py` | 启动时 prepend bundled Node.js 到 PATH |
+| `oaa/gateway/adapters/wechat_cli.py` | bundled CLI 优先查找 + pip wechat-cli 支持 |
+| `oaa/gateway/adapters/feishu_cli.py` | bundled CLI 优先查找 |
+| `oaa/gateway/adapters/dingtalk_cli.py` | bundled CLI 优先查找 |
+
+### 自愈系统强化 ✅
+
+**搜索→安装→验证 三步流程**写入系统规则和 repair_loop prompt。
+
+| 文件 | 改动 |
+|------|------|
+| `oaa/agent/system_rules.py` | 规则6升级为通用三步流程 + 规则5b 微信读写分离 |
+| `oaa/agent/repair_loop.py` | feed prompt 强制搜索优先 + 试运行校验 + 依赖缺失重试引导 |
+
+### 提案去重修复 ✅
+
+| 文件 | 改动 |
+|------|------|
+| `oaa/agent/proposal.py` | `has_recent_for_target`(24h窗口) + `dedup_stale_pending`(启动清理过期提案) |
+| `oaa/agent/idle_inspector.py` | `_should_skip_proposal` 统一入口 + 稳定 topic key 去重 + 过滤"未初始化"错误 |
+| `oaa/app.py` | 启动时 `fix_stale_running` + `dedup_stale_pending` |
+
+### 定时任务调度修复 ✅
+
+**根因**：scheduler 后台循环只标记不执行。修复后 scheduler 直接触发 `_executor_run`。
+
+| 文件 | 改动 |
+|------|------|
+| `oaa/scheduler/__init__.py` | `set_due_callback` + `start_loop` 中调用回调 |
+| `oaa/app.py` | 注册 `_executor_run` 为 `due_callback` |
+| `test_coverage_v3.py` | 注入 `TaskScheduler`，修复测试 agent 假失败 |
+
+### 测试结果
+
+```
+144 passed, 1 skipped — 无回归
+test_self_heal.py — 自愈搜索→安装→验证 闭环验证通过
+```
 
 ---
 
