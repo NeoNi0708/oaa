@@ -163,6 +163,10 @@ class AtomicTools(BaseHandler):
         """Inject the TaskScheduler for schedule_create/list/update/delete."""
         self._scheduler = scheduler
 
+    def set_tool_group_manager(self, agent):
+        """Inject the OAAAgent for tool group load/unload."""
+        self._agent_ref = agent
+
     def set_wechat_cli_path(self, path: str):
         """Set the path to wechat-cli binary for WeChat data tools."""
         self._wechat_cli_path = path
@@ -2112,6 +2116,66 @@ class AtomicTools(BaseHandler):
             if q in c.get("key", "").lower() or q in c.get("type", "").lower():
                 results.append({"type": "config", **c})
         return results[:20]  # cap to prevent context blowout
+
+    # ------------------------------------------------------------------
+    # Tool-group management (dynamic tool loading)
+    # ------------------------------------------------------------------
+
+    @agent_tool(
+        name="tool_group_load",
+        description="Load a tool group to access domain-specific tools. Available groups: wechat(8), feishu(18), dingtalk(28), schedule(5), skills(4), self_modify(7), office(2), plans(3), proposals(3), mcp(3), browser(1), github(2), diagnostics(5), chat_history(1), git(3), reflection(2). Use this when the current task needs tools outside the core set. Groups stay loaded for the session."
+    )
+    async def do_tool_group_load(self, group: str) -> dict:
+        """Load a tool group by name, making its schemas visible to the LLM."""
+        if not hasattr(self, '_agent_ref') or self._agent_ref is None:
+            return {"status": "error", "msg": "工具组管理器未初始化"}
+        group = group.lower().strip()
+        valid = {"wechat", "feishu", "dingtalk", "schedule", "skills",
+                 "self_modify", "office", "plans", "proposals", "mcp",
+                 "browser", "github", "diagnostics", "chat_history",
+                 "git", "reflection", "email"}
+        if group not in valid:
+            return {"status": "error", "msg": f"未知的工具组: {group}。可用组: {', '.join(sorted(valid))}"}
+        count = self._agent_ref.load_tool_group(group)
+        if count > 0:
+            loaded = self._agent_ref.get_loaded_groups()
+            return {"status": "success", "msg": f"已加载 **{group}** 组 ({count} 个工具)。当前已加载: {', '.join(loaded)}"}
+        elif group in self._agent_ref._loaded_groups:
+            return {"status": "success", "msg": f"**{group}** 组已经加载，无需重复操作"}
+        return {"status": "error", "msg": f"加载 {group} 失败（组不存在或为空）"}
+
+    @agent_tool(
+        name="tool_group_unload",
+        description="Unload a tool group to free context space. Use for groups no longer needed in the current conversation."
+    )
+    async def do_tool_group_unload(self, group: str) -> dict:
+        """Unload a tool group."""
+        if not hasattr(self, '_agent_ref') or self._agent_ref is None:
+            return {"status": "error", "msg": "工具组管理器未初始化"}
+        ok = self._agent_ref.unload_tool_group(group.lower().strip())
+        if ok:
+            loaded = self._agent_ref.get_loaded_groups()
+            remaining = ', '.join(loaded) if loaded else '(仅核心工具)'
+            return {"status": "success", "msg": f"已卸载 **{group}** 组。当前已加载: {remaining}"}
+        return {"status": "error", "msg": f"**{group}** 组未加载，无需卸载"}
+
+    @agent_tool(
+        name="tool_group_list",
+        description="List all tool groups with their tool counts and load status."
+    )
+    async def do_tool_group_list(self) -> dict:
+        """List all tool groups and their status."""
+        from . import tool_groups as tg
+        loaded = getattr(self._agent_ref, '_loaded_groups', set()) if hasattr(self, '_agent_ref') and self._agent_ref else set()
+        lines = ["## 工具组列表\n"]
+        lines.append("| 组名 | 工具数 | 状态 |")
+        lines.append("|------|--------|------|")
+        for g, count in sorted(tg.GROUP_INDEX.items()):
+            status = "✅ 已加载" if g in loaded else "📦"
+            lines.append(f"| {g} | {count} | {status} |")
+        core_count = len(self._build_tool_list()) - sum(tg.GROUP_INDEX.values())
+        lines.append(f"\n核心工具（始终可见）: ~{max(0, core_count)} 个")
+        return {"status": "success", "msg": "\n".join(lines)}
 
     # ------------------------------------------------------------------
     # Scheduled task tools (schedule_create / list / update / delete)

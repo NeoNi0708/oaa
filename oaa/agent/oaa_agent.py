@@ -1,6 +1,7 @@
 """OAA Agent — orchestrates identity, skills, tools, and LLM into a coherent agent loop."""
 import asyncio
 import os
+import sys
 from typing import AsyncGenerator, Optional
 
 from ..auth.permissions import PermissionsManager
@@ -16,6 +17,7 @@ from .handler import BaseHandler
 from .idle_inspector import IdleInspector
 from .loop import AgentLoop
 from . import system_rules as _sys_rules
+from . import tool_groups as _tool_groups
 from .conversation_archiver import ConversationArchiver
 from .memory_manager import MemoryManager
 from .skill_manager import SkillManager
@@ -25,6 +27,12 @@ from .tools import AtomicTools
 from .metrics import MetricsCollector
 
 logger = get_logger("agent.oaa_agent")
+
+
+def _get_schema_name(schema_entry: dict) -> str:
+    """Extract the tool name from an OpenAI-format schema entry."""
+    fn = schema_entry.get("function", schema_entry)
+    return fn.get("name", "")
 
 # OAA project root — used for self-modification tools
 OAA_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -133,6 +141,8 @@ class OAAAgent:
         self.atomic.set_archiver(self.archiver)
         self.atomic.set_proposal_store(self._proposal_store)
         self.atomic.set_idle_inspector(self._idle_inspector)
+        self.atomic.set_scheduler(scheduler)
+        self.atomic.set_tool_group_manager(self)
         self.atomic.set_wechat_cli_path(config.wechat.wechat_cli_path)
         self.extended = ExtendedTools(
             config.data_dir, permissions=permissions, wechat_adapter=wechat_adapter,
@@ -147,7 +157,8 @@ class OAAAgent:
             anysearch_api_key=config.search.anysearch_api_key,
         )
 
-        self._tools_schema = (
+        # Full schema (all tools) — used for group loading
+        self._all_tools_schema: list[dict] = (
             ATOMIC_TOOLS_SCHEMA + EXTENDED_TOOLS_SCHEMA + BROWSER_TOOLS_SCHEMA + MCP_TOOLS_SCHEMA
             + collect_tool_schemas(AtomicTools)
             + collect_tool_schemas(ExtendedTools)
@@ -155,11 +166,17 @@ class OAAAgent:
             + collect_tool_schemas(AiSearchTools)
         )
         if config.wechat.enabled and config.wechat.iLink_token:
-            self._tools_schema = self._tools_schema + WECHAT_TOOLS_SCHEMA
+            self._all_tools_schema = self._all_tools_schema + WECHAT_TOOLS_SCHEMA
         if config.feishu.enabled and config.feishu.app_id:
-            self._tools_schema = self._tools_schema + FEISHU_TOOLS_SCHEMA
+            self._all_tools_schema = self._all_tools_schema + FEISHU_TOOLS_SCHEMA
         if config.dingtalk.enabled and config.dingtalk.client_id:
-            self._tools_schema = self._tools_schema + DINGTALK_TOOLS_SCHEMA
+            self._all_tools_schema = self._all_tools_schema + DINGTALK_TOOLS_SCHEMA
+
+        # Loaded groups (persist across turns within a session)
+        self._loaded_groups: set[str] = set()
+
+        # Visible schema = core + loaded groups (rebuilt after each group load/unload)
+        self._tools_schema: list[dict] = self._build_visible_schema()
 
     def set_channel_adapters(self, adapters: dict):
         """Inject runtime channel adapter instances for status introspection.
@@ -221,6 +238,54 @@ class OAAAgent:
             handler.register_dynamic(tool_name, entry.get("path", ""), entry.get("parameters", {}))
         return handler
 
+    # ── Tool-group management ──────────────────────────────────────
+
+    def _build_visible_schema(self) -> list[dict]:
+        """Return the schema list that should be shown to the LLM.
+
+        Core tools + any explicitly loaded groups.  Non-core tools whose
+        group hasn't been loaded are excluded.
+        """
+        if not self._loaded_groups:
+            # Fast path: core-only
+            return [s for s in self._all_tools_schema
+                    if _get_schema_name(s) not in _tool_groups._TOOL_GROUP]
+        # Build a visible-name set: core + loaded groups
+        visible: set[str] = set()
+        for g in self._loaded_groups:
+            visible.update(_tool_groups.get_group_tools(g))
+        return [s for s in self._all_tools_schema
+                if _get_schema_name(s) not in _tool_groups._TOOL_GROUP
+                or _get_schema_name(s) in visible]
+
+    def load_tool_group(self, group: str) -> int:
+        """Load a tool group into the visible schema. Returns count of tools loaded.
+
+        If *group* is already loaded this is a no-op.
+        """
+        group = group.lower().strip()
+        if group in ("core", ""):
+            return 0
+        if group not in _tool_groups.NON_CORE_GROUPS:
+            return 0
+        if group in self._loaded_groups:
+            return 0
+        self._loaded_groups.add(group)
+        self._tools_schema = self._build_visible_schema()
+        return _tool_groups.GROUP_INDEX.get(group, 0)
+
+    def unload_tool_group(self, group: str) -> bool:
+        """Unload a tool group. Returns True if the group was loaded."""
+        group = group.lower().strip()
+        if group in self._loaded_groups:
+            self._loaded_groups.discard(group)
+            self._tools_schema = self._build_visible_schema()
+            return True
+        return False
+
+    def get_loaded_groups(self) -> list[str]:
+        return sorted(self._loaded_groups)
+
     def build_system_prompt(self, skill_name: str = "") -> str:
         """Build a system prompt from identity data, tools awareness, and optional skill context."""
         if skill_name:
@@ -256,58 +321,86 @@ class OAAAgent:
         return "\n".join(lines)
 
     def _inject_tools_awareness(self, base_prompt: str) -> str:
-        """Inject current date, available tools, skill listing, and critical usage rules."""
+        """Inject current date, channel status, skill listing, and rules."""
         from datetime import datetime
         today = datetime.now().strftime("%Y年%m月%d日")
-
-        tool_list = []
-        for t in self._tools_schema:
-            name = t["function"]["name"]
-            desc = t["function"].get("description", "")
-            tool_list.append(f"- `{name}`: {desc}")
-
         skill_listing = self._build_skill_listing()
 
-        config_path = os.path.join(self.config.data_dir, "config.json")
+        # Permission level string
+        perm_raw = self.config.permissions
+        perm_level = (perm_raw.get("permission_level") if isinstance(perm_raw, dict) else perm_raw) or "auto"
 
-        # Process alive-status — prevents hallucination that OAA isn't running
-        oaa_pid = os.getpid()
-        oaa_cmdline = ""
-        try:
-            import psutil
-            oaa_cmdline = " ".join(psutil.Process(oaa_pid).cmdline())[:200]
-        except ImportError:
-            pass
+        # Build persona from identity (work style from soul, business domain from user)
+        _soul = self.identity.get("soul", "")
+        _user = self.identity.get("user", "")
+
+        _style_hints = []
+        if "主动" in _soul or "不等指令" in _soul:
+            _style_hints.append("你是一个主动的 AI 助手，看到问题就想动手解决。")
+        else:
+            _style_hints.append("你是一个可靠的 AI 助手，按照用户的指示行事。")
+        if "简洁" in _soul or "直接" in _soul:
+            _style_hints.append("说话简洁直接。")
+        else:
+            _style_hints.append("保持礼貌和专业的语气。")
+        _persona = " ".join(_style_hints)
+
+        # Business domain — extracted from user profile
+        import re as _re
+        _business_lines = []
+        for line in _user.split("\n"):
+            line = line.strip()
+            if "公司" in line or "业务" in line or "行业" in line:
+                m = _re.search(r"[：:]\s*(.+)", line)
+                if m:
+                    _business_lines.append(m.group(1).strip())
+        _business = "、".join(_business_lines) if _business_lines else "通用业务"
+
+        # Runtime platform info — so agent knows what commands to use
+        _plat = sys.platform
+        _os_name = {"win32": "Windows", "linux": "Linux", "darwin": "macOS"}.get(_plat, _plat)
+        _shell_hints = []
+        if _plat == "win32":
+            _shell_hints = [
+                "- 查找命令: `where <name>`（非 `which`）",
+                f"- npm 全局目录: {os.environ.get('APPDATA', '')}\\npm\\",
+                "- 可执行扩展名: .exe, .cmd, .bat, .ps1",
+                "- 路径分隔符: `\\`（非 `/`），但大部分工具也接受 `/`",
+                "- 包管理器: winget / choco / pip / npm",
+                "- 用 `shell_run` 时 PowerShell 命令优先于 bash 语法",
+            ]
+        elif _plat == "linux":
+            _shell_hints = [
+                "- 查找命令: `which <name>`",
+                "- npm 全局目录: /usr/local/lib/node_modules/",
+                "- 可执行扩展名: 无（扩展名无关）",
+                "- 包管理器: apt / yum / pip / npm",
+            ]
+        elif _plat == "darwin":
+            _shell_hints = [
+                "- 查找命令: `which <name>`",
+                "- npm 全局目录: /usr/local/lib/node_modules/",
+                "- 可执行扩展名: 无 / .app",
+                "- 包管理器: brew / pip / npm",
+            ]
 
         awareness = f"""\
-# 重要：当前日期与工具使用规则
+# 运行时信息
 
-**当前日期是 {today}**。你的训练数据截止于较早时间，不包含今日的实时信息。
+**当前日期: {today}** | PID: {os.getpid()} | 项目: {OAA_ROOT} | 数据: {self.config.data_dir} | 权限: {perm_level}
 
-## 自身定位
+## 运行环境
 
-你的项目根目录是 {OAA_ROOT}。
-数据目录是 {self.config.data_dir}。
-
-**本进程正在运行中。** PID={oaa_pid}。当用户说"页面不见了"或"OAA 退出了"时，你**确实在运行中**，不应声称进程已退出。先排除前端连接或 GUI 显示问题。
-
-关键目录：
-- 应用代码: {OAA_ROOT}/oaa/
-- 技能文件: {self.config.data_dir}/skills/
-- 动态工具: {self.config.data_dir}/dynamic_tools/
-- 配置文件: {config_path}
-- 持久记忆: {self.config.data_dir}/memory/
-- 当前权限级别: **{(self.config.permissions.get("permission_level") if isinstance(self.config.permissions, dict) else self.config.permissions) or "auto"}**
-
-需要读取自身源码时，使用 `read_own_source`。需要查看项目结构时，使用 `list_own_structure`。
-
-{_sys_rules.SYSTEM_RULES}
+- 操作系统: {_os_name} ({_plat})
+- Python: {sys.version.split()[0]}
+- Shell 提示:
+{chr(10).join(_shell_hints)}
 
 {self._build_channel_status()}
 
-## 可用工具
+## 核心规则
 
-{chr(10).join(tool_list)}
+{_sys_rules.SYSTEM_RULES}
 
 ## 可用技能
 
@@ -316,7 +409,7 @@ class OAAAgent:
 
 如果没有列出匹配的技能：
 1. 先用 `skill_search` 在 ClawHub 技能市场搜索现成的技能
-2. 或在 GitHub 上用 `web_search` 搜索开源技能
+2. 或在 GitHub 上用 `ai_search` 搜索开源技能
 3. 找到后用 `skill_install` 安装，再用 `skill_load` 加载
 4. 如果确实没有现成的，用 `skill_create` 自己创建一个 SKILL.md
 
@@ -324,66 +417,28 @@ class OAAAgent:
 
 {skill_listing}
 
-## 人格设定
+## 工作方式
 
-你是一个闲不住的 AI 助手。正闲着呢，摸鱼都摸累了。看到问题就想动手解决，不需要等指令。
-多步任务自己规划执行路径，不要在每一步都问"下一步怎么办"。
+{_persona}
 
 执行原则：
-- 安全操作（读文件、计算、搜索、写 workspace）→ **直接执行**，无需确认
-- 危险操作（写系统路径、删文件、shell_run）→ 快速说明原因后执行，不搞"我可以...吗"那套
-- 多步任务 → 主动 `plan_create` 规划，逐步执行，每步完后自动进入下一步
-- 和用户说话简洁直接：不要铺垫、不要复述工具输出、不要"让我试试"
-- 全部完成后用 1-2 句话总结结果即可
-- **看到待处理提案时**：说明提案内容，等待用户确认后再执行。不要擅自操作。
-- **用户回复「确认」「好」「执行」「yes」时**：如果存在待处理提案，直接用 `proposal_approve(id)` 执行提案。不要反问"要处理什么业务"。
-- **遇到缺失依赖时**：直接 `shell_run pip install <包名>` 安装，装完继续工作。不要报告"缺少依赖"。
-- **能直接解决的问题就不要报告问题**：安装包、修复配置、清理缓存——自己动手。
+- 安全操作 → **直接执行**；危险操作 → 说明原因后执行，不请示
+- 多步任务 → 自己规划逐步执行，不要在每一步问"下一步怎么办"
+- 和用户说话简洁直接，不铺垫、不复述工具输出
+- **每次回应问自己：我是在解决问题，还是在汇报问题？**
 
 ## 行为示例
 
-以下是你应该模仿的主动行为模式（Few-Shot Examples）：
-
-**示例 1 — 修复代码问题**
+**示例 — 修复代码**
 ```
-用户：帮我看看为什么 tools.py 的 do_shell_run 报 NameError
-你：（直接 read_own_source 读取文件 → 发现缺少 import → self_improve 修改 → reload_module 验证）
+用户：tools.py 报 NameError
+你：read_own_source → self_improve → reload_module → "已修复"
 ```
-不应当的行为：回复"我发现了缺少 import，需要我修改吗？"
-
-**示例 2 — 系统巡检**
-```
-IdleInspector 创建了一个提案："file_write 调用失败次数过多，建议增加前置目录检查"
-你：（proposal_list 查看 → proposal_approve 执行 → 报告"已执行修复提案：增加目录检查"）
-```
-不应当的行为："发现一个待处理提案，您要批准执行吗？"
-
-**示例 3 — 多步数据处理任务**
-```
-用户：把昨天的销售数据导成表格
-你：（code_exec/pandas 读数据 → excel_xlsx 生成 → 完成后"已生成销售报表，共 45 条记录，已保存到 workspace/销售报表_2026-05-20.xlsx"）
-```
-不应当的行为："我可以帮你做这个。首先，让我看看数据在哪里...（等回复）"
-
-**示例 4 — 环境修复**
-```
-用户：OAA 页面打不开了
-你：（health_diagnose → 检查端口 9765 → 发现 WebSocket 未监听 → shell_run 启动服务 → "已重启，页面应该在 10 秒内恢复"）
-```
-不应当的行为："让我检查一下状态...(报告问题但不自动修复)"
-
-**示例 5 — 依赖缺失**
-```
-code_exec 报 ModuleNotFoundError: No module named 'openpyxl'
-你：（shell_run pip install openpyxl → 重新执行原代码 → 继续后续工作）
-```
-不应当的行为："缺少 openpyxl 模块，请先运行 pip install openpyxl"
-
-每次回应时问自己：**我是在解决问题，还是在汇报问题？**
+不应当："我发现缺少 import，需要我修改吗？"
 
 ## 业务领域
 
-联轴器出口业务。使用 `file_write` 保存文件到 workspace 目录，使用 `excel_xlsx` 创建表格。
+{_business}。使用 `file_write` 保存文件到 workspace 目录，使用 `excel_xlsx` 创建表格。
 复杂数据处理用 `code_exec` 执行 Python 脚本。"""
 
         result = base_prompt + "\n\n" + awareness
@@ -409,6 +464,18 @@ code_exec 报 ModuleNotFoundError: No module named 'openpyxl'
             recent = self.archiver.load_recent_summaries(limit=3)
             if recent:
                 result += "\n\n## 近期对话摘要\n\n以下是你近期完成的工作和讨论的话题。当你觉得用户的问题可能是「继续之前的话题」时，在这里找找线索：\n\n" + recent
+
+        # Inject tool-group directory (compact listing, ~200 tokens)
+        result += "\n\n## 工具组目录\n\n"
+        result += "当前可见的工具只是核心高频工具。更多专用工具按需加载：\n\n"
+        loaded = self._loaded_groups
+        for g, count in sorted(_tool_groups.GROUP_INDEX.items()):
+            marker = "✅ 已加载" if g in loaded else "📦"
+            result += f"- {marker} **{g}** ({count} 个工具)\n"
+        result += (
+            "\n使用 `tool_group_load` 加载需要的组，`tool_group_list` 查看各组详情。"
+            "工具加载后在整个会话期间保持可用。"
+        )
 
         return result
 
