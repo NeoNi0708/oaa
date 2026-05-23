@@ -366,7 +366,7 @@ class IdleInspector:
         # 4. Self-learning — LLM-based skill gap analysis (most expensive)
         proposal = await self._self_learn()
         if proposal:
-            if await self._store_proposal(proposal):
+            if await self._store_proposal(proposal, dedup_key="self_learn:skill_gap", max_repeats=1):
                 return proposal
 
         return None
@@ -431,19 +431,26 @@ class IdleInspector:
 
         return "\n".join(lines)
 
-    async def _store_proposal(self, proposal_text: str, dedup_key: str = "") -> bool:
+    async def _store_proposal(self, proposal_text: str, dedup_key: str = "",
+                              max_repeats: int = 0) -> bool:
         """Store a proposal notification, respecting dedup limit.
 
         Args:
             proposal_text: The notification text to display.
-            dedup_key: Stable identifier for dedup (e.g. tool name + type).
-                       If empty, derived from the emoji + first bolded item.
+            dedup_key: Stable identifier for dedup.  If empty, derived from
+                       the first emoji + bold text in *proposal_text*.
+            max_repeats: Max deliveries before suppression (0 = use default).
+                         For variable-content proposals (e.g. LLM-generated),
+                         pass a short string key (e.g. ``\"self_learn\"``) so
+                         the hash doesn't change with wording.
         Returns:
             True if the notification should be sent (within repeat limit),
             False if suppressed (sent too many times already).
         """
         if not self._memory_mgr:
-            return True  # allow through if we can't track
+            return True
+        if max_repeats <= 0:
+            max_repeats = _MAX_PROPOSAL_REPEATS
         import hashlib, re as _re
         if not dedup_key:
             m = _re.search(r'([\U0001F300-\U0001FAFF]).*?\*\*(.+?)\*\*', proposal_text)
@@ -457,7 +464,7 @@ class IdleInspector:
         self._load_dedup_tracker()
 
         count = self._proposal_tracker.get(phash, 0) + 1
-        if count > _MAX_PROPOSAL_REPEATS:
+        if count > max_repeats:
             logger.info("Proposal %s suppressed (sent %d times)", dedup_key, count - 1)
             return False
 
