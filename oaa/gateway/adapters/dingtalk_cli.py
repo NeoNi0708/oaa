@@ -45,6 +45,18 @@ class DingTalkCLI:
         if self._binary:
             return self._binary
 
+        # --- 0. Bundled CLI (shipped with OAA) ---
+        import os as _os
+        ext = ".cmd" if sys.platform == "win32" else ""
+        _bundled = _os.path.normpath(
+            _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                          "..", "..", "..", "cli", "node_modules", ".bin",
+                          "dws" + ext)
+        )
+        if _os.path.isfile(_bundled) or _os.path.isfile(_bundled.replace(".cmd", "")):
+            self._binary = _bundled
+            return self._binary
+
         found = None
         try:
             if sys.platform == "win32":

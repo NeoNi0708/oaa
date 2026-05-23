@@ -73,6 +73,7 @@ class IdleInspector:
         # Background task support
         self._background_task: asyncio.Task | None = None
         self._notify_callback: Callable[[str], Coroutine] | None = None
+        self._executor_callback: Callable[[dict], Coroutine] | None = None
         # Dedup tracking: proposal_hash → send_count
         self._proposal_tracker: dict[str, int] = {}
         self._dedup_path = ""  # set by set_memory_path or inferred from memory_mgr
@@ -80,6 +81,8 @@ class IdleInspector:
         self._ignore_list: dict[str, str] = {}
         self._ignore_path = ""
         self._load_ignore_list()
+        # Pause flag — set by repair_loop to prevent nested inspection during self-healing
+        self._paused: bool = False
 
     def reset_cooldown(self):
         """Reset the cooldown timer so next check runs immediately."""
@@ -152,6 +155,29 @@ class IdleInspector:
         """
         self._notify_callback = callback
 
+    def set_executor_callback(self, callback: Callable[[dict], Coroutine] | None):
+        """Register an async callback for auto-executing scheduled tasks.
+
+        The callback receives the full task dict (including
+        ``execution_prompt`` and ``delivery_channels``) and should run
+        the agent with the prompt, then deliver results.
+        """
+        self._executor_callback = callback
+
+    def pause(self):
+        """Temporarily suppress all inspections (e.g. during repair_loop)."""
+        self._paused = True
+        logger.info("IdleInspector paused")
+
+    def resume(self):
+        """Resume normal inspection after a pause."""
+        self._paused = False
+        self._last_check = time.time()  # reset cooldown so next check is fresh
+        logger.info("IdleInspector resumed")
+
+    def is_paused(self) -> bool:
+        return self._paused
+
     async def start_background(self, interval: int = _INSPECTION_COOLDOWN):
         """Start the background inspection loop.
 
@@ -190,6 +216,8 @@ class IdleInspector:
         """Periodic inspection loop — lineA(30min) + lineB(task-triggered, 15min idle) + lineC(daily)."""
         while True:
             await asyncio.sleep(interval)
+            if self._paused:
+                continue
             try:
                 # LineA + LineD: lightweight periodic checks
                 proposal = await self.inspect()
@@ -246,6 +274,8 @@ class IdleInspector:
         LineA: channel_health, memory_usage
         LineD: due_tasks (auto-execute, no confirmation)
         """
+        if self._paused:
+            return None
         now = time.time()
         if now - self._last_check < _INSPECTION_COOLDOWN:
             return None
@@ -383,7 +413,7 @@ class IdleInspector:
             "\n建议: 用 ``skill_search`` 探索 ClawHub/GitHub 上是否有更好的替代技能，"
             "或用 ``skill_create`` 将高频操作固化为新技能。"
         )
-        lines.append("\n回复「确认」执行 / 「忽略」跳过（24h 内有效）")
+        lines.append("\n在进化工厂页面点击「批准执行」或「忽略」")
 
         return "\n".join(lines)
 
@@ -437,7 +467,13 @@ class IdleInspector:
                 logger.warning("Failed to save dedup tracker: %s", exc)
 
     def _check_due_tasks(self) -> str | None:
-        """Check TaskScheduler for due tasks. Returns proposal or None."""
+        """Check TaskScheduler for due tasks.
+
+        Two paths:
+        - Tasks WITH ``execution_prompt`` → auto-execute via executor callback
+        - Tasks WITHOUT ``execution_prompt`` → return proposal for user approval
+          (backward-compatible: old-style simple reminders)
+        """
         if not self._scheduler:
             return None
 
@@ -450,8 +486,23 @@ class IdleInspector:
         if not due:
             return None
 
+        # Split: auto-exec tasks vs manual-approval tasks
+        auto_tasks = [t for t in due if t.get("execution_prompt", "").strip()]
+        manual_tasks = [t for t in due if not t.get("execution_prompt", "").strip()]
+
+        # Auto-execute tasks with execution_prompt
+        if auto_tasks:
+            for t in auto_tasks:
+                logger.info("Auto-executing scheduled task: %s (%s)", t["name"], t["id"])
+                if self._executor_callback:
+                    asyncio.create_task(self._executor_callback(t))
+
+        # Manual tasks still go through proposal flow
+        if not manual_tasks:
+            return None
+
         lines = []
-        for t in due:
+        for t in manual_tasks:
             name = t.get("name", "?")
             desc = t.get("description", "")
             line = f"  - **{name}**"
@@ -462,7 +513,7 @@ class IdleInspector:
         return (
             "🔍 空闲巡检：发现以下定时任务已到执行时间：\n\n"
             + "\n".join(lines)
-            + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
+            + "\n\n在进化工厂页面点击「批准执行」或「忽略」"
         )
 
     def _check_evolution_refinements(self) -> str | None:
@@ -503,7 +554,7 @@ class IdleInspector:
         return (
             "🔬 技能优化检测：发现以下可优化项：\n\n"
             + "\n\n".join(lines)
-            + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
+            + "\n\n在进化工厂页面点击「批准执行」或「忽略」"
         )
 
     async def _check_usage_patterns(self, skill_filter: set[str] | None = None,
@@ -630,7 +681,7 @@ class IdleInspector:
         proposal = (
             "📊 使用模式分析：发现以下可优化项：\n\n"
             + "\n".join(f"  - {s}" for s in suggestions_text)
-            + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
+            + "\n\n在进化工厂页面点击「批准执行」或「忽略」"
         )
         return proposal
 
@@ -679,7 +730,7 @@ class IdleInspector:
         proposal = (
             "💡 空闲分析：发现以下可改进的方向：\n\n"
             + "\n".join(f"  - {s}" for s in suggestions)
-            + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
+            + "\n\n在进化工厂页面点击「批准执行」或「忽略」"
         )
         return proposal
 
@@ -742,7 +793,7 @@ class IdleInspector:
                 "email_send": "oaa/agent/extended_tools.py",
                 "skill_load": "oaa/agent/extended_tools.py",
                 "skill_create": "oaa/agent/extended_tools.py",
-                "web_search": "oaa/agent/extended_tools.py",
+                "ai_search": "oaa/agent/ai_search_tool.py",
                 "web_scan": "oaa/agent/extended_tools.py",
                 "plan_create": "oaa/agent/extended_tools.py",
                 "plan_update": "oaa/agent/extended_tools.py",
@@ -791,7 +842,7 @@ class IdleInspector:
             return (
                 "🔧 空闲诊断：发现以下工具存在反复失败：\n\n"
                 + "\n\n".join(lines)
-                + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
+                + "\n\n在进化工厂页面点击「批准执行」或「忽略」"
             )
 
         return None
@@ -846,7 +897,7 @@ class IdleInspector:
                 + f"  - **{lesson}**（重复 {count} 次）\n"
                 + f"    操作: 用 ``modify_own_prompt action=write section=agents`` "
                 + "在 agents 段中加入该规则"
-                + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
+                + "\n\n在进化工厂页面点击「批准执行」或「忽略」"
             )
 
         return None
@@ -874,7 +925,7 @@ class IdleInspector:
                     "  1. 删除旧的 __pycache__ 目录\n"
                     "  2. 清理 workspace 中不再需要的临时文件\n"
                     "  3. 检查 logs 目录是否有大文件\n\n"
-                    "回复「确认」执行 / 「忽略」跳过（24h 内有效）"
+                    "在进化工厂页面点击「批准执行」或「忽略」"
                 ).format(pct, free_gb)
         except Exception as exc:
             logger.debug("Disk usage check failed: %s", exc)
@@ -905,7 +956,7 @@ class IdleInspector:
         return (
             "通道健康检查：发现以下通道问题：\n\n"
             + "\n".join(issues)
-            + "\n\n回复「确认」执行 / 「忽略」跳过（24h 内有效）"
+            + "\n\n在进化工厂页面点击「批准执行」或「忽略」"
         )
 
     # ------------------------------------------------------------------
@@ -930,7 +981,7 @@ class IdleInspector:
                     "  - 检查 message history 是否过长\n"
                     "  - 确认是否有未关闭的文件句柄\n"
                     "  - 必要时重启进程释放内存\n\n"
-                    "回复「确认」执行 / 「忽略」跳过（24h 内有效）"
+                    "在进化工厂页面点击「批准执行」或「忽略」"
                 ).format(rss_mb, cpu_pct)
         except Exception as exc:
             logger.debug("Memory check failed: %s", exc)
