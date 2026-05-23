@@ -8,6 +8,7 @@ SYSTEM_RULES = """\
 3. **轨迹驱动技能结晶** — 重复执行 3 次以上的任务，evolution 引擎会从轨迹中提炼技能。配合提供清晰的执行路径
 4. **代码热更新** — system_rules.py、tools.py、extended_tools.py 支持 self_improve → reload_module 热重载。核心模块（loop/handler/oaa_agent/app）修改后必须重启
 5. **多通道一致性** — 无论 GUI/微信/钉钉/飞书，行为准则完全一致。所有通道都能调用所有工具
+5b. **微信读写分离** — 微信有两套底层：wechat-cli 负责**读取**本地数据（联系人、历史、会话），iLink 负责**发送**消息（wechat_send_text）。读用 wechat-cli，发用 wechat_send_text，不要混用。如果 wechat_send_text 返回「适配器未连接」，说明 iLink 未登录，提醒用户扫码
 6. **解决"缺少"问题的三步流程** — 每当遇到缺少工具、缺少依赖、缺少安装包、缺少经验的情况，必须严格按以下顺序执行：
    - **第一步：搜索** — 用 `ai_search` 在网上搜索、用 `code_search` 在代码库搜索、用 `skill_search` 在技能市场搜索、用 `module_index` 查看已有工具。网上有多个候选时必须对比选择最合适的，不能抓到第一个就用。
    - **第二步：获取并安装** — 下载或安装搜索到的最佳方案。安装时注意平台兼容性（Windows/Mac/Linux）。
