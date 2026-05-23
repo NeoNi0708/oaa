@@ -49,39 +49,63 @@ def ensure_data_dir(data_dir: str) -> bool:
     return first_run
 
 
+def _find_node(cli_dir: Path) -> tuple[str | None, str | None]:
+    """Return (node_exe, npm_cmd) for the best available Node.js.
+
+    1. Bundled portable Node.js (cli/node/node.exe)
+    2. System-installed Node.js
+    """
+    bundled_node = cli_dir / "node" / "node.exe"
+    if bundled_node.is_file():
+        npm_cli = cli_dir / "node" / "node_modules" / "npm" / "bin" / "npm-cli.js"
+        if npm_cli.is_file():
+            return str(bundled_node), str(npm_cli)
+    return None, None
+
+
 def ensure_bundled_cli(data_dir: str) -> bool:
     """Auto-install bundled CLI tools (wechat-cli, lark-cli, dws).
 
     Called once during startup.  If ``cli/node_modules`` is missing,
-    runs ``npm install`` in the bundled CLI directory.  Returns True
+    runs ``npm install`` in the bundled CLI directory using the bundled
+    Node.js portable (or system node if unavailable).  Returns True
     on first install, False if already present.
     """
     # Resolve the cli/ directory relative to oaa package root
     pkg_root = Path(__file__).resolve().parent.parent  # oaa/oaa/ → oaa/
     cli_dir = pkg_root / "cli"
     if not (cli_dir / "package.json").exists():
-        return False  # no bundled cli — dev/stub environment
+        return False
 
     node_modules = cli_dir / "node_modules"
     if node_modules.is_dir():
-        return False  # already installed
+        return False
 
-    # One-time install
+    node_exe, npm_js = _find_node(cli_dir)
+    if node_exe and npm_js:
+        cmd = [node_exe, npm_js, "install"]
+    else:
+        cmd = ["npm", "install"]
+
     sys.stderr.write("[OAA] Installing bundled CLI tools (wechat-cli, lark-cli, dws)...\n")
+    env = os.environ.copy()
+    # Suppress npm funding/update nag
+    env["NO_UPDATE_NOTIFIER"] = "1"
     try:
         subprocess.run(
-            ["npm", "install"],
+            cmd,
             cwd=str(cli_dir),
             check=True,
             capture_output=True,
             timeout=120,
+            env=env,
         )
         sys.stderr.write("[OAA] Bundled CLI tools installed.\n")
         return True
     except subprocess.CalledProcessError as exc:
-        sys.stderr.write(f"[OAA] npm install failed (CLI tools won't be available): {exc.stderr.decode().strip()[:200]}\n")
+        sys.stderr.write(f"[OAA] npm install failed: {exc.stderr.decode().strip()[:200]}\n")
     except FileNotFoundError:
-        sys.stderr.write("[OAA] npm not found — CLI tools won't be available. Install Node.js to enable.\n")
+        sys.stderr.write("[OAA] Node.js not found — install Node.js or place portable in cli/node/\n")
     except Exception as exc:
         sys.stderr.write(f"[OAA] CLI install failed: {exc}\n")
     return False

@@ -2,6 +2,14 @@
 import asyncio
 import os
 import sys
+from pathlib import Path
+
+# Prepend bundled Node.js portable to PATH so CLI tools use it automatically
+_BUNDLED_NODE = Path(__file__).resolve().parent.parent / "cli" / "node"
+if _BUNDLED_NODE.is_dir():
+    _node_path = str(_BUNDLED_NODE)
+    if _node_path not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = _node_path + os.pathsep + os.environ.get("PATH", "")
 
 from .agent.oaa_agent import OAAAgent
 from .agent.worker import WorkerAgent
