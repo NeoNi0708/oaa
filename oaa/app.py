@@ -224,6 +224,7 @@ class OAAApp:
         # Fix stale running proposals from previous session (app crash / kill)
         if self.agent._proposal_store:
             await self.agent._proposal_store.fix_stale_running()
+            await self.agent._proposal_store.dedup_stale_pending()
 
         logger.info("OAA ready. Waiting for messages...")
         while True:

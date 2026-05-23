@@ -97,6 +97,20 @@ class IdleInspector:
         self._last_task_tools = tools
         self._last_task_skills = skills
 
+    def _should_skip_proposal(self, target: str, ptype: str = "") -> bool:
+        """Return True if a proposal for this target should be skipped.
+
+        Skips when: a pending proposal already exists, OR the same target
+        was resolved (done/failed) within the last 24 hours.
+        """
+        if not self._proposal_store:
+            return False
+        if self._proposal_store.has_pending_for_target(target, ptype):
+            return True
+        if self._proposal_store.has_recent_for_target(target, ptype):
+            return True
+        return False
+
     # ------------------------------------------------------------------
     # Ignore list — persistent tool/pattern suppression
     # ------------------------------------------------------------------
@@ -583,7 +597,7 @@ class IdleInspector:
                 continue
             if skill_filter is not None and skill_name not in skill_filter:
                 continue
-            if self._proposal_store and self._proposal_store.has_pending_for_target(f"crystal:{skill_name}", "skill_crystallize"):
+            if self._proposal_store and self._should_skip_proposal(f"crystal:{skill_name}", "skill_crystallize"):
                 continue
 
             actions = [
@@ -618,7 +632,7 @@ class IdleInspector:
                 target = f"sop:{skill_name}/{step_name}"
                 if self.is_tool_ignored(target):
                     continue
-                if self._proposal_store and self._proposal_store.has_pending_for_target(target, "sop_optimize"):
+                if self._proposal_store and self._should_skip_proposal(target, "sop_optimize"):
                     continue
 
                 actions = [
@@ -667,7 +681,7 @@ class IdleInspector:
                             continue
                         if tool_filter is not None and tool not in tool_filter:
                             continue
-                        if self._proposal_store and self._proposal_store.has_pending_for_target(tool, "tool_fix"):
+                        if self._proposal_store and self._should_skip_proposal(tool, "tool_fix"):
                             continue
                         suggestions_text.append(
                             f"**{tool}** 累计失败 {count} 次，需检查修复。"
@@ -767,7 +781,7 @@ class IdleInspector:
             if tool_filter is not None and tool not in tool_filter:
                 continue
             # Skip if proposal already exists for this tool
-            if self._proposal_store and self._proposal_store.has_pending_for_target(tool, "tool_fix"):
+            if self._proposal_store and self._should_skip_proposal(tool, "tool_fix"):
                 continue
 
             latest = [f for f in failures if f["tool"] == tool][-1]
@@ -874,7 +888,7 @@ class IdleInspector:
             target = f"correction:{lesson[:40]}"
             if self.is_tool_ignored(target):
                 continue
-            if self._proposal_store and self._proposal_store.has_pending_for_target(target, "config_change"):
+            if self._proposal_store and self._should_skip_proposal(target, "config_change"):
                 continue
 
             actions = [

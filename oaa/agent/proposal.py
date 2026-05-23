@@ -149,6 +149,52 @@ class ProposalStore:
                     return True
         return False
 
+    def has_recent_for_target(self, target: str, ptype: str = "",
+                              window_hours: int = 24) -> bool:
+        """Check if *target* had a proposal resolved within *window_hours*.
+
+        Prevents the idle inspector from re-creating the same proposal
+        immediately after it was completed or marked as failed.
+        """
+        cutoff = time.time() - (window_hours * 3600)
+        for p in self._store:
+            if p.get("target") != target:
+                continue
+            if ptype and p.get("type") != ptype:
+                continue
+            if p["status"] in (STATUS_DONE, STATUS_FAILED, "interrupted"):
+                executed = p.get("executed_at", 0)
+                updated = p.get("updated_at", 0)
+                latest = max(executed if isinstance(executed, (int, float)) else 0,
+                            updated if isinstance(updated, (int, float)) else 0,
+                            p.get("created_at", 0))
+                if latest > cutoff:
+                    return True
+        return False
+
+    async def dedup_stale_pending(self):
+        """Mark stale pending proposals as expired if there's a newer resolved
+        proposal for the same target. Called at startup and periodically."""
+        expired = 0
+        now = time.time()
+        for p in self._store:
+            if p["status"] != STATUS_PENDING:
+                continue
+            # Check if there's a recently resolved proposal for same target
+            target = p.get("target", "")
+            if target and self.has_recent_for_target(target, p.get("type", "")):
+                p["status"] = "expired"
+                p["error"] = "已有更新的解决记录，自动失效"
+                expired += 1
+            # Also expire proposals older than 7 days
+            elif (now - p.get("created_at", 0)) > 7 * 86400:
+                p["status"] = "expired"
+                p["error"] = "超过 7 天未处理，自动失效"
+                expired += 1
+        if expired:
+            await self._save()
+            logger.info("ProposalStore: expired %d stale pending proposals", expired)
+
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
