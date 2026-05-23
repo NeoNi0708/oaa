@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from oaa.config import AppConfig
 from oaa.agent.oaa_agent import OAAAgent
+from oaa.scheduler import TaskScheduler
 
 
 # ── Verification helpers ──────────────────────────────────────────
@@ -102,7 +103,8 @@ class TestRunner:
 async def main():
     config = AppConfig.load("C:/Users/Administrator/OAA/config.json")
     print(f"Model: {config.model.provider} / {config.model.model_id}")
-    agent = OAAAgent(config)
+    scheduler = TaskScheduler(os.path.join(config.data_dir, "tasks"))
+    agent = OAAAgent(config, scheduler=scheduler)
     runner = TestRunner(agent)
 
     print("\n=== A. Basic Capabilities ===\n")

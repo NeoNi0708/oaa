@@ -769,7 +769,17 @@ class IdleInspector:
         # Skip known stub/limitation tools
         _STUB_TOOLS = frozenset()
 
-        tool_counts = Counter(f["tool"] for f in failures if f["tool"] not in _STUB_TOOLS)
+        # Skip failures caused by missing initialization (not tool bugs)
+        _SKIP_ERRORS = (
+            "未初始化", "not initialized", "未配置",
+        )
+        valid_failures = [
+            f for f in failures
+            if f["tool"] not in _STUB_TOOLS
+            and not any(s in f.get("error", "") for s in _SKIP_ERRORS)
+        ]
+
+        tool_counts = Counter(f["tool"] for f in valid_failures)
 
         for tool, count in tool_counts.most_common(3):
             if count < 2:
@@ -784,7 +794,7 @@ class IdleInspector:
             if self._proposal_store and self._should_skip_proposal(tool, "tool_fix"):
                 continue
 
-            latest = [f for f in failures if f["tool"] == tool][-1]
+            latest = [f for f in valid_failures if f["tool"] == tool][-1]
             error_snippet = latest.get("error", "")[:120]
 
             tool_to_file = {
