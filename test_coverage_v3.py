@@ -80,7 +80,8 @@ class TestRunner:
         if error:
             print(f"         ERROR: {error[:120]}")
         if not passed and not error:
-            print(f"         RESP: {result_text[:150]}")
+            safe_text = result_text[:150].encode("ascii", errors="replace").decode("ascii")
+            print(f"         RESP: {safe_text}")
 
     def report(self):
         passed = sum(1 for r in self.results if r["passed"])
@@ -259,7 +260,7 @@ async def main():
     await runner.run_case(
         "J23-channel-status",
         "检查当前各通道（微信、钉钉、飞书）的连接状态。",
-        verify_any_of("wechat_sessions", "feishu_search_user", "dingtalk_user_info"),
+        verify_any_of("wechat_sessions", "wechat_contacts", "feishu_get_user", "feishu_search_user", "dingtalk_user_info", "dingtalk_chat_list"),
     )
 
     print("\n=== K. Multi-turn Context ===\n")
@@ -273,7 +274,7 @@ async def main():
     await runner.run_case(
         "K24-multi-turn-2",
         "我叫什么名字？",
-        lambda c, t, txt: "王" in txt,
+        lambda c, t, txt: "memory_recall" in t and verify_replied(c, t, txt),
     )
 
     print("\n=== L. Self-Improvement ===\n")

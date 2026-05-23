@@ -1071,10 +1071,10 @@ class AtomicTools(BaseHandler):
             try:
                 from .memory_manager import MemoryManager
                 mm = MemoryManager(os.path.join(os.path.dirname(OAA_ROOT), "memory"))
-                mm.add_correction(
+                asyncio.create_task(mm.add_correction(
                     context="read_own_source called with a directory path",
                     lesson="read_own_source 只能读取文件。要浏览目录结构请使用 list_own_structure 工具。"
-                )
+                ))
             except Exception:
                 pass
             return {
