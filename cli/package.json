@@ -4,7 +4,6 @@
   "private": true,
   "description": "Bundled CLI tools for OAA — wechat, dingtalk, feishu",
   "dependencies": {
-    "wechat-cli": "^0.0.1",
     "@larksuite/cli": "*",
     "dws": "*"
   }

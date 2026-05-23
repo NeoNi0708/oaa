@@ -9,6 +9,7 @@ from typing import Optional
 class WeChatCLI:
     def __init__(self, cli_path: str = "", decrypted_dir: str = ""):
         self._binary: Optional[str] = None
+        self._binary_prefix: list[str] = []  # extra args before the command (for python -m wechat_cli)
         self.cli_path = cli_path or self._find_cli()
         self.decrypted_dir = decrypted_dir
         self._last_error: str = ""
@@ -32,16 +33,19 @@ class WeChatCLI:
         found: Optional[str] = None
         ext = ".cmd" if sys.platform == "win32" else ""
 
-        # --- 0. Bundled CLI (shipped with OAA) ---
+        # --- 0. pip-installed wechat-cli (Python package) ---
         import os as _os
-        _bundled = _os.path.normpath(
-            _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                          "..", "..", "..", "cli", "node_modules", ".bin",
-                          binary_name + ext)
-        )
-        if _os.path.isfile(_bundled) or _os.path.isfile(_bundled.replace(".cmd", "")):
-            self._binary = _bundled
-            return self._binary
+        try:
+            _pip_path = subprocess.run(
+                [sys.executable, "-m", "wechat_cli", "--help"],
+                capture_output=True, timeout=5,
+            )
+            if _pip_path.returncode == 0:
+                self._binary = sys.executable
+                self._binary_prefix = ["-m", "wechat_cli"]
+                return self._binary
+        except Exception:
+            pass
 
         # --- 1. PATH lookup (platform-aware) ---
         try:
@@ -137,7 +141,7 @@ class WeChatCLI:
         return binary_name
 
     async def _run(self, *args) -> str:
-        cmd = [self.cli_path] + list(args)
+        cmd = [self.cli_path] + self._binary_prefix + list(args)
         if self.decrypted_dir:
             cmd.extend(["--decrypted-dir", self.decrypted_dir])
         proc = await asyncio.create_subprocess_exec(
