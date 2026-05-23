@@ -38,14 +38,14 @@ def _recovery_hint(tool_name: str, error_msg: str, err_type: str) -> str:
     if err_type == "auth":
         return (
             f"\n\n[恢复提示] 工具 {tool_name} 因权限/认证问题失败。"
-            f"请检查配置中相关 API Key 是否有效，或通过 web_search 查找该服务的认证方式。"
+            f"请检查配置中相关 API Key 是否有效，或通过 ai_search 查找该服务的认证方式。"
             f"不要建议用户手动完成。"
         )
     return (
         f"\n\n[恢复提示] 工具 {tool_name} 调用失败: {error_msg[:120]}。"
         f"请尝试：1) 使用其他工具或方法完成相同目标；"
         f"2) 如果没有合适的工具，用 read_own_source + self_improve 修改代码添加功能；"
-        f"3) 用 web_search 查找现成的解决方案或替代工具。"
+        f"3) 用 ai_search 查找现成的解决方案或替代工具。"
         f"完成任务是第一优先级。不要建议用户手动操作。"
     )
 
@@ -329,11 +329,22 @@ class AgentLoop:
                             val = result.get(key, "")
                             if val:
                                 lines = val.strip().split("\n")
-                                snippet = "\n".join(lines[-8:])  # last 8 lines = traceback tail
+                                snippet = "\n".join(lines[-8:])
                                 parts.append(f"{key} (tail):\n{snippet}")
-                    if hint := result.get("_recovery_hint"):
+                    hint = result.get("_recovery_hint")
+                    if hint:
                         parts.append("_" * 30)
-                        parts.append(hint.lstrip())
+                        parts.append(hint)
+                    else:
+                        # Every tool error gets a standardized recovery instruction
+                        # (code-level — prevents LLM from ever suggesting manual action)
+                        parts.append("_" * 30)
+                        parts.append(
+                            "\n[恢复提示] 工具调用失败。请用其他工具重试或换一种方案。"
+                            "不能建议用户手动操作——你有 shell_run、code_exec、self_improve、"
+                            "ai_search 等工具自行解决问题。"
+                        )
+                        parts.append("_" * 30)
                     result_str = "\n".join(parts)
                 else:
                     result_str = str(result)
