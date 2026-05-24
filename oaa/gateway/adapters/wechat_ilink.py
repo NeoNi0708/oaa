@@ -40,6 +40,7 @@ class WeChatILinkAdapter:
     """iLink adapter — QR login, message polling, sending via wechatbot SDK."""
 
     API_BASE = DEFAULT_BASE_URL
+    UPLOAD_RET_REJECTED = -2  # server-side upload rejection (not session expiry)
 
     def __init__(self, token: str = "", bot_id: str = "", base_url: str = "",
                  ilink_user_id: str = ""):
@@ -52,6 +53,9 @@ class WeChatILinkAdapter:
         self._seen_msg_ids: set[int] = set()
         self._context_tokens: dict[str, str] = {}
         self._cursor = ""
+
+        # Upload health tracking: starts True, set to False on ret=-2
+        self._upload_available = True
 
         # Use the SDK's raw API client
         self._api = ILinkApi()
@@ -72,6 +76,10 @@ class WeChatILinkAdapter:
     @property
     def is_authenticated(self) -> bool:
         return bool(self.token and self.base_url)
+
+    @property
+    def upload_available(self) -> bool:
+        return self._upload_available
 
     # ------------------------------------------------------------------
     # QR-code login flow
@@ -172,8 +180,13 @@ class WeChatILinkAdapter:
         if not self.is_authenticated:
             return {"status": "error", "msg": "Not authenticated"}
 
+        if not self._upload_available:
+            return {"status": "error", "ret": self.UPLOAD_RET_REJECTED,
+                    "msg": "文件上传功能不可用，请重新扫码登录"}
+
         import hashlib, os, secrets
         from wechatbot import encrypt_aes_ecb
+        from wechatbot.crypto import encode_aes_key_base64, encode_aes_key_hex
 
         ctx = context_token or self._context_tokens.get(to_wxid, "")
 
@@ -187,12 +200,11 @@ class WeChatILinkAdapter:
         raw_size = len(raw_bytes)
         raw_md5 = hashlib.md5(raw_bytes).hexdigest()
 
-        # 2. Generate AES key (16 bytes) and hex-encode it
-        aes_key_raw = secrets.token_bytes(16)
-        aes_key_hex = aes_key_raw.hex()
+        # 2. Generate AES key (16 bytes)
+        aes_key = secrets.token_bytes(16)
 
         # 3. Encrypt with AES-128-ECB + PKCS7
-        ciphertext = encrypt_aes_ecb(raw_bytes, aes_key_raw)
+        ciphertext = encrypt_aes_ecb(raw_bytes, aes_key)
         enc_size = len(ciphertext)
 
         # 4. Determine media type from extension
@@ -206,7 +218,8 @@ class WeChatILinkAdapter:
         else:
             media_type = MediaType.FILE
 
-        filekey = f"oaa_{raw_md5[:16]}_{secrets.token_hex(4)}"
+        # Match SDK: random hex filekey (no prefix)
+        filekey = secrets.token_bytes(16).hex()
 
         # 5. Get CDN upload URL
         try:
@@ -218,52 +231,59 @@ class WeChatILinkAdapter:
                 rawsize=raw_size,
                 rawfilemd5=raw_md5,
                 filesize=enc_size,
-                no_need_thumb=(media_type != MediaType.IMAGE),
-                aeskey=aes_key_hex,
+                no_need_thumb=True,
+                aeskey=encode_aes_key_hex(aes_key),
             )
+        except ApiError as e:
+            if e.errcode == self.UPLOAD_RET_REJECTED:
+                self._upload_available = False
+                return {"status": "error", "ret": e.errcode,
+                        "msg": f"微信上传接口拒绝(ret={e.errcode})，文件上传功能不可用，请重新扫码登录"}
+            return {"status": "error", "msg": f"获取上传URL失败: {e}"}
         except Exception as e:
-            return {"status": "error", "msg": f"Failed to get upload URL: {e}"}
+            return {"status": "error", "msg": f"获取上传URL失败: {e}"}
 
-        upload_param = upload_info.get("encrypted_query_param", "")
+        # Match SDK: field name is "upload_param" in the response
+        upload_param = upload_info.get("upload_param")
         if not upload_param:
-            return {"status": "error", "msg": "Upload URL response missing encrypted_query_param"}
+            return {"status": "error", "msg": "Upload URL response missing upload_param"}
 
-        # 6. Build CDN URL and upload
-        cdn_url = ILinkApi.build_cdn_upload_url(
-            CDN_BASE_URL, upload_param, filekey
-        )
+        # 6. Build CDN URL and upload (use SDK's upload_to_cdn with built-in retry)
+        cdn_url = ILinkApi.build_cdn_upload_url(CDN_BASE_URL, upload_param, filekey)
         try:
             encrypt_query_param = await self._api.upload_to_cdn(cdn_url, ciphertext)
         except Exception as e:
             return {"status": "error", "msg": f"CDN upload failed: {e}"}
 
-        # 7. Build media message item
-        if media_type == MediaType.IMAGE:
-            item = {
-                "type": MessageItemType.IMAGE,
-                "image_item": {
-                    "media": {
-                        "encrypt_query_param": encrypt_query_param,
-                        "aeskey": aes_key_hex,
-                        "filekey": filekey,
-                    },
-                    "aeskey": aes_key_hex,
-                },
-            }
-        else:
-            item = {
-                "type": MessageItemType.FILE,
-                "file_item": {
-                    "file_name": file_name,
-                    "media": {
-                        "encrypt_query_param": encrypt_query_param,
-                        "aeskey": aes_key_hex,
-                        "filekey": filekey,
-                    },
-                    "md5": raw_md5,
-                    "len": str(raw_size),
-                },
-            }
+        # 7. Build media message item (matching SDK per-type format)
+        aes_key_b64 = encode_aes_key_base64(aes_key)
+        media_dict = {
+            "encrypt_query_param": encrypt_query_param,
+            "aes_key": aes_key_b64,
+            "encrypt_type": 1,
+        }
+
+        type_map = {
+            MediaType.IMAGE: (MessageItemType.IMAGE, "image_item", {
+                "media": media_dict,
+                "mid_size": enc_size,
+            }),
+            MediaType.VIDEO: (MessageItemType.VIDEO, "video_item", {
+                "media": media_dict,
+                "video_size": enc_size,
+            }),
+            MediaType.VOICE: (MessageItemType.VOICE, "voice_item", {
+                "media": media_dict,
+            }),
+            MediaType.FILE: (MessageItemType.FILE, "file_item", {
+                "file_name": file_name,
+                "media": media_dict,
+                "md5": raw_md5,
+                "len": str(raw_size),
+            }),
+        }
+        item_type, item_key, item_body = type_map[media_type]
+        item = {"type": item_type, item_key: item_body}
 
         # 8. Build and send media message
         try:

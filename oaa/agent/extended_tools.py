@@ -424,7 +424,7 @@ class ExtendedTools:
                 "source": registry,
             }
         except Exception as e:
-            return {"status": "error", "msg": f"搜索技能市场失败: {e}，可尝试 web_search 在 GitHub 上搜索"}
+            return {"status": "error", "msg": f"搜索技能市场失败: {e}，可尝试 ai_search 在 GitHub 上搜索"}
 
     async def do_skill_install(self, args: dict) -> dict:
         """Install a skill from ClawHub or GitHub."""
@@ -746,6 +746,19 @@ Delete this section if no resources are required.
             result = await self._wechat_adapter.send_file(to, file_path)
             if result.get("status") == "success":
                 return {"status": "success", "data": result}
+
+            # ret=-2: upload rejected by server, needs re-login
+            ret = result.get("ret", 0)
+            if ret == -2:
+                qr = self._wechat_adapter.get_qrcode()
+                return {
+                    "status": "error",
+                    "msg": "微信文件上传功能异常(ret=-2)，需要重新扫码登录。请在5分钟内扫描以下二维码完成重新认证后重试发送。",
+                    "needs_reconnect": True,
+                    "qrcode_url": qr.get("qrcode_url", ""),
+                    "qrcode_id": qr.get("qrcode_id", ""),
+                }
+
             return {"status": "error", "msg": result.get("msg", "发送失败")}
         except Exception as e:
             return {"status": "error", "msg": str(e)}

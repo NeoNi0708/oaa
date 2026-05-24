@@ -150,6 +150,20 @@ class ManagementHandler:
         if not data:
             return {"ok": False, "error": "No config data provided"}
 
+        def _is_redacted(incoming: str, current: str) -> bool:
+            """Detect if *incoming* is a frontend-redacted value (e.g. "sk-a****kBEe")."""
+            return "****" in incoming and len(incoming) >= 9 and current and (
+                incoming[:4] == current[:4] and incoming[-4:] == current[-4:]
+            )
+
+        # Helper: return incoming value unless it's a redacted placeholder
+        def _resolve_key(incoming: str, current: str, path: str = "") -> str:
+            if _is_redacted(incoming, current):
+                return current
+            if "****" in incoming:
+                logger.warning("无法解析可能被遮盖的 API 密钥（前后缀不匹配或目标为空），将保存原值. path=%s", path)
+            return incoming
+
         # Merge top-level keys
         if "model" in data:
             m = data["model"]
@@ -157,7 +171,11 @@ class ManagementHandler:
             self._config.model.plan = m.get("plan", self._config.model.plan)
             self._config.model.api_format = m.get("api_format", self._config.model.api_format)
             self._config.model.base_url = m.get("base_url", self._config.model.base_url)
-            self._config.model.api_key = m.get("api_key", self._config.model.api_key)
+            self._config.model.api_key = _resolve_key(
+                m.get("api_key", self._config.model.api_key),
+                self._config.model.api_key,
+                path="model.api_key",
+            )
             self._config.model.model_id = m.get("model_id", self._config.model.model_id)
             self._config.model.max_tokens = m.get("max_tokens", self._config.model.max_tokens)
             self._config.model.temperature = m.get("temperature", self._config.model.temperature)
@@ -175,7 +193,16 @@ class ManagementHandler:
                                  "model_id": val.get("model_id", ""), "base_url": val.get("base_url", "")}
                         normalized[prov] = [entry]
                     elif isinstance(val, list):
-                        normalized[prov] = val
+                        # Guard against redacted round-trip: merge api_key from current config
+                        current_entries = self._config.models.get(prov, [])
+                        merged = []
+                        for i, entry in enumerate(val):
+                            e = dict(entry)
+                            if "api_key" in e and i < len(current_entries):
+                                e["api_key"] = _resolve_key(e["api_key"], current_entries[i].get("api_key", ""),
+                                                    path=f"models.{prov}[{i}].api_key")
+                            merged.append(e)
+                        normalized[prov] = merged
                     else:
                         normalized[prov] = []
                 self._config.models = normalized
@@ -888,6 +915,8 @@ class ManagementHandler:
                     adapter.bot_id = self._config.wechat.iLink_bot_id
                     adapter.base_url = self._config.wechat.base_url
                     adapter._bot._base_url = self._config.wechat.base_url
+                    # Reset upload health flag — new session may restore permission
+                    adapter._upload_available = True
                     # Restart polling with new credentials
                     if hasattr(adapter, "stop_polling"):
                         adapter.stop_polling()
