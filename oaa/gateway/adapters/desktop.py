@@ -54,6 +54,10 @@ _MANAGEMENT_TYPES = {
     "proposal_ignore",
     "get_evolution_stats",
     "get_metrics",
+    "list_emails",
+    "save_email",
+    "delete_email",
+    "test_email",
 }
 
 

@@ -230,6 +230,124 @@
         </div>
       </div>
     </div>
+
+    <!-- ================================ -->
+    <!-- Email Accounts Section -->
+    <!-- ================================ -->
+    <div class="email-section">
+      <div class="section-header">
+        <h3>邮箱配置</h3>
+        <p class="view-subtitle" style="margin:0">用于发送邮件的 SMTP/IMAP 账户</p>
+      </div>
+
+      <div v-if="emailLoading" class="loading-state" style="height:100px">
+        <span class="load-spinner"></span>
+        <span>加载邮箱配置...</span>
+      </div>
+
+      <div v-else class="email-grid">
+        <!-- Existing accounts -->
+        <div v-for="acc in emailAccounts" :key="acc.id" class="email-card">
+          <div class="email-card-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 4L12 13 2 4"/>
+            </svg>
+          </div>
+          <div class="email-card-body">
+            <span class="email-card-name">{{ acc.display_name || providerLabel(acc.provider) }}</span>
+            <span class="email-card-user">{{ acc.username }}</span>
+          </div>
+          <button class="oaa-btn oaa-btn--ghost oaa-btn--sm" @click="deleteEmail(acc.id)" :disabled="emailDeleting === acc.id">
+            {{ emailDeleting === acc.id ? '…' : '删除' }}
+          </button>
+        </div>
+
+        <!-- Add card -->
+        <div class="email-card email-card--add" @click="openEmailModal">
+          <span class="add-icon">+</span>
+          <span class="add-label">新增邮箱</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Email config modal -->
+    <div v-if="showEmailModal" class="modal-overlay" @click.self="closeEmailModal">
+      <div class="modal-panel email-modal">
+        <div class="modal-header">
+          <h3>配置邮箱</h3>
+          <button class="modal-close" @click="closeEmailModal">✕</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="form-group">
+            <label>服务商</label>
+            <select v-model="emailForm.provider" class="oaa-input" @change="onProviderChange">
+              <option value="">请选择服务商</option>
+              <option v-for="p in providers" :key="p.key" :value="p.key">{{ p.name }}</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>显示名称</label>
+            <input v-model="emailForm.display_name" class="oaa-input" placeholder="例如：我的谷歌邮箱" />
+          </div>
+
+          <div class="form-group">
+            <label>邮箱地址</label>
+            <input v-model="emailForm.username" class="oaa-input" placeholder="your@email.com" />
+          </div>
+
+          <div class="form-group">
+            <label>授权码 / 密码</label>
+            <input v-model="emailForm.auth_code" class="oaa-input" type="password" placeholder="授权码或应用专用密码" />
+            <p class="form-hint">需先在邮箱网页端开启 IMAP/SMTP 服务并生成授权码</p>
+          </div>
+
+          <details class="advanced-details">
+            <summary class="advanced-summary">高级设置</summary>
+            <div class="advanced-body">
+              <div class="form-row">
+                <div class="form-group">
+                  <label>IMAP 服务器</label>
+                  <input v-model="emailForm.imap_server" class="oaa-input" placeholder="imap.example.com" />
+                </div>
+                <div class="form-group form-group--sm">
+                  <label>端口</label>
+                  <input v-model.number="emailForm.imap_port" class="oaa-input" type="number" />
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>SMTP 服务器</label>
+                  <input v-model="emailForm.smtp_server" class="oaa-input" placeholder="smtp.example.com" />
+                </div>
+                <div class="form-group form-group--sm">
+                  <label>端口</label>
+                  <input v-model.number="emailForm.smtp_port" class="oaa-input" type="number" />
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <div v-if="emailError" class="form-error-msg">{{ emailError }}</div>
+          <div v-if="emailTestErrors.length > 0" class="form-error-list">
+            <p v-for="(e, i) in emailTestErrors" :key="i">{{ e }}</p>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button class="oaa-btn oaa-btn--ghost" @click="closeEmailModal">取消</button>
+          <button class="oaa-btn oaa-btn--primary" @click="saveEmail" :disabled="emailSaving">
+            {{ emailSaving ? '测试连接中…' : '保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast -->
+    <div v-if="toast.show" :class="['toast', toast.type]">
+      {{ toast.message }}
+    </div>
   </div>
 </template>
 
@@ -406,6 +524,170 @@ async function reconnectChannel(channel: string) {
 onUnmounted(() => {
   for (const ch of Object.keys(pollTimers)) stopPolling(ch)
 })
+
+// ------------------------------------------------------------------
+// Email configuration
+// ------------------------------------------------------------------
+
+interface EmailAccount {
+  id: string
+  provider: string
+  display_name: string
+  username: string
+  auth_code: string
+  imap_server: string
+  imap_port: number
+  smtp_server: string
+  smtp_port: number
+  smtp_tls: boolean
+}
+
+interface EmailProvider {
+  key: string
+  name: string
+  imap_server: string
+  imap_port: number
+  smtp_server: string
+  smtp_port: number
+  smtp_tls: boolean
+  custom: boolean
+}
+
+const emailAccounts = ref<EmailAccount[]>([])
+const providers = ref<EmailProvider[]>([])
+const emailLoading = ref(true)
+const showEmailModal = ref(false)
+const emailSaving = ref(false)
+const emailDeleting = ref('')
+const emailError = ref('')
+const emailTestErrors = ref<string[]>([])
+const toast = ref({ show: false, type: 'success', message: '' })
+
+const emailForm = reactive({
+  provider: '',
+  display_name: '',
+  username: '',
+  auth_code: '',
+  imap_server: '',
+  imap_port: 993,
+  smtp_server: '',
+  smtp_port: 587,
+  smtp_tls: true,
+})
+
+function resetEmailForm() {
+  emailForm.provider = ''
+  emailForm.display_name = ''
+  emailForm.username = ''
+  emailForm.auth_code = ''
+  emailForm.imap_server = ''
+  emailForm.imap_port = 993
+  emailForm.smtp_server = ''
+  emailForm.smtp_port = 587
+  emailForm.smtp_tls = true
+  emailError.value = ''
+  emailTestErrors.value = []
+}
+
+function providerLabel(key: string): string {
+  const p = providers.value.find(p => p.key === key)
+  return p ? p.name : key
+}
+
+function onProviderChange() {
+  const p = providers.value.find(p => p.key === emailForm.provider)
+  if (p && !p.custom) {
+    emailForm.imap_server = p.imap_server
+    emailForm.imap_port = p.imap_port
+    emailForm.smtp_server = p.smtp_server
+    emailForm.smtp_port = p.smtp_port
+    emailForm.smtp_tls = p.smtp_tls ?? true
+  } else {
+    emailForm.imap_server = ''
+    emailForm.imap_port = 993
+    emailForm.smtp_server = ''
+    emailForm.smtp_port = 587
+    emailForm.smtp_tls = true
+  }
+}
+
+function openEmailModal() {
+  resetEmailForm()
+  showEmailModal.value = true
+}
+
+function closeEmailModal() {
+  showEmailModal.value = false
+}
+
+async function saveEmail() {
+  if (!emailForm.provider) { emailError.value = '请选择服务商'; return }
+  if (!emailForm.username) { emailError.value = '请输入邮箱地址'; return }
+  if (!emailForm.auth_code) { emailError.value = '请输入授权码'; return }
+
+  emailSaving.value = true
+  emailError.value = ''
+  emailTestErrors.value = []
+
+  try {
+    const resp = await sendRequest('save_email', { account: { ...emailForm } })
+    if (resp.ok) {
+      showEmailModal.value = false
+      await loadEmails()
+      showToast('邮箱配置保存成功', 'success')
+    } else if (resp.test_ok === false) {
+      if (resp.errors?.length) {
+        emailTestErrors.value = resp.errors
+      } else {
+        const errs: string[] = []
+        if (resp.imap_error) errs.push(`IMAP: ${resp.imap_error}`)
+        if (resp.smtp_error) errs.push(`SMTP: ${resp.smtp_error}`)
+        emailTestErrors.value = errs
+      }
+    } else {
+      emailError.value = resp.error || '保存失败'
+    }
+  } catch (e: any) {
+    emailError.value = '保存失败: ' + (e.message || e)
+  }
+  emailSaving.value = false
+}
+
+async function deleteEmail(id: string) {
+  if (!confirm('确定要删除此邮箱配置吗？')) return
+  emailDeleting.value = id
+  try {
+    const resp = await sendRequest('delete_email', { id })
+    if (resp.ok) {
+      await loadEmails()
+      showToast('已删除', 'success')
+    } else {
+      showToast(resp.error || '删除失败', 'error')
+    }
+  } catch (e: any) {
+    showToast('删除失败: ' + (e.message || e), 'error')
+  }
+  emailDeleting.value = ''
+}
+
+async function loadEmails() {
+  try {
+    const resp = await sendRequest('list_emails')
+    if (resp.ok) {
+      emailAccounts.value = resp.accounts || []
+      providers.value = resp.providers || []
+    }
+  } catch { /* ignore */ }
+  emailLoading.value = false
+}
+
+function showToast(message: string, type: 'success' | 'error' = 'success') {
+  toast.value = { show: true, type, message }
+  setTimeout(() => { toast.value.show = false }, 3000)
+}
+
+// Load email accounts on mount (after channel config loads)
+setTimeout(() => loadEmails(), 100)
 </script>
 
 <style scoped>
@@ -529,4 +811,292 @@ onUnmounted(() => {
 }
 
 @media (max-width: 720px) { .channel-grid { grid-template-columns: 1fr; } }
+
+/* ============================== */
+/* Email accounts section */
+/* ============================== */
+.email-section {
+  margin-top: var(--oaa-space-10);
+}
+.section-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--oaa-space-3);
+  margin-bottom: var(--oaa-space-4);
+}
+.section-header h3 {
+  font-size: var(--oaa-text-lg);
+  font-weight: 600;
+  color: var(--oaa-color-primary);
+}
+
+.email-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--oaa-space-4);
+}
+@media (max-width: 960px) { .email-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 640px) { .email-grid { grid-template-columns: 1fr; } }
+
+.email-card {
+  display: flex;
+  align-items: center;
+  gap: var(--oaa-space-3);
+  background: rgba(30, 41, 59, 0.5);
+  border: 1px solid var(--oaa-glass-border);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-radius: var(--oaa-radius-lg);
+  padding: var(--oaa-space-4);
+  transition: border-color var(--oaa-transition-base), transform var(--oaa-transition-base);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+.email-card:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+  transform: translateY(-2px);
+}
+
+.email-card-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--oaa-radius-md);
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--oaa-blue-400);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.email-card-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.email-card-name {
+  font-size: var(--oaa-text-sm);
+  font-weight: 600;
+  color: var(--oaa-color-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.email-card-user {
+  font-size: var(--oaa-text-xs);
+  color: var(--oaa-color-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.email-card--add {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--oaa-space-2);
+  border-style: dashed;
+  border-color: var(--oaa-glass-border);
+  color: var(--oaa-color-muted);
+  min-height: 72px;
+  transition: all var(--oaa-transition-base);
+}
+.email-card--add:hover {
+  border-color: var(--oaa-primary);
+  color: var(--oaa-primary);
+  background: rgba(59, 130, 246, 0.06);
+}
+.add-icon {
+  font-size: 22px;
+  font-weight: 300;
+  line-height: 1;
+}
+.add-label {
+  font-size: var(--oaa-text-sm);
+}
+
+/* ============================== */
+/* Modal overlay */
+/* ============================== */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.2s ease;
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.modal-panel {
+  background: var(--oaa-bg-surface);
+  border: 1px solid var(--oaa-glass-border);
+  border-radius: var(--oaa-radius-xl);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+  width: 480px;
+  max-width: 90vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  animation: slideUp 0.25s ease;
+}
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--oaa-space-5) var(--oaa-space-6);
+  border-bottom: 1px solid var(--oaa-border-subtle);
+}
+.modal-header h3 {
+  font-size: var(--oaa-text-lg);
+  font-weight: 600;
+  color: var(--oaa-color-primary);
+  margin: 0;
+}
+.modal-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--oaa-radius-sm);
+  background: transparent;
+  color: var(--oaa-color-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--oaa-text-base);
+}
+.modal-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--oaa-color-primary);
+}
+
+.modal-body {
+  padding: var(--oaa-space-5) var(--oaa-space-6);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--oaa-space-4);
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oaa-space-1);
+}
+.form-group label {
+  font-size: var(--oaa-text-xs);
+  font-weight: 600;
+  color: var(--oaa-color-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.form-group .oaa-input {
+  padding: var(--oaa-space-2) var(--oaa-space-3);
+  border-radius: var(--oaa-radius-md);
+}
+.form-hint {
+  font-size: var(--oaa-text-xs);
+  color: var(--oaa-color-disabled);
+  margin: 2px 0 0 0;
+}
+
+.form-row {
+  display: flex;
+  gap: var(--oaa-space-3);
+}
+.form-row .form-group {
+  flex: 1;
+}
+.form-group--sm {
+  max-width: 100px;
+}
+
+.advanced-details {
+  border: 1px solid var(--oaa-border-subtle);
+  border-radius: var(--oaa-radius-md);
+  overflow: hidden;
+}
+.advanced-summary {
+  font-size: var(--oaa-text-xs);
+  font-weight: 600;
+  color: var(--oaa-color-muted);
+  padding: var(--oaa-space-2) var(--oaa-space-3);
+  cursor: pointer;
+  user-select: none;
+}
+.advanced-summary:hover {
+  color: var(--oaa-color-secondary);
+  background: rgba(255, 255, 255, 0.03);
+}
+.advanced-body {
+  padding: var(--oaa-space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--oaa-space-3);
+  border-top: 1px solid var(--oaa-border-subtle);
+}
+
+.form-error-msg {
+  font-size: var(--oaa-text-sm);
+  color: var(--oaa-error);
+  padding: var(--oaa-space-2) var(--oaa-space-3);
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: var(--oaa-radius-md);
+}
+.form-error-list {
+  font-size: var(--oaa-text-sm);
+  color: var(--oaa-error);
+  padding: var(--oaa-space-2) var(--oaa-space-3);
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: var(--oaa-radius-md);
+}
+.form-error-list p {
+  margin: 2px 0;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--oaa-space-3);
+  padding: var(--oaa-space-4) var(--oaa-space-6);
+  border-top: 1px solid var(--oaa-border-subtle);
+}
+
+/* Toast */
+.toast {
+  position: fixed;
+  bottom: var(--oaa-space-8);
+  right: var(--oaa-space-8);
+  padding: var(--oaa-space-3) var(--oaa-space-5);
+  border-radius: var(--oaa-radius-md);
+  font-size: var(--oaa-text-sm);
+  font-weight: 500;
+  z-index: 1100;
+  animation: toastIn 0.3s ease;
+  box-shadow: var(--oaa-shadow-lg);
+}
+.toast.success {
+  background: var(--oaa-green-600);
+  color: #fff;
+}
+.toast.error {
+  background: var(--oaa-red-500);
+  color: #fff;
+}
+@keyframes toastIn {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
 </style>

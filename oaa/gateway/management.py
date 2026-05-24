@@ -39,6 +39,11 @@ VALID_TYPES = {
     "get_evolution_stats",
     # Metrics
     "get_metrics",
+    # Email config
+    "list_emails",
+    "save_email",
+    "delete_email",
+    "test_email",
 }
 _ = VALID_TYPES  # prevent import-stripping
 
@@ -62,6 +67,9 @@ class ManagementHandler:
         self._channels = channel_adapters
         self._agent = agent
 
+        # Email account manager
+        self._email_cfg = None  # lazy init with agent's data_dir
+
         # Agent runtime state (updated by DesktopAdapter during chat)
         self._agent_state = "idle"        # idle | thinking | executing | responding
         self._agent_state_since = time.time()
@@ -84,6 +92,13 @@ class ManagementHandler:
                 cb(msg_type, payload)
             except Exception:
                 pass
+
+    @property
+    def _email_manager(self):
+        if self._email_cfg is None:
+            from .email_config import EmailConfigManager
+            self._email_cfg = EmailConfigManager(self._config.data_dir)
+        return self._email_cfg
 
     def set_agent_state(self, state: str):
         """Update agent cognitive state. Called from DesktopAdapter."""
@@ -1010,6 +1025,52 @@ class ManagementHandler:
             return {"ok": True, "online": True, "msg": "飞书已重连"}
         else:
             return {"ok": False, "error": f"Channel {channel} reconnect not implemented"}
+
+    # ------------------------------------------------------------------
+    # Email config
+    # ------------------------------------------------------------------
+
+    def _handle_list_emails(self, _payload: dict) -> dict:
+        """Return all configured email accounts (credentials redacted)."""
+        accounts = self._email_manager.list_accounts()
+        providers = self._email_manager.get_provider_list()
+        return {"ok": True, "accounts": accounts, "providers": providers}
+
+    async def _handle_save_email(self, payload: dict) -> dict:
+        """Create or update an email account. Optionally test before saving."""
+        account = payload.get("account", {})
+        if not account or not account.get("username") or not account.get("auth_code"):
+            return {"ok": False, "error": "邮箱地址和授权码不能为空"}
+
+        # Test connection before saving
+        test_result = await self._email_manager.test_connection(account)
+        if not test_result.get("ok"):
+            return {
+                "ok": False,
+                "test_ok": False,
+                "errors": test_result.get("errors", []),
+                "imap_error": test_result.get("imap_error"),
+                "smtp_error": test_result.get("smtp_error"),
+            }
+
+        saved = self._email_manager.save_account(account)
+        return {"ok": True, "account": saved}
+
+    def _handle_delete_email(self, payload: dict) -> dict:
+        """Delete an email account by id."""
+        account_id = payload.get("id", "")
+        if not account_id:
+            return {"ok": False, "error": "No account id provided"}
+        ok = self._email_manager.delete_account(account_id)
+        return {"ok": ok}
+
+    async def _handle_test_email(self, payload: dict) -> dict:
+        """Test connection for an email account (existing or unsaved)."""
+        account = payload.get("account", {})
+        if not account:
+            return {"ok": False, "error": "请提供邮箱配置"}
+        result = await self._email_manager.test_connection(account)
+        return {"ok": result.get("ok", False), **result}
 
     # ------------------------------------------------------------------
     # Metrics
