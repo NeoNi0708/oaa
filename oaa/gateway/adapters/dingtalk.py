@@ -48,6 +48,7 @@ class DingTalkAdapter:
         self._client = None
         self._thread: threading.Thread | None = None
         self._running = False
+        self._connected = False
         self._access_token = ""
         self._token_expires_at = 0.0
         self._webhooks: dict[str, str] = {}
@@ -61,6 +62,10 @@ class DingTalkAdapter:
     @property
     def is_authenticated(self) -> bool:
         return bool(self.client_id and self.client_secret)
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
 
     # ------------------------------------------------------------------
     # QR-code login
@@ -307,6 +312,7 @@ class DingTalkAdapter:
             )
 
             self._running = True
+            self._connected = True
             self._thread = threading.Thread(
                 target=self._client.start_forever,
                 daemon=True,
@@ -320,6 +326,7 @@ class DingTalkAdapter:
     def stop(self):
         """Stop the DingTalk stream client."""
         self._running = False
+        self._connected = False
         if self._client is not None:
             stop = getattr(self._client, "stop", None)
             if stop is not None:

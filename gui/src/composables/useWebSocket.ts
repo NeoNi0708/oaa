@@ -48,6 +48,7 @@ export function useWebSocket() {
   const confirmRequest = ref<ConfirmRequest | null>(null)
   const configUpdated = ref(0)  // incremented on config_updated push events
   const proposalCompleted = ref(0)  // incremented on proposal_completed push events
+  const channelStatusChanged = ref(0)  // incremented on channel_disconnected push
 
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let isDestroyed = false
@@ -154,6 +155,10 @@ export function useWebSocket() {
           }
           case 'proposal_completed': {
             proposalCompleted.value++
+            break
+          }
+          case 'channel_disconnected': {
+            channelStatusChanged.value++
             break
           }
         }

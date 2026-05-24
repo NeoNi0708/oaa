@@ -49,6 +49,7 @@ class WeChatILinkAdapter:
         self.base_url = base_url or self.API_BASE
         self._bot_user_id = ilink_user_id
         self._running = False
+        self._connected = False
         self.gateway = None
         self._seen_msg_ids: set[int] = set()
         self._context_tokens: dict[str, str] = {}
@@ -76,6 +77,10 @@ class WeChatILinkAdapter:
     @property
     def is_authenticated(self) -> bool:
         return bool(self.token and self.base_url)
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected and self._running
 
     @property
     def upload_available(self) -> bool:
@@ -439,6 +444,7 @@ class WeChatILinkAdapter:
     async def start_polling(self):
         """Long-poll loop for incoming WeChat messages."""
         self._running = True
+        self._connected = True
 
         while self._running:
             msgs, new_cursor = await self.get_updates()
@@ -501,6 +507,7 @@ class WeChatILinkAdapter:
 
     def stop_polling(self):
         self._running = False
+        self._connected = False
 
     async def start(self):
         await self.start_polling()

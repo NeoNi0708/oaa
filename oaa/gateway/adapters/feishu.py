@@ -57,6 +57,7 @@ class FeishuAdapter:
         self._rest_client: Any = None
         self._thread: threading.Thread | None = None
         self._running = False
+        self._connected = False
         self._tenant_token = ""
         self._token_expires_at = 0.0
         self._main_loop: asyncio.AbstractEventLoop | None = None
@@ -72,6 +73,10 @@ class FeishuAdapter:
     @property
     def is_authenticated(self) -> bool:
         return bool(self.app_id and self.app_secret)
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
 
     # ------------------------------------------------------------------
     # QR-code OAuth login
@@ -384,6 +389,7 @@ class FeishuAdapter:
             )
 
             self._running = True
+            self._connected = True
             self._thread = threading.Thread(
                 target=self._ws_client.start,
                 daemon=True,
@@ -397,6 +403,7 @@ class FeishuAdapter:
     def stop(self):
         """Stop the Feishu WebSocket event client."""
         self._running = False
+        self._connected = False
         # Cancel background QR poll task
         if self._poll_task is not None:
             self._poll_task.cancel()

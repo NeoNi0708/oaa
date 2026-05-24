@@ -100,6 +100,10 @@ class OAAApp:
         # Wire user-confirmation callback so that ask_user reaches the GUI
         self.permissions.set_confirm_callback(self.desktop.create_confirm_callback())
 
+        # Start channel healthcheck loop (management handler is set inside desktop)
+        if self.desktop._management is not None:
+            self.desktop._management.start_healthcheck()
+
     def _register_channels(self):
         """Register channel adapters. Channels are enabled whenever credentials are present."""
         # WeChat iLink

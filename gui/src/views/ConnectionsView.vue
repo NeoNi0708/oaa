@@ -352,10 +352,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, watch, onMounted, onUnmounted } from 'vue'
 import { useWebSocket } from '../composables/useWebSocket'
 
-const { connected, sendRequest } = useWebSocket()
+const { connected, sendRequest, channelStatusChanged } = useWebSocket()
 
 interface ChannelState {
   online: boolean
@@ -406,6 +406,20 @@ onMounted(async () => {
     }
   } catch { /* use defaults */ }
   loading.value = false
+})
+
+// Refresh channel online status when backend pushes a disconnect event
+watch(channelStatusChanged, async () => {
+  try {
+    const resp = await sendRequest('get_status')
+    if (resp.ok && resp.channels) {
+      for (const [name, st] of Object.entries(resp.channels as Record<string, any>)) {
+        if (channels[name]) {
+          channels[name].online = !!st.online
+        }
+      }
+    }
+  } catch { /* ignore */ }
 })
 
 async function saveWechatCliConfig() {
