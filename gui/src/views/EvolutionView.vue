@@ -456,7 +456,7 @@ async function loadStats() {
 
 // Tab change -> lazy load stats
 // Auto-refresh proposal list when background task completes
-watch(proposalCompleted, () => { loadProposals() })
+watch(proposalCompleted, () => { loadProposals(); loadStats(); loadMetrics() })
 
 watch(activeTab, (tab) => {
   if (tab === 'stats') {

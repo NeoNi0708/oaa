@@ -487,6 +487,7 @@ interface BackendEvolutionItem {
   usage_count?: number
   step?: string
   skip_count?: number
+  applied?: boolean
 }
 
 async function applyEvolution(item: EvolutionSuggestion) {
@@ -624,7 +625,7 @@ onMounted(async () => {
             tag: item.type === 'optimize' ? '热门' : item.type === 'sop_refine' ? '内测' : '稳定',
             badgeClass: tagBootstrap[i % 4],
             confidence: item.usage_count ? Math.min(99, item.usage_count * 15) : 70,
-            applied: false,
+            applied: item.applied ?? false,
           }))
         }
       }
@@ -675,7 +676,7 @@ onActivated(async () => {
           tag: item.type === 'optimize' ? '热门' : item.type === 'sop_refine' ? '内测' : '稳定',
           badgeClass: tagBootstrap[i % 4],
           confidence: item.usage_count ? Math.min(99, item.usage_count * 15) : 70,
-          applied: false,
+          applied: item.applied ?? false,
         }))
       }
     }
