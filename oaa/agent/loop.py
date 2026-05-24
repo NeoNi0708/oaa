@@ -11,6 +11,9 @@ from ..llm import LLMClient, LLMResponse
 from ..logging_config import get_logger
 
 if TYPE_CHECKING:
+    from ..config import ModelConfig
+
+if TYPE_CHECKING:
     from .handler import BaseHandler
 
 logger = get_logger("agent.loop")
@@ -69,6 +72,29 @@ def _friendly_error(exc: Exception) -> str:
     return f"模型调用失败: {name}"
 
 
+def _summarize_args(args: dict, max_len: int = 120) -> str:
+    """Summarize tool args for logging — key=value pairs, truncated."""
+    parts = []
+    for k, v in args.items():
+        sv = str(v)
+        if len(sv) > 60:
+            sv = sv[:57] + "..."
+        parts.append(f"{k}={sv}")
+    joined = " ".join(parts)
+    if len(joined) > max_len:
+        joined = joined[:max_len - 3] + "..."
+    return joined
+
+
+def _result_status(result: Any) -> str:
+    """Return a short status string for any tool result."""
+    if isinstance(result, dict):
+        if result.get("status") == "error":
+            return f"error: {str(result.get('msg', ''))[:80]}"
+        return f"ok ({len(str(result))} bytes)"
+    return f"ok ({len(str(result))} bytes)"
+
+
 class StepOutcome:
     """Outcome of a single step — used by BaseHandler step methods."""
 
@@ -93,6 +119,7 @@ class AgentLoop:
         max_messages: int = 60,
         memory_mgr=None,
         metrics_collector=None,
+        model_fallbacks: list | None = None,
     ):
         self.llm = llm
         self.handler = handler
@@ -104,6 +131,9 @@ class AgentLoop:
         self._system_prompt = "You are OAA Agent."
         self._last_llm_content = ""
         self._continuation_count = 0
+        self._model_fallbacks = model_fallbacks or []
+        self._active_fallback_idx = -1  # -1 = primary model, 0+ = fallback index
+        self._combined_tools = list(self.tools_schema)
 
     def _error_with_context(self, error_msg: str) -> str:
         """Append error to last yielded content so it doesn't overwrite the conversation."""
@@ -111,13 +141,43 @@ class AgentLoop:
             return self._last_llm_content + "\n\n[系统错误] " + error_msg
         return error_msg
 
+    def _try_next_fallback(self) -> bool:
+        """Advance to next fallback model. Returns True if one is available."""
+        # Reset continuation counter on fallback so the new model isn't
+        # immediately constrained by the old model's truncation limit.
+        self._continuation_count = 0
+        next_idx = self._active_fallback_idx + 1
+        if next_idx < len(self._model_fallbacks):
+            self._active_fallback_idx = next_idx
+            return True
+        return False
+
+    def _apply_fallback_config(self, fb: dict):
+        """Reconfigure the LLM client with a fallback model dict."""
+        from ..config import ModelConfig
+        # Auto-detect api_format from provider name
+        provider = fb.get("provider", "")
+        api_format = "anthropic" if provider in ("anthropic", "custom-anthropic") else "openai"
+        cfg = ModelConfig(
+            provider=provider,
+            api_format=fb.get("api_format", api_format),
+            base_url=fb.get("base_url", ""),
+            api_key=fb.get("api_key", ""),
+            model_id=fb.get("model_id", ""),
+        )
+        self.llm.reconfigure(cfg)
+        # reconfigure creates a new client instance — reapply tools so the
+        # fallback model can still call tools (otherwise it would only produce
+        # plain-text replies and the agent would terminate early).
+        self.llm.set_tools(self._combined_tools)
+
     def set_skill_context(self, system_prompt: str, extra_tools: Optional[list] = None):
         """Set system prompt and optionally add skill-specific tools."""
         self._system_prompt = system_prompt
-        combined = list(self.tools_schema)
+        self._combined_tools = list(self.tools_schema)
         if extra_tools:
-            combined = combined + extra_tools
-        self.llm.set_tools(combined)
+            self._combined_tools = self._combined_tools + extra_tools
+        self.llm.set_tools(self._combined_tools)
 
     async def run(self, user_input: str, history: list | None = None) -> AsyncGenerator[dict, None]:
         """Run agent loop. Yields intermediate result dicts, returns final response.
@@ -150,7 +210,9 @@ class AgentLoop:
             response: LLMResponse | None = None
             last_error: Exception | None = None
             _llm_start = 0.0
-            for attempt in range(1, _MAX_RETRIES + 1):
+            attempt = 0
+            while attempt < _MAX_RETRIES:
+                attempt += 1
                 try:
                     _llm_start = time.time()
                     response = await asyncio.wait_for(
@@ -176,7 +238,24 @@ class AgentLoop:
                         or err_type in ("BadRequestError", "ContextLengthExceeded", "NotFoundError",
                                         "AuthenticationError", "PermissionDeniedError",
                                         "UnprocessableEntityError", "ContentTooLongError")):
-                        logger.error("LLM non-retryable error [%s]: %s", err_type, exc)
+                        # Try fallback models before giving up
+                        if self._try_next_fallback():
+                            fb_model = self._model_fallbacks[self._active_fallback_idx]
+                            logger.warning(
+                                "Falling back to model [%s/%s]: %s (%s)",
+                                self._active_fallback_idx + 1, len(self._model_fallbacks),
+                                fb_model.get("model_id", "?"), fb_model.get("provider", "?"),
+                            )
+                            yield {"type": "status",
+                                   "content": f"当前模型({err_type})，切换到 {fb_model.get('model_id','?')}..."}
+                            # Reconfigure LLM client with fallback model
+                            self._apply_fallback_config(fb_model)
+                            # Reset attempt counter so the fallback model gets
+                            # a full set of retries (the while loop re-increments).
+                            attempt = 0
+                            continue  # retry current turn with new model
+
+                        logger.error("LLM non-retryable error [%s] (no fallbacks left): %s", err_type, exc)
                         # If there was any previous assistant output, append the error
                         # so it doesn't overwrite the conversation in the frontend.
                         if self._last_llm_content:
@@ -218,6 +297,13 @@ class AgentLoop:
             tool_calls = response.tool_calls if response else []
             thinking = response.thinking if response else ""
 
+            logger.debug(
+                "LLM turn=%d | content_len=%d | tool_calls=%d | finish=%s | thinking=%s",
+                turn, len(content), len(tool_calls),
+                response.finish_reason if response else "none",
+                "yes" if thinking else "no",
+            )
+
             if content:
                 yield {"type": "llm_output", "content": content}
                 self._last_llm_content = content
@@ -254,6 +340,7 @@ class AgentLoop:
                 except json.JSONDecodeError:
                     args = {"_raw": raw_args}
 
+                logger.debug("Tool call: %s %s", tool_name, _summarize_args(args))
                 yield {"type": "tool_call", "name": tool_name, "args": args}
 
                 # Execute tool with auto-retry for transient errors
@@ -288,6 +375,7 @@ class AgentLoop:
                         "_recovery_hint": _recovery_hint(tool_name, str(exc), err_cat),
                     }
                 yield {"type": "tool_result", "name": tool_name, "result": result}
+                logger.debug("Tool result: %s | status=%s", tool_name, _result_status(result))
 
                 # Record tool success/failure metrics
                 if self._metrics:

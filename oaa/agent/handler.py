@@ -1,5 +1,29 @@
 """Base handler — tool dispatch mechanism, adapted from GenericAgent's BaseHandler."""
+import time
 from typing import Any
+
+from ..logging_config import get_logger
+
+logger = get_logger("agent.handler")
+
+
+def _result_summary(result: Any, max_len: int = 100) -> str:
+    """Short summary of a tool result for logging."""
+    if isinstance(result, dict):
+        status = result.get("status", "ok")
+        if status == "error":
+            return f"error: {str(result.get('msg', ''))[:80]}"
+        # Try to extract meaningful size hint
+        for key in ("result", "content", "output", "text"):
+            val = result.get(key)
+            if val is not None:
+                s = str(val)
+                return f"ok ({len(s)} chars)"
+        return f"ok ({len(str(result))} bytes)"
+    s = str(result)
+    if len(s) > max_len:
+        s = s[:max_len - 3] + "..."
+    return s
 
 
 class BaseHandler:
@@ -35,13 +59,23 @@ class BaseHandler:
         tool is not recognised.
         """
         method_name = f"do_{tool_name}"
-        if hasattr(self, method_name):
-            method = getattr(self, method_name)
-            return await method(args)
-        # Fall back to decorator registry
-        if tool_name in self._tool_registry:
-            return await self._tool_registry[tool_name](self, args)
-        return {"status": "error", "msg": f"Unknown tool: {tool_name}"}
+        start = time.time()
+        try:
+            if hasattr(self, method_name):
+                method = getattr(self, method_name)
+                result = await method(args)
+            elif tool_name in self._tool_registry:
+                result = await self._tool_registry[tool_name](self, args)
+            else:
+                logger.warning("Unknown tool: %s", tool_name)
+                return {"status": "error", "msg": f"Unknown tool: {tool_name}"}
+            elapsed = time.time() - start
+            logger.debug("Handler %s → %s (%.2fs)", tool_name, _result_summary(result), elapsed)
+            return result
+        except Exception as exc:
+            elapsed = time.time() - start
+            logger.warning("Handler %s raised %s (%.2fs): %s", tool_name, type(exc).__name__, elapsed, exc)
+            raise
 
     def register_dynamic(self, tool_name: str, filepath: str, schema: dict):
         """Register a dynamic tool created at runtime."""

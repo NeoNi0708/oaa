@@ -435,24 +435,26 @@ class IdleInspector:
                               max_repeats: int = 0) -> bool:
         """Store a proposal notification, respecting dedup limit.
 
+        Dedup is keyed on *dedup_key* (a stable topic identifier), NOT on
+        the full text.  Two proposals with the same key are treated as
+        duplicates regardless of wording differences.
+
         Args:
             proposal_text: The notification text to display.
-            dedup_key: Stable identifier for dedup.  If empty, derived from
-                       the first emoji + bold text in *proposal_text*.
+            dedup_key: Stable topic key (e.g. ``\"self_learn\"`` or
+                       ``\"tool_fix:code_exec\"``). If empty, auto-derived
+                       from the first emoji + bold text in *proposal_text*.
             max_repeats: Max deliveries before suppression (0 = use default).
-                         For variable-content proposals (e.g. LLM-generated),
-                         pass a short string key (e.g. ``\"self_learn\"``) so
-                         the hash doesn't change with wording.
         Returns:
-            True if the notification should be sent (within repeat limit),
-            False if suppressed (sent too many times already).
+            True if the notification should be sent, False if suppressed.
         """
         if not self._memory_mgr:
             return True
         if max_repeats <= 0:
             max_repeats = _MAX_PROPOSAL_REPEATS
-        import hashlib, re as _re
+        import hashlib
         if not dedup_key:
+            import re as _re
             m = _re.search(r'([\U0001F300-\U0001FAFF]).*?\*\*(.+?)\*\*', proposal_text)
             if m:
                 dedup_key = f"{m.group(1)}:{m.group(2)}"

@@ -668,19 +668,4 @@ BROWSER_TOOLS_SCHEMA = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "Search the web and return top results with title, snippet, and URL",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search query string"},
-                    "timeout": {"type": "integer", "description": "Request timeout in seconds", "default": 10},
-                },
-                "required": ["query"],
-            },
-        },
-    },
 ]

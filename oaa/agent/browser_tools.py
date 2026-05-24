@@ -57,38 +57,6 @@ def _fetch_url(url: str, timeout: int = 10) -> dict:
         return {"status": "error", "msg": f"获取 {url} 失败: {e}"}
 
 
-def _search_web(query: str, timeout: int = 10) -> dict:
-    """Search the web using Baidu and return results."""
-    try:
-        resp = requests.get(
-            "https://www.baidu.com/s",
-            params={"wd": query, "rn": "5"},
-            headers=_HEADERS,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        results = []
-        for item in soup.select(".result, .c-container"):
-            title_el = item.select_one("h3 a")
-            snippet_el = item.select_one(".c-abstract, .content-right_8Zs40")
-            if title_el:
-                results.append({
-                    "title": title_el.get_text(strip=True),
-                    "snippet": snippet_el.get_text(strip=True) if snippet_el else "",
-                    "url": title_el.get("href", ""),
-                })
-            if len(results) >= 5:
-                break
-        if not results:
-            return {"status": "error", "msg": f"未找到 '{query}' 的搜索结果"}
-        return {"status": "success", "query": query, "results": results}
-    except requests.Timeout:
-        return {"status": "error", "msg": f"搜索 '{query}' 超时"}
-    except Exception as e:
-        return {"status": "error", "msg": f"搜索失败: {e}"}
-
-
 async def do_web_scan(args: dict) -> dict:
     """Fetch a URL and return simplified content."""
     url = args.get("url", "")
@@ -98,22 +66,9 @@ async def do_web_scan(args: dict) -> dict:
     return await asyncio.to_thread(_fetch_url, url, timeout=timeout)
 
 
-async def do_web_search(args: dict) -> dict:
-    """Search the web and return results."""
-    query = args.get("query", "")
-    if not query:
-        return {"status": "error", "msg": "web_search 需要 query 参数"}
-    timeout = int(args.get("timeout", 10)) if args.get("timeout") else 10
-    return await asyncio.to_thread(_search_web, query, timeout=timeout)
-
-
 class BrowserTools(BaseHandler):
     """Handler that exposes web fetching tools to the agent loop."""
 
     @staticmethod
     async def do_web_scan(args: dict) -> dict:
         return await do_web_scan(args)
-
-    @staticmethod
-    async def do_web_search(args: dict) -> dict:
-        return await do_web_search(args)

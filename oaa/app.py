@@ -1,5 +1,6 @@
 """OAA main application — ties everything together."""
 import asyncio
+import logging
 import os
 import sys
 from pathlib import Path
@@ -42,9 +43,11 @@ class OAAApp:
         else:
             self.config = AppConfig.load(config_path)
 
-        # Configure logging
+        # Configure logging — OAA_LOG_LEVEL=DEBUG for verbose console output
         log_file = os.path.join(self.config.data_dir, "oaa.log")
-        setup_logging(log_file=log_file)
+        log_level = os.environ.get("OAA_LOG_LEVEL", "INFO").upper()
+        level_map = {"DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING, "ERROR": logging.ERROR}
+        setup_logging(level=level_map.get(log_level, logging.INFO), log_file=log_file)
         logger.info("OAA starting: data_dir=%s", self.config.data_dir)
 
         # Core services
@@ -149,28 +152,6 @@ class OAAApp:
         logger.info("Starting worker agent...")
         await self.worker.start()
         logger.info("Starting task scheduler...")
-        self.scheduler.set_due_callback(_executor_run)
-        asyncio.create_task(self.scheduler.start_loop())
-
-        # Start IdleInspector background task
-        async def _inspector_notify(proposal: str):
-            await self.desktop.notify_all(proposal)
-            # Also push via WeChat if adapter is logged in
-            wechat = self.channel_adapters.get("wechat")
-            if wechat and wechat.is_authenticated and wechat._bot_user_id:
-                try:
-                    # Strip emoji and simplify for WeChat plain text
-                    import re as _re
-                    simple = _re.sub(r"[🔍🔬🔧💡📊📝⏳]", "", proposal)
-                    simple = simple.replace("**", "").replace("``", "")
-                    # Truncate long messages
-                    if len(simple) > 600:
-                        simple = simple[:600] + "\n\n（消息过长已截断，请在聊天页面查看完整内容）"
-                    await wechat.send_message(wechat._bot_user_id,
-                        f"💡 空闲巡检发现优化项：\n\n{simple}")
-                except Exception as exc:
-                    logger.debug("WeChat inspector notify failed: %s", exc)
-        self.agent._idle_inspector.set_notify_callback(_inspector_notify)
 
         # Executor callback — auto-runs scheduled tasks with execution_prompt
         async def _executor_run(task: dict):
@@ -179,7 +160,6 @@ class OAAApp:
             delivery = task.get("delivery_channels", ["chat", "wechat"])
             logger.info("Executor running task: %s → channels: %s", name, delivery)
             try:
-                # Feed the execution_prompt to the agent
                 full_prompt = (
                     f"【定时任务执行】{name}\n\n"
                     f"{prompt}\n\n"
@@ -190,23 +170,35 @@ class OAAApp:
                 async for chunk in self.agent.process_message(full_prompt, history=[]):
                     if chunk["type"] == "done":
                         result_text = chunk.get("content", "")
-                    # Let the agent stream output normally
-
-                # Deliver to WeChat
                 if "wechat" in delivery:
                     wechat = self.channel_adapters.get("wechat")
                     if wechat and wechat.is_authenticated and wechat._bot_user_id:
-                        try:
-                            summary = (result_text[:500] + "...") if len(result_text) > 500 else result_text
-                            await wechat.send_message(wechat._bot_user_id,
-                                f"📋 [{name}] 执行完成：\n\n{summary or '(无文本输出)'}")
-                        except Exception as exc:
-                            logger.warning("Scheduled task WeChat delivery failed: %s", exc)
-
-                # Chat delivery is automatic (process_message outputs to the loop)
+                        summary = (result_text[:500] + "...") if len(result_text) > 500 else result_text
+                        await wechat.send_message(wechat._bot_user_id,
+                            f"📋 [{name}] 执行完成：\n\n{summary or '(无文本输出)'}")
                 logger.info("Scheduled task '%s' executed successfully", name)
             except Exception as exc:
                 logger.error("Scheduled task '%s' execution failed: %s", name, exc)
+
+        self.scheduler.set_due_callback(_executor_run)
+        asyncio.create_task(self.scheduler.start_loop())
+
+        # Start IdleInspector background task
+        async def _inspector_notify(proposal: str):
+            await self.desktop.notify_all(proposal)
+            wechat = self.channel_adapters.get("wechat")
+            if wechat and wechat.is_authenticated and wechat._bot_user_id:
+                try:
+                    import re as _re
+                    simple = _re.sub(r"[🔍🔬🔧💡📊📝⏳]", "", proposal)
+                    simple = simple.replace("**", "").replace("``", "")
+                    if len(simple) > 600:
+                        simple = simple[:600] + "\n\n（消息过长已截断，请在聊天页面查看完整内容）"
+                    await wechat.send_message(wechat._bot_user_id,
+                        f"💡 空闲巡检发现优化项：\n\n{simple}")
+                except Exception as exc:
+                    logger.debug("WeChat inspector notify failed: %s", exc)
+        self.agent._idle_inspector.set_notify_callback(_inspector_notify)
 
         self.agent._idle_inspector.set_executor_callback(_executor_run)
         await self.agent._idle_inspector.start_background()

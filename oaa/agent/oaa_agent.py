@@ -506,13 +506,30 @@ class OAAAgent:
         # Step 2: Handler
         handler = self.build_handler()
 
-        # Step 3: Agent loop
+        # Step 3: Build fallback models list (all providers except active, with valid keys)
+        active_provider = self.config.model.provider
+        fallbacks = []
+        for prov, entries in self.config.models.items():
+            if prov == active_provider or not entries:
+                continue
+            entry = entries[0] if isinstance(entries, list) else entries
+            if isinstance(entry, dict) and entry.get("api_key") and entry.get("model_id"):
+                fallbacks.append({
+                    "provider": prov,
+                    "api_key": entry["api_key"],
+                    "model_id": entry["model_id"],
+                    "base_url": entry.get("base_url", ""),
+                    "api_format": entry.get("api_format", ""),
+                })
+
+        # Step 4: Agent loop
         loop = AgentLoop(
             llm=self.llm,
             handler=handler,
             tools_schema=self._tools_schema,
             memory_mgr=self.memory,
             metrics_collector=self.metrics,
+            model_fallbacks=fallbacks,
         )
         loop.set_skill_context(system_prompt)
 
@@ -553,6 +570,10 @@ class OAAAgent:
                         used_tools = {t["tool"] for t in trajectory}
                         used_skills = {skill_loaded} if skill_loaded else set()
                         self._idle_inspector.record_task_context(used_tools, used_skills)
+                    logger.info(
+                        "Message done | tools=%d | skill=%s | result_len=%d",
+                        len(trajectory), skill_loaded or "-", len(final_result),
+                    )
                 yield chunk
         except asyncio.TimeoutError:
             timed_out = True
@@ -592,3 +613,5 @@ class OAAAgent:
                     asyncio.create_task(
                         self.archiver.summarize_and_archive(user_input, final_result)
                     )
+
+            logger.info("Message complete | tools=%d timed_out=%s", len(trajectory), timed_out)
