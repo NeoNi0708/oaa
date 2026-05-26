@@ -21,7 +21,8 @@ class ExtendedTools:
 
     def __init__(self, data_dir: str, permissions: Optional["PermissionsManager"] = None,
                  wechat_adapter: Any = None,
-                 dingtalk_client_id: str = "", dingtalk_client_secret: str = ""):
+                 dingtalk_client_id: str = "", dingtalk_client_secret: str = "",
+                 image_gen_config: Any = None):
         self.data_dir = data_dir
         self.permissions = permissions
         self._wechat_adapter = wechat_adapter
@@ -257,13 +258,18 @@ class ExtendedTools:
             password = account["auth_code"]
 
             def _send():
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ctx.minimum_version = ssl.TLSVersion.TLSv1
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+
                 if port == 465:
-                    conn = smtplib.SMTP_SSL(server, port, timeout=30,
-                                            context=ssl.create_default_context())
+                    conn = smtplib.SMTP_SSL(server, port, timeout=30, context=ctx)
                 else:
                     conn = smtplib.SMTP(server, port, timeout=30)
                     if use_tls:
-                        conn.starttls(context=ssl.create_default_context())
+                        conn.starttls(context=ctx)
                 try:
                     conn.login(username, password)
                     conn.sendmail(username, recipients, msg.as_string())
@@ -1233,3 +1239,25 @@ Delete this section if no resources are required.
         arg_list = shlex.split(cmd_args)
         result = await self.dingtalk._run(arg_list)
         return {"status": "success" if result.get("ok") else "error", "data": result}
+
+    # ------------------------------------------------------------------
+    # call_xiaoer — 愣小二子任务调用
+    # ------------------------------------------------------------------
+
+    @agent_tool
+    async def do_call_xiaoer(self, prompt: str) -> dict:
+        """让愣小二处理简单子任务。返回文本结果。"""
+        agent = getattr(self, '_oaa_agent', None)
+        if agent is None or not getattr(agent, 'local_llm', None):
+            return {"status": "error", "msg": "愣小二未就绪，请确认本地模型已启用并正在运行"}
+        try:
+            response = await agent.local_llm.chat([
+                {"role": "system", "content": "你是愣小二，专注于处理简单任务。回答要简短直接。"},
+                {"role": "user", "content": prompt},
+            ])
+            content = (response.content or "").strip()
+            if not content:
+                return {"status": "error", "msg": "愣小二返回了空结果"}
+            return {"status": "ok", "result": content}
+        except Exception as e:
+            return {"status": "error", "msg": f"愣小二调用失败: {e}"}

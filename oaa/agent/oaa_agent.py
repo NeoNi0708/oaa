@@ -156,6 +156,7 @@ class OAAAgent:
             image_gen_config=config.image_gen,
         )
         self.extended.set_skill_manager(self.skill_mgr)
+        self.extended._oaa_agent = self  # 让 call_xiaoer 工具能访问 local_llm
         self.browser = BrowserTools()
         self.search = AiSearchTools(
             tavily_api_key=config.search.tavily_api_key,

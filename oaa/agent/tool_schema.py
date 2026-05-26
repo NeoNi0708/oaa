@@ -228,6 +228,13 @@ EXTENDED_TOOLS_SCHEMA = [
         }, "required": ["name"]}
     }},
     {"type": "function", "function": {
+        "name": "skill_unload",
+        "description": "Unload a previously loaded skill to free up context space. Call when switching tasks or when the current skill is no longer needed.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Skill name to unload"},
+        }, "required": ["name"]}
+    }},
+    {"type": "function", "function": {
         "name": "skill_create",
         "description": "Create a new skill scaffold with SKILL.md template. Useful when the user asks to create a new skill for a recurring task pattern.",
         "parameters": {"type": "object", "properties": {
@@ -255,6 +262,13 @@ EXTENDED_TOOLS_SCHEMA = [
         }, "required": []}
     }},
     {"type": "function", "function": {
+        "name": "skill_add_plugin",
+        "description": "Analyze a skill's SKILL.md and auto-generate plugin files (identity.md, rules.json, tools.json). The plugin enables P2 features: persona injection into system prompt, tool filtering, and constraint rules. Safe to re-run — updates existing files.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Skill name to generate plugin for"},
+        }, "required": ["name"]}
+    }},
+    {"type": "function", "function": {
         "name": "feishu_cli_run",
         "description": "Execute any lark-cli command. Covers all 200+ lark-cli commands across 11 business domains not exposed by individual feishu_* tools.",
         "parameters": {"type": "object", "properties": {
@@ -267,6 +281,25 @@ EXTENDED_TOOLS_SCHEMA = [
         "parameters": {"type": "object", "properties": {
             "args": {"type": "string", "description": "Raw CLI arguments, e.g. 'chat message send --user user123 --text hello'"},
         }, "required": ["args"]}
+    }},
+    {"type": "function", "function": {
+        "name": "generate_image",
+        "description": "Generate an image using AI image generation model (sensenova-u1-fast / DALL-E compatible). 需要先在设置页面→图片生成中配置 API Key，或传入 api_key 参数。支持 1024x1024、1536x1024、1024x1536、2752x1536 等尺寸。",
+        "parameters": {"type": "object", "properties": {
+            "prompt": {"type": "string", "description": "Image description (中文/English), be detailed for best results"},
+            "size": {"type": "string", "description": "Image size, e.g. 1024x1024, 1536x1024, 1024x1536, 2752x1536 (default: 1024x1024)"},
+            "n": {"type": "integer", "description": "Number of images to generate (1-4, default: 1)"},
+            "api_key": {"type": "string", "description": "Optional: override API key. 留空则使用设置中配置的 Key"},
+            "base_url": {"type": "string", "description": "Optional: override API base URL (default: https://token.sensenova.cn/v1)"},
+            "model": {"type": "string", "description": "Optional: override model name (default: sensenova-u1-fast)"},
+        }, "required": ["prompt"]}
+    }},
+    {"type": "function", "function": {
+        "name": "call_xiaoer",
+        "description": "让愣小二（本地轻量模型）处理简单子任务：翻译、提取、格式化、分类等。结果返回文本。适合于把杂活甩给小弟干。",
+        "parameters": {"type": "object", "properties": {
+            "prompt": {"type": "string", "description": "给愣小二的指令，要清晰具体，例如'把以下内容翻译成英文'、'从这段话中提取所有日期'"},
+        }, "required": ["prompt"]}
     }},
 ]
 
