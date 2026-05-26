@@ -61,6 +61,49 @@ class SearchConfig:
 
 
 @dataclass
+class ImageGenConfig:
+    enabled: bool = False
+    api_key: str = ""
+    base_url: str = "https://token.sensenova.cn/v1"
+    model_id: str = "sensenova-u1-fast"
+
+
+@dataclass
+class LocalModelConfig:
+    enabled: bool = False
+    model_path: str = ""
+    port: int = 8080
+    context_size: int = 32768
+    gpu_layers: int = -1
+    confidence_threshold: float = 0.3
+    fallback_on_failure: bool = True
+    keywords_local: list = field(default_factory=lambda: [
+        "翻译", "总结", "提取", "分类", "整理",
+        "编写", "生成", "列出", "列举", "改写",
+        "translate", "summarize", "extract", "list",
+    ])
+    keywords_cloud_analysis: list = field(default_factory=lambda: [
+        "分析", "对比", "评估", "预测", "推理",
+        "优化", "诊断", "investigate", "analyze",
+    ])
+    keywords_cloud_creation: list = field(default_factory=lambda: [
+        "创作", "设计", "策划", "制定", "撰写",
+        "方案", "计划", "报告", "proposal",
+    ])
+    keywords_cloud_external: list = field(default_factory=lambda: [
+        "汇率", "关税", "政策", "新闻", "天气",
+        "股价", "搜索", "查询", "找一下",
+    ])
+    keywords_step: list = field(default_factory=lambda: [
+        r"先.*再", r"首先.*然后", r"第一步.*第二步",
+    ])
+    local_calls: int = 0
+    cloud_calls: int = 0
+    tokens_saved: int = 0
+    fallback_count: int = 0
+
+
+@dataclass
 class AppConfig:
     DEFAULT_CONFIG_PATH: str = DEFAULT_CONFIG_PATH
     data_dir: str = os.path.expanduser("~/OAA")
@@ -70,6 +113,8 @@ class AppConfig:
     dingtalk: DingTalkConfig = field(default_factory=DingTalkConfig)
     feishu: FeishuConfig = field(default_factory=FeishuConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    image_gen: ImageGenConfig = field(default_factory=ImageGenConfig)
+    local_model: LocalModelConfig = field(default_factory=LocalModelConfig)
     permissions: dict = field(default_factory=lambda: {
         "blacklist_paths": [],
         "require_confirm": ["email_send", "wechat_send"],
@@ -116,6 +161,9 @@ class AppConfig:
             for key in search_keys:
                 if data["search"].get(key):
                     data["search"][key] = self._redact(data["search"][key])
+        # Redact image_gen API key
+        if isinstance(data.get("image_gen"), dict) and data["image_gen"].get("api_key"):
+            data["image_gen"]["api_key"] = self._redact(data["image_gen"]["api_key"])
         return data
 
     async def save(self, path: str = ""):
@@ -182,6 +230,8 @@ class AppConfig:
         dingtalk = DingTalkConfig(**data.get("dingtalk", {}))
         feishu = FeishuConfig(**data.get("feishu", {}))
         search = SearchConfig(**data.get("search", {}))
+        image_gen = ImageGenConfig(**data.get("image_gen", {}))
+        local_model = LocalModelConfig(**data.get("local_model", {}))
         perms = data.get("permissions", {})
         # Normalize legacy string format to dict
         if isinstance(perms, str):
@@ -192,5 +242,7 @@ class AppConfig:
             wechat=wechat,
             dingtalk=dingtalk, feishu=feishu,
             search=search,
+            image_gen=image_gen,
+            local_model=local_model,
             permissions=perms,
         )
