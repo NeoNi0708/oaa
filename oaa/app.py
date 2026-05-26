@@ -86,23 +86,30 @@ class OAAApp:
         self.desktop._worker = self.worker
 
         # Wire management handler for non-chat WebSocket operations
-        self.desktop.set_management_handler(
-            ManagementHandler(
-                config=self.config,
-                scheduler=self.scheduler,
-                skill_mgr=self.agent.skill_mgr,
-                evolution=self.evolution,
-                channel_adapters=self.channel_adapters,
-                agent=self.agent,
-            )
+        mgmt = ManagementHandler(
+            config=self.config,
+            scheduler=self.scheduler,
+            skill_mgr=self.agent.skill_mgr,
+            evolution=self.evolution,
+            channel_adapters=self.channel_adapters,
+            agent=self.agent,
         )
+        self._mgmt = mgmt
+        self.desktop.set_management_handler(mgmt)
+
+        # Wire self-healing: when a management operation fails, route the
+        # diagnostic prompt to the agent so it can read + fix its own code.
+        mgmt.set_heal_callback(
+            lambda prompt: asyncio.create_task(self._agent_heal(prompt))
+        )
+
+        # Wire real-time push notifications for scheduler and proposal store
+        self.scheduler.set_notify_callback(mgmt._push_notification)
+        if self.agent._proposal_store:
+            self.agent._proposal_store.set_notify_callback(mgmt._push_notification)
 
         # Wire user-confirmation callback so that ask_user reaches the GUI
         self.permissions.set_confirm_callback(self.desktop.create_confirm_callback())
-
-        # Start channel healthcheck loop (management handler is set inside desktop)
-        if self.desktop._management is not None:
-            self.desktop._management.start_healthcheck()
 
     def _register_channels(self):
         """Register channel adapters. Channels are enabled whenever credentials are present."""
@@ -153,6 +160,10 @@ class OAAApp:
                 except Exception as exc:
                     logger.warning("Failed to start channel '%s': %s", name, exc)
 
+        # Start healthcheck loop — event loop is now running
+        if self.desktop._management is not None:
+            self.desktop._management.start_healthcheck()
+
         logger.info("Starting worker agent...")
         await self.worker.start()
         logger.info("Starting task scheduler...")
@@ -164,25 +175,51 @@ class OAAApp:
             delivery = task.get("delivery_channels", ["chat", "wechat"])
             logger.info("Executor running task: %s → channels: %s", name, delivery)
             try:
+                # Notify start
+                if "chat" in delivery:
+                    await self.desktop.notify_all(
+                        f"## 📋 定时任务：{name}\n---\n",
+                        msg_type="llm_output",
+                    )
                 full_prompt = (
-                    f"【定时任务执行】{name}\n\n"
-                    f"{prompt}\n\n"
-                    f"执行完成后，将结果通过以下渠道交付：{', '.join(delivery)}。"
-                    f"使用 wechat_send_text 发送微信、直接输出到对话页面。"
+                    f"[定时任务] {name}\n\n任务要求：{prompt}\n\n"
+                    f"请直接输出格式化的 Markdown 报告（使用标题、表格、列表等排版）。"
                 )
                 result_text = ""
                 async for chunk in self.agent.process_message(full_prompt, history=[]):
-                    if chunk["type"] == "done":
-                        result_text = chunk.get("content", "")
+                    if chunk["type"] == "llm_output":
+                        result_text += chunk.get("content", "")
+                        if "chat" in delivery:
+                            await self.desktop.notify_all(chunk.get("content", ""))
+                    elif chunk["type"] == "done":
+                        result_text = chunk.get("content", result_text)
+
+                report = result_text.strip() or "(无文本输出)"
+
+                if "chat" in delivery:
+                    await self.desktop.notify_all(
+                        f"\n\n✅ **任务「{name}」执行完毕**\n---",
+                        msg_type="llm_output",
+                    )
+                    await self.desktop.notify_all("", msg_type="done")
+
                 if "wechat" in delivery:
                     wechat = self.channel_adapters.get("wechat")
-                    if wechat and wechat.is_authenticated and wechat._bot_user_id:
-                        summary = (result_text[:500] + "...") if len(result_text) > 500 else result_text
-                        await wechat.send_message(wechat._bot_user_id,
-                            f"📋 [{name}] 执行完成：\n\n{summary or '(无文本输出)'}")
+                    if wechat and wechat.is_authenticated:
+                        if wechat._bot_user_id:
+                            summary = (report[:500] + "……") if len(report) > 500 else report
+                            await wechat.send_message(wechat._bot_user_id,
+                                f"📋 [{name}] 执行完成：\n\n{summary}")
+                        else:
+                            logger.warning("WeChat delivery skipped: _bot_user_id not set")
+                    else:
+                        logger.warning("WeChat delivery skipped: adapter not authenticated")
                 logger.info("Scheduled task '%s' executed successfully", name)
             except Exception as exc:
                 logger.error("Scheduled task '%s' execution failed: %s", name, exc)
+                if "chat" in delivery:
+                    await self.desktop.notify_all(f"\n\n❌ 任务执行失败：{exc}", msg_type="llm_output")
+                    await self.desktop.notify_all("", msg_type="done")
 
         self.scheduler.set_due_callback(_executor_run)
         asyncio.create_task(self.scheduler.start_loop())
@@ -217,6 +254,10 @@ class OAAApp:
 
         # Wire a callback so management.py can send welcome when a new channel authenticates
         self.agent._on_channel_ready = self._notify_channel
+
+        # 启动本地模型（愣小二）
+        if self.config.local_model.enabled:
+            asyncio.create_task(self._start_local_llm())
 
         # Fix stale running proposals from previous session (app crash / kill)
         if self.agent._proposal_store:
@@ -297,6 +338,24 @@ class OAAApp:
         except Exception as exc:
             logger.warning("Agent welcome for channel %s failed: %s", channel, exc)
 
+    async def _agent_heal(self, diagnostic_prompt: str):
+        """Self-healing: fire a diagnostic prompt at the agent in background.
+        The agent uses read_own_source + self_improve to diagnose and fix
+        application code issues reported by management operations."""
+        logger.info("Self-healing triggered")
+        try:
+            async for chunk in self.agent.process_message(diagnostic_prompt, history=[]):
+                if chunk["type"] == "llm_output":
+                    await self.desktop.notify_all(chunk["content"])
+            await self.desktop.notify_all("", msg_type="done")
+            # After healing, clear cached managers so fixes take effect
+            # without requiring a full app restart.
+            if hasattr(self, '_mgmt') and self._mgmt:
+                self._mgmt._email_cfg = None
+            logger.info("Self-healing agent task completed — caches cleared")
+        except Exception as exc:
+            logger.warning("Self-healing agent task failed: %s", exc)
+
     async def _startup_check(self):
         """Wait for Desktop GUI client, then trigger agent-driven startup reports."""
         try:
@@ -314,8 +373,73 @@ class OAAApp:
         except Exception as exc:
             logger.warning("Startup check failed: %s", exc)
 
+    async def _start_local_llm(self):
+        """后台启动 llama-server，不阻塞主流程。"""
+        from ..llm import LLMClient
+        from ..config import ModelConfig
+
+        try:
+            # 动态导入 scripts/local_llm_manager（scripts/ 与 oaa/ 同级）
+            import importlib
+            _scripts_path = os.path.join(os.path.dirname(__file__), "..", "..", "scripts")
+            if _scripts_path not in sys.path:
+                sys.path.insert(0, os.path.abspath(_scripts_path))
+            mgr = importlib.import_module("local_llm_manager")
+            detect_gpu = mgr.detect_gpu
+            get_llama_server_path = mgr.get_llama_server_path
+            find_model = mgr.find_model
+            start_llama_server = mgr.start_llama_server
+            wait_for_server = mgr.wait_for_server
+
+            model_path = find_model(self.config.data_dir)
+            if not model_path:
+                logger.warning("未找到 GGUF 模型，愣小二不可用")
+                return
+
+            gpu = detect_gpu()
+            opts = get_llama_server_path(gpu)[1]
+            self._llama_proc = start_llama_server(
+                model_path, gpu_info=gpu,
+                port=self.config.local_model.port,
+                context_size=self.config.local_model.context_size,
+            )
+            if not self._llama_proc:
+                logger.warning("llama-server 启动失败")
+                return
+
+            ready = await asyncio.get_event_loop().run_in_executor(
+                None, wait_for_server, self.config.local_model.port, 60
+            )
+            if ready:
+                logger.info("愣小二就绪")
+                local_cfg = ModelConfig(
+                    provider="local-gguf",
+                    base_url=f"http://127.0.0.1:{self.config.local_model.port}/v1",
+                    api_key="not-needed",
+                    model_id="local-gguf",
+                )
+                local_llm = LLMClient(local_cfg)
+                self.agent.set_local_llm(local_llm)
+                logger.info("本地模型 LLMClient 已注入 agent")
+            else:
+                logger.warning("llama-server 未能在 60s 内就绪")
+        except Exception as e:
+            logger.warning(f"本地模型启动失败: {e}")
+
     async def stop(self):
         logger.info("Shutting down...")
+        # 关闭 llama-server
+        if hasattr(self, '_llama_proc') and self._llama_proc:
+            try:
+                self._llama_proc.terminate()
+                self._llama_proc.wait(timeout=10)
+            except Exception:
+                if self._llama_proc:
+                    self._llama_proc.kill()
+            self._llama_proc = None
+        if hasattr(self.agent, 'stop_local_llm'):
+            await self.agent.stop_local_llm()
+
         await self.agent._idle_inspector.stop_background()
         await self.worker.stop()
         self.scheduler.stop_loop()
