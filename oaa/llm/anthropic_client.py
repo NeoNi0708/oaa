@@ -166,3 +166,7 @@ class AnthropicClient:
             thinking=thinking_content,
             finish_reason=stop_reason,
         )
+
+    async def close(self):
+        """Close the underlying HTTP client."""
+        await self._http_client.aclose()

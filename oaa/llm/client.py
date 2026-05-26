@@ -134,6 +134,10 @@ class _OpenAIClient:
                        len(content), len(result_tool_calls), finish_reason)
         return LLMResponse(content=content, tool_calls=result_tool_calls, thinking=thinking, finish_reason=finish_reason)
 
+    async def close(self):
+        """Close the underlying HTTP client."""
+        await self._client.close()
+
 
 class LLMClient:
     """Unified LLM client — delegates to OpenAI or Anthropic backend.
@@ -177,6 +181,11 @@ class LLMClient:
 
     def set_tools(self, tools: list):
         self._backend.set_tools(tools)
+
+    async def close(self):
+        """Close the backend client (release HTTP connections)."""
+        if hasattr(self._backend, 'close'):
+            await self._backend.close()
 
     async def chat(self, messages: list) -> LLMResponse:
         response = await self._backend.chat(messages)

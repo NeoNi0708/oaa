@@ -18,12 +18,15 @@ from .idle_inspector import IdleInspector
 from .loop import AgentLoop
 from . import system_rules as _sys_rules
 from . import tool_groups as _tool_groups
+from .contract import TaskContract
 from .conversation_archiver import ConversationArchiver
+from .policy import PolicyEngine
 from .memory_manager import MemoryManager
 from .skill_manager import SkillManager
 from .tool_schema import ATOMIC_TOOLS_SCHEMA, BROWSER_TOOLS_SCHEMA, DINGTALK_TOOLS_SCHEMA, EXTENDED_TOOLS_SCHEMA, FEISHU_TOOLS_SCHEMA, MCP_TOOLS_SCHEMA, WECHAT_TOOLS_SCHEMA
 from .tool_decorator import collect_tool_schemas
 from .tools import AtomicTools
+from .complexity_evaluator import ComplexityEvaluator
 from .metrics import MetricsCollector
 
 logger = get_logger("agent.oaa_agent")
@@ -149,6 +152,7 @@ class OAAAgent:
             config.data_dir, permissions=permissions, wechat_adapter=wechat_adapter,
             dingtalk_client_id=config.dingtalk.client_id,
             dingtalk_client_secret=config.dingtalk.client_secret,
+            image_gen_config=config.image_gen,
         )
         self.extended.set_skill_manager(self.skill_mgr)
         self.browser = BrowserTools()
@@ -178,6 +182,121 @@ class OAAAgent:
 
         # Visible schema = core + loaded groups (rebuilt after each group load/unload)
         self._tools_schema: list[dict] = self._build_visible_schema()
+
+        # P2 Skill plugin state (None = no plugin active)
+        self._active_skill_plugin: str | None = None
+        self._plugin_extra_prompt: str = ""
+
+        # P4 Policy engine — runtime rule enforcement for tool calls
+        self._policy_engine = PolicyEngine()
+
+        # 本地模型 evaluator（仅用于路由判断，local_llm 由 OAAApp 注入）
+        _local_cfg = config.local_model
+        _eval_config = {
+            "confidence_threshold": _local_cfg.confidence_threshold,
+            "keywords_local": _local_cfg.keywords_local,
+            "keywords_cloud_analysis": _local_cfg.keywords_cloud_analysis,
+            "keywords_cloud_creation": _local_cfg.keywords_cloud_creation,
+            "keywords_cloud_external": _local_cfg.keywords_cloud_external,
+            "keywords_step": _local_cfg.keywords_step,
+        }
+        self._evaluator = ComplexityEvaluator(_eval_config)
+        self.local_llm = None       # 由 OAAApp 在 llama-server 就绪后注入
+        self._local_fallback = False  # True 时跳过 evaluator，直接走云端
+
+    def set_local_llm(self, llm_client):
+        """注入本地模型的 LLMClient 实例。由 OAAApp 在 llama-server 就绪后调用。"""
+        self.local_llm = llm_client
+        logger.info("本地模型 LLMClient 已注入")
+
+    async def _run_local(self, user_input: str) -> AsyncGenerator[dict, None]:
+        """本地模型简化路径——单次 LLM 调用，无 agent loop。"""
+        local_prompt = (
+            "你是愣小二，二愣（AI 助手）的得力小弟。\n\n"
+            "你能做:\n"
+            "- 翻译、总结、提取信息、分类整理\n"
+            "- 编写简单代码、格式化输出\n"
+            "- 回答常识问题（不需查资料）\n\n"
+            "你不能做（说'这个得叫我大哥来'）:\n"
+            "- 数学计算、复杂推理\n"
+            "- 查资料、搜索、读文件\n"
+            "- 分析商业问题、多步推理\n\n"
+            "回答简短直接，不确定不强答。"
+        )
+        yield {"type": "status", "content": "愣小二正在处理..."}
+        try:
+            response = await self.local_llm.chat([
+                {"role": "system", "content": local_prompt},
+                {"role": "user", "content": user_input},
+            ])
+            content = (response.content or "").strip()
+
+            # 质量门禁
+            quality = self._check_local_quality(content, user_input)
+            if not quality["passed"]:
+                logger.info(f"Local quality check failed: {quality['reason']}, falling back to cloud")
+                self.config.local_model.fallback_count += 1
+                async for chunk in self._cloud_fallback(user_input):
+                    yield chunk
+                return
+
+            # 统计
+            self.config.local_model.local_calls += 1
+            if hasattr(response, 'usage') and response.usage:
+                self.config.local_model.tokens_saved += (
+                    response.usage.get("total_tokens", 0)
+                )
+
+            yield {"type": "llm_output", "content": content}
+            yield {"type": "done", "content": content, "route": "local"}
+
+        except Exception as e:
+            logger.warning(f"Local model failed: {e}, falling back to cloud")
+            self.config.local_model.fallback_count += 1
+            async for chunk in self._cloud_fallback(user_input):
+                yield chunk
+
+    def _check_local_quality(self, output: str, input_text: str) -> dict:
+        """检查本地模型输出质量。返回 {"passed": bool, "reason": str}。"""
+        if len(output) < 5:
+            return {"passed": False, "reason": "output_too_short"}
+        # 检测重复循环（连续重复的短句）
+        words = output.split()
+        if len(words) >= 6:
+            for window in [2, 3]:
+                segments = [
+                    " ".join(words[i:i+window])
+                    for i in range(0, len(words), window)
+                ]
+                if any(segments.count(s) > 3 for s in segments):
+                    return {"passed": False, "reason": "repetition"}
+        # 模型明确认输
+        GIVEUP = ("这个得叫我大哥来", "叫大哥", "需要更强大的模型")
+        if any(kw in output for kw in GIVEUP):
+            return {"passed": False, "reason": "model_gave_up"}
+        # 与输入关键词重叠率太低（简单校验）
+        input_kws = set(w for w in input_text.split() if len(w) > 1)
+        output_kws = set(w for w in output.split() if len(w) > 1)
+        if input_kws and output_kws:
+            overlap = len(input_kws & output_kws) / len(input_kws)
+            if overlap < 0.05:
+                return {"passed": False, "reason": "irrelevant_output"}
+        return {"passed": True, "reason": ""}
+
+    async def _cloud_fallback(self, user_input: str, history=None) -> AsyncGenerator[dict, None]:
+        """降级路径：跳过 evaluator，直接走云端完整 agent loop。"""
+        self._local_fallback = True
+        try:
+            async for chunk in self.process_message(user_input, history=history):
+                yield chunk
+        finally:
+            self._local_fallback = False
+
+    async def stop_local_llm(self):
+        """关闭本地 LLM 连接。"""
+        if self.local_llm:
+            await self.local_llm.close()
+            self.local_llm = None
 
     def set_channel_adapters(self, adapters: dict):
         """Inject runtime channel adapter instances for status introspection.
@@ -287,15 +406,65 @@ class OAAAgent:
     def get_loaded_groups(self) -> list[str]:
         return sorted(self._loaded_groups)
 
+    # ── P2 Skill Plugin ──────────────────────────────────────────
+
+    def apply_skill_plugin(self, skill_name: str) -> bool:
+        """Activate a skill plugin: filter tool schema, inject identity + rules.
+
+        Called by AgentLoop after detecting a ``skill_load`` tool call mid-turn.
+        Returns True if the plugin was applied successfully.
+        """
+        skill = self.skill_mgr.get(skill_name)
+        if not skill:
+            return False
+
+        self._active_skill_plugin = skill_name
+
+        # Build extra prompt section from identity.md and rules.json
+        extra_parts = []
+        if skill.identity_md:
+            extra_parts.append(f"# 技能身份\n\n{skill.identity_md.strip()}")
+        if skill.rules_data:
+            rules = skill.rules_data.get("rules", [])
+            if rules:
+                extra_parts.append("# 技能规则\n\n" + "\n".join(f"- {r}" for r in rules))
+        self._plugin_extra_prompt = "\n\n".join(extra_parts)
+
+        # Filter tool schema: keep only core tools + skill's tools
+        if skill.tool_names:
+            self._tools_schema = [
+                s for s in self._all_tools_schema
+                if _get_schema_name(s) not in _tool_groups._TOOL_GROUP
+                or _get_schema_name(s) in skill.tool_names
+            ]
+        # If skill has no tools.json, schema stays unchanged
+
+        # P4: load enforceable policies from skill's rules.json
+        if skill.rules_data:
+            self._policy_engine.load_rules(skill.rules_data)
+
+        return True
+
+    def remove_skill_plugin(self):
+        """Deactivate the active skill plugin and restore defaults."""
+        self._active_skill_plugin = None
+        self._plugin_extra_prompt = ""
+        self._policy_engine.clear()
+        self._tools_schema = self._build_visible_schema()
+
+    def build_skill_plugin_prompt(self, base_prompt: str) -> str:
+        """Return system prompt with skill plugin extras appended."""
+        if self._plugin_extra_prompt:
+            return base_prompt + "\n\n" + self._plugin_extra_prompt
+        return base_prompt
+
     def build_system_prompt(self, skill_name: str = "") -> str:
         """Build a system prompt from identity data, tools awareness, and optional skill context."""
-        if skill_name:
-            skill = self.skill_mgr.get(skill_name)
-            if skill and skill.skill_md:
-                base = skill.build_system_prompt(self.identity)
-                return self._inject_tools_awareness(base)
-
-        return self._inject_tools_awareness(self._identity_only_prompt())
+        base = self._inject_tools_awareness(self._identity_only_prompt())
+        # P2 skill plugin: inject identity + rules if a skill is persistently active
+        if self._plugin_extra_prompt:
+            base += "\n\n" + self._plugin_extra_prompt
+        return base
 
     def _identity_only_prompt(self) -> str:
         """Fallback system prompt assembled from identity files only."""
@@ -309,16 +478,48 @@ class OAAAgent:
         return "\n\n".join(p.strip() for p in parts if p.strip())
 
     def _build_skill_listing(self) -> str:
-        """Build a formatted list of available skills with descriptions."""
+        """Build a compact, category-grouped listing of available skills.
+
+        Implements progressive disclosure Level 1: shows only name and
+        short description per skill.  Full instructions are loaded on
+        demand via ``skill_load()``.
+
+        Returns a markdown string grouped by category, or ``"(无)"``.
+        """
         skills = self.skill_mgr.list_with_descriptions()
         if not skills:
             return "(无)"
-        lines = []
+
+        # Group by category
+        groups: dict[str, list[str]] = {}
         for s in skills:
+            cat = s["category"] or "其他"
+            groups.setdefault(cat, [])
             desc = s["description"]
-            if len(desc) > 80:
-                desc = desc[:77] + "..."
-            lines.append(f"- `{s['name']}`（{s['category']}）— {desc}")
+            if len(desc) > 60:
+                desc = desc[:57] + "..."
+            groups[cat].append(f"`{s['name']}` — {desc}")
+
+        lines = []
+        # Sort categories: put "外贸业务核心" first if present, then alphabetical
+        def _cat_key(item: tuple[str, list[str]]) -> int:
+            name = item[0]
+            if name == "外贸业务核心":
+                return 0
+            if name == "系统与自进化":
+                return 1
+            return 2
+
+        for cat, skill_lines in sorted(groups.items(), key=_cat_key):
+            lines.append(f"> **{cat}**")
+            for sl in skill_lines:
+                lines.append(f"  - {sl}")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("使用 `skill_load(\"技能名称\")` 加载完整操作指南。"
+                     "用完记得 `skill_unload(\"技能名称\")` 释放上下文空间。")
+
         return "\n".join(lines)
 
     def _inject_tools_awareness(self, base_prompt: str) -> str:
@@ -401,7 +602,9 @@ class OAAAgent:
 
 ## 核心规则
 
-{_sys_rules.SYSTEM_RULES}
+{_sys_rules.SHORT_RULES}
+
+（完整规则可通过 read_own_source("oaa/agent/system_rules.py") 查看）
 
 ## 可用技能
 
@@ -462,20 +665,24 @@ class OAAAgent:
 
         # Inject recent conversation summaries for context warmth
         if self.archiver:
-            recent = self.archiver.load_recent_summaries(limit=3)
+            recent = self.archiver.load_recent_summaries(limit=1)
             if recent:
                 result += "\n\n## 近期对话摘要\n\n以下是你近期完成的工作和讨论的话题。当你觉得用户的问题可能是「继续之前的话题」时，在这里找找线索：\n\n" + recent
 
-        # Inject tool-group directory (compact listing, ~200 tokens)
+        # Inject tool-group directory — only show unloaded groups
         result += "\n\n## 工具组目录\n\n"
-        result += "当前可见的工具只是核心高频工具。更多专用工具按需加载：\n\n"
         loaded = self._loaded_groups
-        for g, count in sorted(_tool_groups.GROUP_INDEX.items()):
-            marker = "✅ 已加载" if g in loaded else "📦"
-            result += f"- {marker} **{g}** ({count} 个工具)\n"
+        unloaded = {g: c for g, c in _tool_groups.GROUP_INDEX.items() if g not in loaded}
+        if loaded:
+            result += f"已加载: {', '.join(sorted(loaded))}\n\n"
+        if unloaded:
+            result += "更多专用工具按需加载：\n\n"
+            for g, count in sorted(unloaded.items()):
+                result += f"- 📦 **{g}** ({count} 个工具)\n"
+        else:
+            result += "（所有工具组均已加载）\n"
         result += (
             "\n使用 `tool_group_load` 加载需要的组，`tool_group_list` 查看各组详情。"
-            "工具加载后在整个会话期间保持可用。"
         )
 
         return result
@@ -500,24 +707,55 @@ class OAAAgent:
         """
         logger.info("Processing message: %s...", user_input[:80])
 
+        # Step 0: 本地模型路由（仅在本地模型启用且就绪时，跳过 evaluator 降级路径）
+        if not self._local_fallback and self.config.local_model.enabled and self.local_llm:
+            decision = self._evaluator.evaluate(user_input)
+            if decision.route == "local":
+                logger.info(f"Route to LOCAL (score={decision.score}): {decision.reasons}")
+                async for chunk in self._run_local(user_input):
+                    yield chunk
+                return
+            elif decision.override and decision.route == "cloud":
+                logger.info(f"Route to CLOUD (user override @cloud)")
+                self._evaluator.record_correction(user_input)
+            else:
+                self.config.local_model.cloud_calls += 1
+        else:
+            self.config.local_model.cloud_calls += 1
+
         # Step 1: System prompt (always uses identity-only, model selects skill)
         system_prompt = self.build_system_prompt()
 
         # Step 2: Handler
         handler = self.build_handler()
 
-        # Step 3: Build fallback models list (all providers except active, with valid keys)
+        # Step 3: Build fallback models list (all entries except the exact active model)
         active_provider = self.config.model.provider
+        active_model_id = self.config.model.model_id
+        active_api_key = self.config.model.api_key
         fallbacks = []
         for prov, entries in self.config.models.items():
-            if prov == active_provider or not entries:
+            if not entries:
                 continue
-            entry = entries[0] if isinstance(entries, list) else entries
-            if isinstance(entry, dict) and entry.get("api_key") and entry.get("model_id"):
+            entry_list = entries if isinstance(entries, list) else [entries]
+            for entry in entry_list:
+                if not isinstance(entry, dict):
+                    continue
+                # Skip if it's the exact same model currently active
+                if prov == active_provider and entry.get("model_id") == active_model_id:
+                    continue
+                api_key = entry.get("api_key", "")
+                model_id = entry.get("model_id", "")
+                if not api_key or not model_id:
+                    continue
+                # Resolve redacted key against active model's key
+                if "****" in api_key and active_api_key and "****" not in active_api_key:
+                    if api_key[:4] == active_api_key[:4] and api_key[-4:] == active_api_key[-4:]:
+                        api_key = active_api_key
                 fallbacks.append({
                     "provider": prov,
-                    "api_key": entry["api_key"],
-                    "model_id": entry["model_id"],
+                    "api_key": api_key,
+                    "model_id": model_id,
                     "base_url": entry.get("base_url", ""),
                     "api_format": entry.get("api_format", ""),
                 })
@@ -530,6 +768,8 @@ class OAAAgent:
             memory_mgr=self.memory,
             metrics_collector=self.metrics,
             model_fallbacks=fallbacks,
+            agent=self,  # P2 skill plugin
+            policy_engine=self._policy_engine,  # P4 policy enforcement
         )
         loop.set_skill_context(system_prompt)
 
@@ -552,6 +792,10 @@ class OAAAgent:
         final_result = ""
         timed_out = False
 
+        # P3 Product Contract: auto-track task execution
+        contract = TaskContract(self.config.data_dir)
+        contract.start(user_input)
+
         try:
             while True:
                 chunk = await asyncio.wait_for(chunk_queue.get(), timeout=_PROCESS_TIMEOUT)
@@ -562,6 +806,18 @@ class OAAAgent:
                     # Track which skill the LLM loaded for this task
                     if chunk["name"] == "skill_load" and not skill_loaded:
                         skill_loaded = chunk.get("args", {}).get("name", "") or None
+                    # P3: record step
+                    contract.add_step(chunk["name"], chunk.get("args", {}))
+                elif chunk["type"] == "tool_result":
+                    # P3: complete step
+                    contract.complete_step(
+                        chunk.get("name", "?"),
+                        chunk.get("result"),
+                        chunk.get("duration", 0),
+                    )
+                elif chunk["type"] == "status":
+                    # P3: record status updates
+                    contract.update_status(chunk.get("content", ""))
                 elif chunk["type"] == "done":
                     final_result = chunk.get("content", "")
                     # Record activity time + task context for lineB idle detection
@@ -578,12 +834,14 @@ class OAAAgent:
         except asyncio.TimeoutError:
             timed_out = True
             producer.cancel()
-            msg = f"处理超时（超过{_PROCESS_TIMEOUT // 60}分钟），请重试或拆分问题"
+            final_result = f"处理超时（超过{_PROCESS_TIMEOUT // 60}分钟），请重试或拆分问题"
             logger.warning("process_message timed out after %ds", _PROCESS_TIMEOUT)
-            yield {"type": "done", "content": msg}
+            yield {"type": "done", "content": final_result}
         finally:
             if not producer.done():
                 producer.cancel()
+            # P3: always finalize the task contract
+            contract.finish(final_result)
 
         # Post-processing — skip on timeout (trajectory may be incomplete)
         if not timed_out:
