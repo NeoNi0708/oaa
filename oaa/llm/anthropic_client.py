@@ -14,6 +14,7 @@ class AnthropicResponse:
     tool_calls: list = field(default_factory=list)
     thinking: str = ""
     finish_reason: str = ""
+    usage: dict = field(default_factory=dict)
 
 
 def _openai_tool_to_anthropic(tool: dict) -> dict:
@@ -148,6 +149,11 @@ class AnthropicClient:
                 elif event.type == "message_delta":
                     if event.delta.stop_reason:
                         stop_reason = event.delta.stop_reason
+                    if hasattr(event, 'usage') and event.usage:
+                        usage = {
+                            "input_tokens": getattr(event.usage, 'input_tokens', None),
+                            "output_tokens": getattr(event.usage, 'output_tokens', None),
+                        }
 
         from .client import ToolCall, ToolCallFunction
         result_tool_calls = []
@@ -158,13 +164,14 @@ class AnthropicClient:
                 function=ToolCallFunction(name=tb["name"], arguments=tb["arguments"]),
             ))
 
-        logger.debug("anthropic chat done: text_len=%d tool_calls=%d stop_reason=%s",
-                       len(text_content), len(result_tool_calls), stop_reason)
+        logger.debug("anthropic chat done: text_len=%d tool_calls=%d stop_reason=%s usage=%s",
+                       len(text_content), len(result_tool_calls), stop_reason, usage)
         return AnthropicResponse(
             content=text_content,
             tool_calls=result_tool_calls,
             thinking=thinking_content,
             finish_reason=stop_reason,
+            usage=usage,
         )
 
     async def close(self):

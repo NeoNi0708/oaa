@@ -45,6 +45,7 @@ OAA_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file_
 # The per-LLM-call timeout in loop.py (_LLM_TIMEOUT=90s) is shorter — this is
 # the safety net for infinite tool-call loops or unresponsive tool chains.
 _PROCESS_TIMEOUT = 600  # 10 minutes
+_LOCAL_GIVEUP_PHRASES = ("这个得叫我大哥来", "叫大哥", "需要更强大的模型")
 
 
 class _MergedHandler(BaseHandler):
@@ -271,8 +272,7 @@ class OAAAgent:
                 if any(segments.count(s) > 3 for s in segments):
                     return {"passed": False, "reason": "repetition"}
         # 模型明确认输
-        GIVEUP = ("这个得叫我大哥来", "叫大哥", "需要更强大的模型")
-        if any(kw in output for kw in GIVEUP):
+        if any(kw in output for kw in _LOCAL_GIVEUP_PHRASES):
             return {"passed": False, "reason": "model_gave_up"}
         # 与输入关键词重叠率太低（简单校验）
         input_kws = set(w for w in input_text.split() if len(w) > 1)
@@ -295,7 +295,10 @@ class OAAAgent:
     async def stop_local_llm(self):
         """关闭本地 LLM 连接。"""
         if self.local_llm:
-            await self.local_llm.close()
+            try:
+                await self.local_llm.close()
+            except Exception:
+                logger.warning("关闭本地 LLM 连接时出错", exc_info=True)
             self.local_llm = None
 
     def set_channel_adapters(self, adapters: dict):
@@ -718,6 +721,7 @@ class OAAAgent:
             elif decision.override and decision.route == "cloud":
                 logger.info(f"Route to CLOUD (user override @cloud)")
                 self._evaluator.record_correction(user_input)
+                self.config.local_model.cloud_calls += 1
             else:
                 self.config.local_model.cloud_calls += 1
         else:

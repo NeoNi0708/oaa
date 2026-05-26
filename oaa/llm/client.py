@@ -28,6 +28,7 @@ class LLMResponse:
     tool_calls: list = field(default_factory=list)
     thinking: str = ""
     finish_reason: str = ""  # "stop" | "length" | "tool_calls" | "content_filter" | "end_turn" | "max_tokens"
+    usage: dict = field(default_factory=dict)  # token usage info from provider
 
 
 class _OpenAIClient:
@@ -96,12 +97,22 @@ class _OpenAIClient:
         thinking = ""
         finish_reason = ""
 
+        usage = {}
+
         async for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
             if not delta:
                 # Capture finish_reason from the last choice (non-delta chunk)
                 if chunk.choices and chunk.choices[0].finish_reason:
                     finish_reason = chunk.choices[0].finish_reason
+                # Capture usage from the final chunk (choices=[], usage present)
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    u = chunk.usage
+                    usage = {
+                        "prompt_tokens": getattr(u, 'prompt_tokens', None),
+                        "completion_tokens": getattr(u, 'completion_tokens', None),
+                        "total_tokens": getattr(u, 'total_tokens', None),
+                    }
                 continue
             if delta.content:
                 content += delta.content
@@ -130,9 +141,9 @@ class _OpenAIClient:
                 function=ToolCallFunction(name=tc["function"]["name"], arguments=tc["function"]["arguments"]),
             ))
 
-        logger.debug("openai chat done: text_len=%d tool_calls=%d finish_reason=%s",
-                       len(content), len(result_tool_calls), finish_reason)
-        return LLMResponse(content=content, tool_calls=result_tool_calls, thinking=thinking, finish_reason=finish_reason)
+        logger.debug("openai chat done: text_len=%d tool_calls=%d finish_reason=%s usage=%s",
+                       len(content), len(result_tool_calls), finish_reason, usage)
+        return LLMResponse(content=content, tool_calls=result_tool_calls, thinking=thinking, finish_reason=finish_reason, usage=usage)
 
     async def close(self):
         """Close the underlying HTTP client."""
