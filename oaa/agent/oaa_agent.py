@@ -100,6 +100,13 @@ class OAAAgent:
         ensure_data_dir(config.data_dir)
         ensure_bundled_cli(config.data_dir)
 
+        # 本地模型自动安装（只在启用配置时才检查）
+        if config.local_model.enabled:
+            from ..init import ensure_local_llm
+            install_result = ensure_local_llm(config.data_dir)
+            if install_result.get("error"):
+                logger.warning(f"本地模型安装失败: {install_result['error']}")
+
         self.config = config
         self.identity: dict = load_identity(config.data_dir)
         self.permissions = permissions
