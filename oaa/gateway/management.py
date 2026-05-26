@@ -44,6 +44,9 @@ VALID_TYPES = {
     "save_email",
     "delete_email",
     "test_email",
+    # Local model (愣小二)
+    "get_local_model_config",
+    "save_local_model_config",
 }
 _ = VALID_TYPES  # prevent import-stripping
 
@@ -81,6 +84,16 @@ class ManagementHandler:
         # Each callback receives (msg_type: str, payload: dict).
         self._notify_callbacks: list[Callable[[str, dict], None]] = []
 
+        # Self-healing callback — fired when a management operation fails
+        # and the Agent should diagnose + fix the root cause.
+        # Receives a diagnostic prompt string.
+        self._heal_callback: Callable[[str], None] | None = None
+
+    def set_heal_callback(self, callback: Callable[[str], None]):
+        """Register a callback to trigger agent self-healing on operation failures.
+        The callback receives a Chinese diagnostic prompt string for the agent."""
+        self._heal_callback = callback
+
     def on_push_notification(self, callback: Callable[[str, dict], None]):
         """Register a callback to receive push notifications from background tasks."""
         self._notify_callbacks.append(callback)
@@ -92,6 +105,27 @@ class ManagementHandler:
                 cb(msg_type, payload)
             except Exception:
                 pass
+
+    def _resolve_redacted_key(self, redacted_key: str, model_id: str) -> str:
+        """Try to resolve a redacted API key against known full keys in config.
+
+        Checks the active model first, then all provider entries.
+        Returns the resolved key or the original redacted string.
+        """
+        model_key = self._config.model.api_key
+        if model_key and "****" not in model_key:
+            if redacted_key[:4] == model_key[:4] and redacted_key[-4:] == model_key[-4:]:
+                return model_key
+
+        for prov, entries in self._config.models.items():
+            entry_list = entries if isinstance(entries, list) else [entries]
+            for e in entry_list:
+                if isinstance(e, dict) and e.get("model_id") == model_id:
+                    candidate = e.get("api_key", "")
+                    if candidate and "****" not in candidate:
+                        return candidate
+
+        return redacted_key
 
     @property
     def _email_manager(self):
@@ -221,6 +255,22 @@ class ManagementHandler:
         # Count active sessions from the _config reference (stale reference, but close enough)
         uptime_sec = int(time.time() - self._start_time)
 
+        # 本地模型状态
+        c = self._config.local_model
+        running = (
+            self._agent is not None
+            and hasattr(self._agent, 'local_llm')
+            and self._agent.local_llm is not None
+        )
+        local_model = {
+            "enabled": c.enabled,
+            "running": running,
+            "local_calls": c.local_calls,
+            "cloud_calls": c.cloud_calls,
+            "tokens_saved": c.tokens_saved,
+            "fallback_count": c.fallback_count,
+        }
+
         return {
             "ok": True,
             "agent_state": self._agent_state,
@@ -229,6 +279,7 @@ class ManagementHandler:
             "chat_count": self._chat_count,
             "uptime_sec": uptime_sec,
             "timestamp": datetime.now().isoformat(),
+            "local_model": local_model,
         }
 
     # ------------------------------------------------------------------
@@ -334,6 +385,17 @@ class ManagementHandler:
             self._config.feishu.enabled = f.get("enabled", self._config.feishu.enabled)
             self._config.feishu.app_id = f.get("app_id", self._config.feishu.app_id)
             self._config.feishu.app_secret = f.get("app_secret", self._config.feishu.app_secret)
+
+        if "image_gen" in data:
+            ig = data["image_gen"]
+            self._config.image_gen.enabled = ig.get("enabled", self._config.image_gen.enabled)
+            self._config.image_gen.api_key = _resolve_key(
+                ig.get("api_key", self._config.image_gen.api_key),
+                self._config.image_gen.api_key,
+                path="image_gen.api_key",
+            )
+            self._config.image_gen.base_url = ig.get("base_url", self._config.image_gen.base_url)
+            self._config.image_gen.model_id = ig.get("model_id", self._config.image_gen.model_id)
 
         if "data_dir" in data:
             self._config.data_dir = data["data_dir"]
@@ -444,8 +506,16 @@ class ManagementHandler:
         else:
             selected = entries[0]
 
+        # Resolve redacted API key against current config
+        selected_api_key = selected.get("api_key", "")
+        if "****" in selected_api_key:
+            resolved = self._resolve_redacted_key(selected_api_key, selected.get("model_id", ""))
+            if resolved:
+                selected_api_key = resolved
+                logger.info("Resolved redacted API key for %s/%s", provider, selected.get("model_id", ""))
+
         self._config.model.provider = provider
-        self._config.model.api_key = selected.get("api_key", "")
+        self._config.model.api_key = selected_api_key
         self._config.model.model_id = selected.get("model_id", "")
         self._config.model.base_url = selected.get("base_url", "")
 
@@ -506,6 +576,14 @@ class ManagementHandler:
         if not task_data:
             return {"ok": False, "error": "No task data provided"}
 
+        # Sync delivery_channels with channels — GUI only manages "channels"
+        if "channels" in task_data:
+            task_data["delivery_channels"] = list(task_data["channels"])
+
+        # Auto-generate description if not provided
+        if "description" not in task_data or not task_data.get("description"):
+            task_data["description"] = self._render_task_description(task_data)
+
         task_id = task_data.get("id", "")
         if task_id and self._scheduler.get(task_id):
             # Update existing
@@ -515,6 +593,18 @@ class ManagementHandler:
             # Create new
             created = self._scheduler.create(task_data)
             return {"ok": True, "task": created}
+
+    @staticmethod
+    def _render_task_description(task: dict) -> str:
+        """Generate a human-readable description from task fields."""
+        cycle_map = {"daily": "每天", "weekly": "每周", "monthly": "每月"}
+        cycle = cycle_map.get(task.get("cycle", "daily"), "每天")
+        hour = task.get("start_hour", 9)
+        minute = task.get("start_minute", 0)
+        channels = task.get("channels", [])
+        chan_map = {"chat": "聊天页面", "wechat": "微信", "dingtalk": "钉钉", "feishu": "飞书"}
+        chan_labels = [chan_map.get(c, c) for c in channels]
+        return f"{cycle}{hour:02d}:{minute:02d}执行，通过{'、'.join(chan_labels)}交付"
 
     def _handle_delete_task(self, payload: dict) -> dict:
         """Delete a task by id."""
@@ -545,6 +635,8 @@ class ManagementHandler:
         for info in self._skill_mgr.list_all():
             skills.append({
                 "name": info.name,
+                "display_name": info.display_name,
+                "description": info.description,
                 "category": info.category,
                 "path": info.path,
                 "loaded": bool(info.skill_md),
@@ -1152,11 +1244,82 @@ class ManagementHandler:
         if not account:
             return {"ok": False, "error": "请提供邮箱配置"}
         result = await self._email_manager.test_connection(account)
-        return {"ok": result.get("ok", False), **result}
+        ok = result.get("ok", False)
+
+        # Self-healing: if test failed and callback is registered, route
+        # the error context to the agent for diagnosis and code fix.
+        if not ok and self._heal_callback:
+            provider = account.get("provider", account.get("imap_server", "未知"))
+            imap_err = result.get("imap_error") or ""
+            smtp_err = result.get("smtp_error") or ""
+            detail = imap_err or smtp_err or str(result.get("errors", []))
+            diagnostic = (
+                f"【自愈触发】邮箱连接测试失败\n\n"
+                f"提供商: {provider}\n"
+                f"服务器: {account.get('imap_server', '?')}:{account.get('imap_port', '?')}\n"
+                f"错误: {detail}\n\n"
+                f"请按以下步骤诊断修复：\n"
+                f"1. 用 read_own_source 读取 oaa/gateway/email_config.py\n"
+                f"2. 分析 _test_imap 和 _test_smtp 方法的 SSL/TLS 连接代码\n"
+                f"3. 找出导致 SSL 握手失败的根因\n"
+                f"4. 用 self_improve 修复代码（用旧字符串替换为新字符串）\n"
+                f"5. 修复后告知用户已修复，请重新测试"
+            )
+            try:
+                self._heal_callback(diagnostic)
+            except Exception:
+                pass
+
+        return {"ok": ok, **result}
 
     # ------------------------------------------------------------------
     # Metrics
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Local Model (愣小二)
+    # ------------------------------------------------------------------
+
+    def _handle_get_local_model_config(self, _payload: dict) -> dict:
+        """返回本地模型配置 + 统计。"""
+        c = self._config.local_model
+        return {"ok": True, "config": {
+            "enabled": c.enabled,
+            "model_path": c.model_path or "自动",
+            "port": c.port,
+            "context_size": c.context_size,
+            "gpu_layers": c.gpu_layers,
+            "confidence_threshold": c.confidence_threshold,
+            "keywords_local": c.keywords_local,
+            "keywords_cloud_analysis": c.keywords_cloud_analysis,
+            "keywords_cloud_creation": c.keywords_cloud_creation,
+            "keywords_cloud_external": c.keywords_cloud_external,
+            "keywords_step": c.keywords_step,
+            "stats": {
+                "local_calls": c.local_calls,
+                "cloud_calls": c.cloud_calls,
+                "tokens_saved": c.tokens_saved,
+                "fallback_count": c.fallback_count,
+            },
+        }}
+
+    async def _handle_save_local_model_config(self, payload: dict) -> dict:
+        """保存本地模型配置。"""
+        data = payload.get("config", {})
+        if not data:
+            return {"ok": False, "error": "No config data"}
+        c = self._config.local_model
+        for key in ("enabled", "port", "context_size", "gpu_layers",
+                     "confidence_threshold", "fallback_on_failure"):
+            if key in data:
+                setattr(c, key, data[key])
+        for key in ("keywords_local", "keywords_cloud_analysis",
+                     "keywords_cloud_creation", "keywords_cloud_external",
+                     "keywords_step"):
+            if key in data and isinstance(data[key], list):
+                setattr(c, key, data[key])
+        await self._config.save()
+        return {"ok": True}
 
     def _handle_get_metrics(self, _payload: dict) -> dict:
         """Return proactivity and LLM statistics from the metrics collector."""
