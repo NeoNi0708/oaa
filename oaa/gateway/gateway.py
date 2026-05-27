@@ -61,12 +61,17 @@ class Gateway:
         # Send to agent
         response = ""
         try:
-            async for chunk in self.agent.process_message(msg.content, history=history):
+            async for chunk in self.agent.process_message(
+                msg.content, history=history,
+                route_override=msg.metadata.get("route_override"),
+                source=msg.source, user_id=msg.user_id,
+            ):
                 if chunk["type"] == "done":
                     response = chunk.get("content", "")
                 yield chunk
         except asyncio.CancelledError:
-            yield {"type": "done", "content": ""}
+            # Don't yield — a stale done chunk pollutes the WebSocket stream
+            # and will be picked up as the response for the NEXT message.
             return
         except Exception as exc:
             logger.error("Agent processing failed: %s", exc)

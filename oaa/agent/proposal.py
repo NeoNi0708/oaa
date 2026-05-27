@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, asdict
 from typing import TYPE_CHECKING, Any
 
@@ -87,6 +88,11 @@ class ProposalStore:
         self._store: list[dict] = []
         self._lock = asyncio.Lock()
         self._load()
+        self._notify_callback: Callable[[str, dict], None] | None = None
+
+    def set_notify_callback(self, callback: Callable[[str, dict], None]):
+        """Register a callback for real-time UI push notifications."""
+        self._notify_callback = callback
 
     # ------------------------------------------------------------------
     # Persistence
@@ -122,6 +128,16 @@ class ProposalStore:
             self._store.append(d)
             await self._save()
         logger.info("Proposal created: %s [%s] %s", proposal.id, proposal.type, proposal.title)
+        if self._notify_callback:
+            try:
+                self._notify_callback("proposal_added", {
+                    "proposal_id": proposal.id,
+                    "proposal_type": proposal.type,
+                    "title": proposal.title,
+                    "status": proposal.status,
+                })
+            except Exception:
+                pass
         return proposal.id
 
     def get(self, proposal_id: str) -> dict | None:

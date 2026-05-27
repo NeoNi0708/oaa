@@ -39,6 +39,120 @@ ATOMIC_TOOLS_SCHEMA = [
 
 ATOMIC_TOOLS_SCHEMA = ATOMIC_TOOLS_SCHEMA
 
+ATOMIC_TOOLS_SCHEMA += [
+    # --- Clone tools (5) ---
+    {
+        "type": "function",
+        "function": {
+            "name": "clone_create",
+            "description": "Create an isolated copy of the OAA source tree. The clone lives in the data directory and excludes runtime data, build artifacts, and git history. Use for complex or risky self-modifications — edit the clone first, test, then sync back.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clone_edit",
+            "description": "Apply a text edit to a file in the clone (not the live file). Similar to self_improve but targets the cloned copy. Use clone_sync to push changes to live after testing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path relative to OAA root, e.g. 'oaa/agent/tools.py'"},
+                    "old_content": {"type": "string", "description": "Exact unique text to replace in the clone file"},
+                    "new_content": {"type": "string", "description": "Replacement text"},
+                    "description": {"type": "string", "description": "Summary of the change"},
+                },
+                "required": ["path", "old_content", "new_content"],
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clone_sync",
+            "description": "Sync all pending clone modifications to the live source tree. Each modified file is backed up before overwrite. After sync, call reload_module for the changes to take effect.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            }
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clone_discard",
+            "description": "Delete the clone directory. Any unsynced modifications will be lost. Idempotent — safe to call even if no clone exists.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            }
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clone_status",
+            "description": "Show the clone status: whether it exists, when created, how many files modified, and which files. Use before sync to review pending changes.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            }
+        },
+    },
+    # --- Preference tools (3) ---
+    {
+        "type": "function",
+        "function": {
+            "name": "preference_get",
+            "description": "Get a user preference by key. Returns the value and metadata. Use when you need to know a specific user preference.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Preference key to look up"},
+                },
+                "required": ["key"],
+            }
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "preference_search",
+            "description": "Search user preferences by keyword. Matches against keys and descriptions. Returns all matches (enabled first).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keyword to search for in keys and descriptions"},
+                },
+                "required": [],
+            }
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "preference_set",
+            "description": "Set a user preference. Use when the user explicitly expresses a preference about how the agent should behave (e.g. 'report briefly', 'always confirm before deleting'). The preference is remembered across sessions and shown in the system prompt.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Short identifier for the preference, e.g. 'report_style'"},
+                    "value": {"type": "string", "description": "The preference value, e.g. 'brief'"},
+                    "description": {"type": "string", "description": "Human-readable explanation of what this preference means"},
+                },
+                "required": ["key", "value"],
+            }
+        },
+    },
+]
+
 WECHAT_TOOLS_SCHEMA = [
     {"type": "function", "function": {
         "name": "wechat_sessions",
@@ -77,11 +191,11 @@ WECHAT_TOOLS_SCHEMA = [
     }},
     {"type": "function", "function": {
         "name": "wechat_send_text",
-        "description": "Send a WeChat text message via iLink adapter (不需要 wechat-cli，微信在线即可用). Use when user says '发微信给...' or to push notification to user's WeChat.",
+        "description": "Send a WeChat text message via iLink adapter. Use when user says '发微信给...' or to push notification. 如果用户在微信中说「发给我」，to 参数可留空，工具会自动填入当前用户。",
         "parameters": {"type": "object", "properties": {
-            "to": {"type": "string", "description": "Recipient wxid (preferred) or name"},
+            "to": {"type": "string", "description": "Recipient wxid. 用户在微信中要求发给他自己时可留空"},
             "text": {"type": "string", "description": "Message text content"},
-        }, "required": ["to", "text"]}
+        }, "required": ["text"]}
     }},
     {"type": "function", "function": {
         "name": "wechat_send_typing",
@@ -93,11 +207,11 @@ WECHAT_TOOLS_SCHEMA = [
     }},
     {"type": "function", "function": {
         "name": "wechat_send_file",
-        "description": "Send a local file to a WeChat contact via CDN upload (不需要 wechat-cli，微信在线即可用). Supports images, documents, videos, and audio files. Use when user asks to send a file to their WeChat or to a contact.",
+        "description": "Send a local file to a WeChat contact via CDN upload. Supports images, documents, videos. 用户在微信中说「发文件给我」时 to 可留空，工具自动填入当前用户。",
         "parameters": {"type": "object", "properties": {
-            "to": {"type": "string", "description": "Recipient wxid (preferred) or name"},
+            "to": {"type": "string", "description": "Recipient wxid. 用户在微信中要求发给他自己时可留空"},
             "file_path": {"type": "string", "description": "Absolute path to the local file"},
-        }, "required": ["to", "file_path"]}
+        }, "required": ["file_path"]}
     }},
 ]
 
@@ -292,13 +406,6 @@ EXTENDED_TOOLS_SCHEMA = [
             "api_key": {"type": "string", "description": "Optional: override API key. 留空则使用设置中配置的 Key"},
             "base_url": {"type": "string", "description": "Optional: override API base URL (default: https://token.sensenova.cn/v1)"},
             "model": {"type": "string", "description": "Optional: override model name (default: sensenova-u1-fast)"},
-        }, "required": ["prompt"]}
-    }},
-    {"type": "function", "function": {
-        "name": "call_xiaoer",
-        "description": "让愣小二（本地轻量模型）处理简单子任务：翻译、提取、格式化、分类等。结果返回文本。适合于把杂活甩给小弟干。",
-        "parameters": {"type": "object", "properties": {
-            "prompt": {"type": "string", "description": "给愣小二的指令，要清晰具体，例如'把以下内容翻译成英文'、'从这段话中提取所有日期'"},
         }, "required": ["prompt"]}
     }},
 ]

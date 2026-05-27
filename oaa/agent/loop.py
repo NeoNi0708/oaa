@@ -36,6 +36,14 @@ def _classify_error(exc: Exception) -> str:
     return "permanent"
 
 
+# Map loop-level error classification → failure root cause categories
+_LOOP_CAT_TO_FAILURE = {
+    "transient": "infra_error",
+    "auth": "parameter_error",
+    "permanent": "unknown",
+}
+
+
 def _recovery_hint(tool_name: str, error_msg: str, err_type: str) -> str:
     """Return a recovery hint appended to the tool result for the LLM."""
     if err_type == "auth":
@@ -60,7 +68,7 @@ def _friendly_error(exc: Exception) -> str:
     if "429" in msg or "RateLimit" in name:
         return "模型服务繁忙，请稍后重试（可尝试切换到其他模型厂商）"
     if "401" in msg or "Authentication" in name or "Unauthorized" in msg:
-        return "API Key 无效或已过期，请在设置页面更新 Key"
+        return "API Key 无效或已过期（如果 Key 有效也可能是该模型不支持聊天功能），请在设置页面更新 Key 或切换模型"
     if "404" in msg or "Not Found" in msg:
         return "模型 ID 不存在，请在设置页面检查模型配置"
     if "timeout" in msg.lower() or "Timeout" in name or "TimedOut" in name:
@@ -120,6 +128,8 @@ class AgentLoop:
         memory_mgr=None,
         metrics_collector=None,
         model_fallbacks: list | None = None,
+        agent=None,  # OAAAgent reference for P2 skill plugin
+        policy_engine=None,  # P4 PolicyEngine reference
     ):
         self.llm = llm
         self.handler = handler
@@ -128,12 +138,17 @@ class AgentLoop:
         self._max_messages = max_messages
         self._memory_mgr = memory_mgr
         self._metrics = metrics_collector
+        self._agent = agent
+        self._policy_engine = policy_engine
         self._system_prompt = "You are OAA Agent."
+        self._system_prompt_base = self._system_prompt  # saved for skill unload restore
         self._last_llm_content = ""
         self._continuation_count = 0
         self._model_fallbacks = model_fallbacks or []
         self._active_fallback_idx = -1  # -1 = primary model, 0+ = fallback index
         self._combined_tools = list(self.tools_schema)
+        # Execution chain for the current task — tracks each tool call for root cause analysis
+        self._execution_chain: list[dict] = []
 
     def _error_with_context(self, error_msg: str) -> str:
         """Append error to last yielded content so it doesn't overwrite the conversation."""
@@ -174,6 +189,7 @@ class AgentLoop:
     def set_skill_context(self, system_prompt: str, extra_tools: Optional[list] = None):
         """Set system prompt and optionally add skill-specific tools."""
         self._system_prompt = system_prompt
+        self._system_prompt_base = system_prompt
         self._combined_tools = list(self.tools_schema)
         if extra_tools:
             self._combined_tools = self._combined_tools + extra_tools
@@ -192,6 +208,9 @@ class AgentLoop:
         if not self.llm:
             yield {"type": "done", "content": "No LLM client configured."}
             return
+
+        # Reset execution chain for this task
+        self._execution_chain = []
 
         messages: list[dict] = [
             {"role": "system", "content": self._system_prompt},
@@ -247,7 +266,7 @@ class AgentLoop:
                                 fb_model.get("model_id", "?"), fb_model.get("provider", "?"),
                             )
                             yield {"type": "status",
-                                   "content": f"当前模型({err_type})，切换到 {fb_model.get('model_id','?')}..."}
+                                   "content": f"{getattr(getattr(self.llm, '_config', None), 'model_id', '?')} 不可用{'（可能是 Key 无效或该模型不支持聊天）' if err_type == 'AuthenticationError' else f'({err_type})'}，切换到 {fb_model.get('model_id','?')}..."}
                             # Reconfigure LLM client with fallback model
                             self._apply_fallback_config(fb_model)
                             # Reset attempt counter so the fallback model gets
@@ -330,9 +349,15 @@ class AgentLoop:
                 yield {"type": "done", "content": final_content}
                 return
 
-            # Execute tools and yield results
-            tool_result_entries = []
-            for tc in tool_calls:
+            # Execute tools ONE AT A TIME, each as an independent step.
+            # After each tool completes, feed the result back to the LLM
+            # so it can adapt subsequent calls based on intermediate results.
+            pending = list(tool_calls)
+            step_id = 0
+            while pending:
+                tc = pending.pop(0)
+                step_id += 1
+
                 tool_name = tc.function.name
                 raw_args = tc.function.arguments
                 try:
@@ -340,57 +365,114 @@ class AgentLoop:
                 except json.JSONDecodeError:
                     args = {"_raw": raw_args}
 
-                logger.debug("Tool call: %s %s", tool_name, _summarize_args(args))
-                yield {"type": "tool_call", "name": tool_name, "args": args}
+                logger.debug("Step %d: Tool call: %s %s", step_id, tool_name, _summarize_args(args))
+                yield {"type": "tool_call", "name": tool_name, "args": args,
+                       "step_id": step_id, "phase": "plan"}
+
+                # Add assistant message with this single tool call
+                messages.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": (
+                                tc.function.arguments
+                                if isinstance(tc.function.arguments, str)
+                                else json.dumps(tc.function.arguments, ensure_ascii=False)
+                            ),
+                        },
+                    }],
+                })
+
+                # P4 Policy check — enforce rules before dispatching
+                policy_blocked = False
+                if self._policy_engine:
+                    policy_result = self._policy_engine.check(tool_name, args)
+                    if policy_result.action == "block":
+                        logger.info("Policy blocked: %s — %s", tool_name, policy_result.reason)
+                        yield {"type": "status", "content": f"⛔ {policy_result.reason}"}
+                        result = {"status": "error", "msg": policy_result.reason, "policy_blocked": True}
+                        policy_blocked = True
+                    elif policy_result.action == "modify":
+                        args.update(policy_result.modifications)
+                        logger.info("Policy modified args for %s: %s", tool_name, policy_result.modifications)
+                        yield {"type": "status", "content": f"策略: {policy_result.reason}"}
 
                 # Execute tool with auto-retry for transient errors
-                result = None
+                result = None if not policy_blocked else result
                 last_tool_error: Exception | None = None
-                for tool_attempt in range(1, _MAX_TOOL_RETRIES + 1):
-                    try:
-                        result = await self.handler.dispatch(tool_name, args)
-                        last_tool_error = None
-                        break
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        last_tool_error = exc
-                        err_cat = _classify_error(exc)
-                        if err_cat == "transient" and tool_attempt < _MAX_TOOL_RETRIES:
-                            t_delay = _BASE_DELAY * (2 ** (tool_attempt - 1))
-                            logger.warning("Tool %s transient error [%s] attempt %d/%d, retry in %.1fs",
-                                           tool_name, err_cat, tool_attempt, _MAX_TOOL_RETRIES, t_delay)
-                            yield {"type": "status", "content": f"工具 {tool_name} 临时错误，重试 ({tool_attempt}/{_MAX_TOOL_RETRIES})..."}
-                            await asyncio.sleep(t_delay)
-                        else:
+                t_start = time.time()
+                if not policy_blocked:
+                    for tool_attempt in range(1, _MAX_TOOL_RETRIES + 1):
+                        try:
+                            result = await self.handler.dispatch(tool_name, args)
+                            last_tool_error = None
                             break
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            last_tool_error = exc
+                            err_cat = _classify_error(exc)
+                            if err_cat == "transient" and tool_attempt < _MAX_TOOL_RETRIES:
+                                t_delay = _BASE_DELAY * (2 ** (tool_attempt - 1))
+                                logger.warning("Tool %s transient error [%s] attempt %d/%d, retry in %.1fs",
+                                               tool_name, err_cat, tool_attempt, _MAX_TOOL_RETRIES, t_delay)
+                                yield {"type": "status", "content": f"工具 {tool_name} 临时错误，重试 ({tool_attempt}/{_MAX_TOOL_RETRIES})...",
+                                       "step_id": step_id}
+                                await asyncio.sleep(t_delay)
+                            else:
+                                break
 
-                if last_tool_error is not None:
-                    exc = last_tool_error
-                    logger.error("Tool %s failed: %s", tool_name, exc)
-                    err_cat = _classify_error(exc)
-                    result = {
-                        "status": "error",
-                        "msg": str(exc),
-                        "_recovery_hint": _recovery_hint(tool_name, str(exc), err_cat),
-                    }
-                yield {"type": "tool_result", "name": tool_name, "result": result}
+                    if last_tool_error is not None:
+                        exc = last_tool_error
+                        logger.error("Tool %s failed: %s", tool_name, exc)
+                        err_cat = _classify_error(exc)
+                        result = {
+                            "status": "error",
+                            "msg": str(exc),
+                            "_recovery_hint": _recovery_hint(tool_name, str(exc), err_cat),
+                        }
+                t_dur = time.time() - t_start
+                yield {"type": "tool_result", "name": tool_name, "result": result,
+                       "step_id": step_id, "phase": "result", "duration": round(t_dur, 2)}
                 logger.debug("Tool result: %s | status=%s", tool_name, _result_status(result))
+
+                # Record in execution chain for root cause analysis
+                is_error = isinstance(result, dict) and result.get("status") == "error"
+                self._execution_chain.append({
+                    "tool": tool_name,
+                    "args": {k: v for k, v in args.items() if k != "code"},  # omit large code blobs
+                    "status": "error" if is_error else "ok",
+                    "error": result.get("msg", "")[:200] if is_error else "",
+                })
 
                 # Record tool success/failure metrics
                 if self._metrics:
                     try:
-                        is_error = isinstance(result, dict) and result.get("status") == "error"
                         self._metrics.record_tool_result(tool_name, success=not is_error)
                     except Exception as exc:
                         logger.warning("Failed to record tool metrics: %s", exc)
 
-                # Record tool failures for self-diagnosis
-                if isinstance(result, dict) and result.get("status") == "error" and self._memory_mgr:
+                # Record tool results for self-diagnosis
+                if self._memory_mgr:
                     try:
-                        self._memory_mgr.add_tool_failure(tool_name, args, str(result.get("msg", "")))
+                        if is_error:
+                            err_cat_loop = _classify_error(Exception(result.get("msg", ""))) if result.get("msg") else "permanent"
+                            failure_cat = _LOOP_CAT_TO_FAILURE.get(err_cat_loop, "unknown")
+                            self._memory_mgr.add_tool_failure(
+                                tool_name, args,
+                                str(result.get("msg", "")),
+                                category=failure_cat,
+                                task_context=user_input[:300] if user_input else "",
+                                execution_chain=list(self._execution_chain),
+                            )
+                        else:
+                            self._memory_mgr.add_tool_success(tool_name, args)
                     except Exception as rec_err:
-                        logger.warning("Failed to record tool failure: %s", rec_err)
+                        logger.warning("Failed to record tool result: %s", rec_err)
 
                 # Auto-detect missing modules for code tools → suggest pip install
                 if tool_name in ("code_run", "code_exec") and isinstance(result, dict) and result.get("status") == "error":
@@ -438,13 +520,49 @@ class AgentLoop:
                     result_str = str(result)
                 if len(result_str) > 8000:
                     result_str = result_str[:8000] + "...[truncated]"
-                tool_result_entries.append({
-                    "tool_use_id": tc.id,
+                # Append tool result to conversation history
+                messages.append({
+                    "role": "tool",
                     "content": result_str,
+                    "tool_call_id": tc.id,
                 })
 
-            # Append assistant + tool-result messages
-            messages = self._build_turn_messages(messages, content, tool_calls, tool_result_entries, thinking)
+                # P2 Skill plugin: detect skill_load/unload and update schema + prompt
+                # for subsequent LLM calls in this turn.
+                if self._agent:
+                    if tool_name == "skill_load":
+                        skill_name = args.get("name", "")
+                        if skill_name and self._agent.apply_skill_plugin(skill_name):
+                            self._combined_tools = list(self._agent._tools_schema)
+                            self._system_prompt = self._agent.build_skill_plugin_prompt(self._system_prompt_base)
+                            messages[0] = {"role": "system", "content": self._system_prompt}
+                            self.llm.set_tools(self._combined_tools)
+                            logger.info("Skill plugin activated: %s (%d tools visible)",
+                                        skill_name, len(self._combined_tools))
+                    elif tool_name == "skill_unload":
+                        skill_name = args.get("name", "")
+                        if skill_name and self._agent._active_skill_plugin:
+                            self._agent.remove_skill_plugin()
+                            self._combined_tools = list(self._agent._tools_schema)
+                            self._system_prompt = self._system_prompt_base
+                            messages[0] = {"role": "system", "content": self._system_prompt}
+                            self.llm.set_tools(self._combined_tools)
+                            logger.info("Skill plugin deactivated: %s", skill_name)
+
+                # If more tools remain, feed result back so LLM can adjust
+                if pending:
+                    yield {"type": "status", "content": f"Step {step_id} 完成，继续下一步...",
+                           "step_id": step_id}
+                    try:
+                        inner_resp = await asyncio.wait_for(
+                            self.llm.chat(messages),
+                            timeout=_LLM_TIMEOUT,
+                        )
+                        if inner_resp.tool_calls:
+                            # LLM may adjust the plan based on this step's result
+                            pending = list(inner_resp.tool_calls)
+                    except Exception:
+                        logger.warning("LLM call failed during step continuation, continuing with remaining tools")
 
             # Compact messages if over limit (always keep recent context)
             messages = await self._compact_messages(messages)

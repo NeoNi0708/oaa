@@ -96,23 +96,14 @@
         </div>
         <div class="msg-content">
           <div class="msg-sender">{{ roleLabel(msg) }}</div>
-          <div class="msg-bubble" v-html="renderContent(msg.content)"></div>
+          <div class="msg-bubble">
+            <ChatBubble :message="msg" :streaming="streaming" :sendRequest="sendRequest" />
+          </div>
         </div>
       </div>
 
-      <!-- Streaming message (live LLM output) -->
-      <div v-if="streaming && streamingContent" class="msg-row assistant">
-        <div class="msg-avatar">
-          <span class="avatar-bot">二</span>
-        </div>
-        <div class="msg-content">
-          <div class="msg-sender">二愣</div>
-          <div class="msg-bubble streaming" v-html="renderContent(streamingContent)"></div>
-        </div>
-      </div>
-
-      <!-- Loading pulse (before first token) -->
-      <div v-if="loading && !streaming" class="msg-row assistant">
+      <!-- Thinking indicator (shown while agent is working, no visible output yet) -->
+      <div v-if="loading && !streaming && workEntries.length === 0" class="msg-row assistant">
         <div class="msg-avatar">
           <span class="avatar-bot">二</span>
         </div>
@@ -124,6 +115,9 @@
         </div>
       </div>
     </div>
+
+    <!-- Work panel -->
+    <WorkPanel :workEntries="workEntries" :streaming="streaming" />
 
     <!-- Confirmation dialog -->
     <div v-if="confirmRequest" class="confirm-overlay" @click.self="respondToConfirm(false)">
@@ -156,6 +150,15 @@
 
     <!-- Input -->
     <div class="input-area">
+      <!-- Route toggle -->
+      <div class="route-toggle" title="路由选择">
+        <button
+          v-for="opt in routeOptions"
+          :key="opt.value"
+          :class="['route-toggle-btn', { active: routeOverride === opt.value }]"
+          @click="routeOverride = opt.value"
+        >{{ opt.label }}</button>
+      </div>
       <button class="attach-btn" @click="triggerAttach" title="附件">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
@@ -193,6 +196,8 @@ import { ref, computed, nextTick, watch, onMounted, onUnmounted, onErrorCaptured
 import { marked } from 'marked'
 import { useWebSocket, type ChatMessage } from '../composables/useWebSocket'
 import { useAgentStatus } from '../composables/useAgentStatus'
+import WorkPanel from '../components/WorkPanel.vue'
+import ChatBubble from '../components/ChatBubble.vue'
 
 interface ModelInfo {
   name: string
@@ -210,10 +215,13 @@ const {
   statusText,
   currentTool,
   confirmRequest,
+  workEntries,
+  configUpdated,
   send,
   sendRequest,
   respondToConfirm,
   clearQRCode,
+  clearWorkEntries,
 } = useWebSocket()
 
 const { phase: agentPhase, phaseLabel: agentPhaseLabel, chatCount, formatUptime } = useAgentStatus(sendRequest)
@@ -230,6 +238,13 @@ const input = ref('')
 const loading = ref(false)
 const msgContainer = ref<HTMLElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
+
+// Route override toggle
+const routeOverride = ref<'auto' | 'cloud'>('auto')
+const routeOptions = [
+  { value: 'auto', label: '自动' },
+  { value: 'cloud', label: '大哥' },
+]
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024  // 10 MB
 
@@ -397,10 +412,14 @@ onUnmounted(() => { document.removeEventListener('click', onDocumentClick) })
 // Retry model loading when WebSocket connects
 let _modelWatchStop: ReturnType<typeof watch> | null = null
 _modelWatchStop = watch(connected, (val) => {
-  if (val && Object.keys(modelList.value).length === 0) {
-    loadModels()
-    if (_modelWatchStop) { _modelWatchStop(); _modelWatchStop = null }
+  if (val) {
+    if (Object.keys(modelList.value).length === 0) loadModels()
   }
+})
+
+// Auto-reload model list when config changes on the backend
+watch(configUpdated, () => {
+  if (connected.value) loadModels()
 })
 
 function renderContent(text: any) {
@@ -433,7 +452,7 @@ function opLabel(operation: string) {
 function sendMsg() {
   if (!input.value.trim()) return
   loading.value = true
-  send(input.value.trim())
+  send(input.value.trim(), routeOverride.value)
   input.value = ''
   nextTick(() => scrollToBottom())
 }
@@ -467,6 +486,7 @@ function stopAgent() {
   streaming.value = false
   streamingContent.value = ''
   statusText.value = ''
+  clearWorkEntries()
   // Send stop signal so backend can abort the chat task
   sendRequest('stop_chat', {}).catch(() => {})
 }
@@ -848,6 +868,7 @@ function autoResize(e: Event) {
   text-decoration: underline;
 }
 
+
 .thinking {
   min-width: 60px;
   display: flex;
@@ -880,6 +901,44 @@ function autoResize(e: Event) {
 @keyframes dotBounce {
   0%, 80%, 100% { opacity: 0.2; transform: scale(0.7); }
   40% { opacity: 1; transform: scale(1); }
+}
+
+/* --- Route toggle --- */
+.route-toggle {
+  display: flex;
+  gap: 1px;
+  flex-shrink: 0;
+  border: 1px solid var(--oaa-border-subtle);
+  border-radius: var(--oaa-radius-sm);
+  overflow: hidden;
+}
+.route-toggle-btn {
+  padding: 3px 7px;
+  border: none;
+  background: transparent;
+  color: var(--oaa-color-disabled);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--oaa-transition-fast), color var(--oaa-transition-fast);
+  white-space: nowrap;
+}
+.route-toggle-btn:hover {
+  color: var(--oaa-color-muted);
+  background: rgba(255, 255, 255, 0.04);
+}
+.route-toggle-btn.active {
+  color: var(--oaa-primary);
+  background: rgba(59, 130, 246, 0.12);
+}
+.route-toggle-btn:not(:last-child) {
+  border-right: 1px solid var(--oaa-border-subtle);
+}
+.route-toggle-btn:first-child.active {
+  color: var(--oaa-blue-400);
+}
+.route-toggle-btn:last-child.active {
+  color: var(--oaa-purple-400);
 }
 
 /* --- Input area --- */

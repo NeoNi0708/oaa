@@ -10,28 +10,38 @@
     "electron:dev": "vite & sleep 2 && electron dist-electron/main.js"
   },
   "dependencies": {
-    "vue": "^3.4",
-    "vue-router": "^4.3",
-    "pinia": "^2.1",
+    "echarts": "^6.1.0",
+    "highlight.js": "^11.9",
     "marked": "^12.0",
-    "highlight.js": "^11.9"
+    "pinia": "^2.1",
+    "playwright": "^1.60.0",
+    "vue": "^3.4",
+    "vue-router": "^4.3"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0",
-    "vite": "^5.4",
-    "vite-plugin-electron": "^0.28",
-    "vite-plugin-electron-renderer": "^0.14",
     "electron": "^29.0",
     "electron-builder": "^24.13",
     "typescript": "^5.4",
+    "vite": "^5.4",
+    "vite-plugin-electron": "^0.28",
+    "vite-plugin-electron-renderer": "^0.14",
     "vue-tsc": "^2.0"
   },
   "build": {
     "appId": "com.opc.oaa",
     "productName": "OPC AI Assistant",
-    "directories": { "output": "release" },
-    "files": ["dist/**/*", "dist-electron/**/*"],
-    "win": { "target": "nsis", "icon": "../../icon.ico" },
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "../../icon.ico"
+    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,

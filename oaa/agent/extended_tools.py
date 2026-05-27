@@ -38,6 +38,14 @@ class ExtendedTools:
             client_secret=dingtalk_client_secret,
         )
 
+    def _resolve_recipient(self, to: str) -> str:
+        """If to is empty and current message is from WeChat, use sender's wxid."""
+        if not to:
+            agent = getattr(self, '_oaa_agent', None)
+            if agent and getattr(agent, '_channel_source', '') == 'wechat':
+                return getattr(agent, '_channel_user_id', '')
+        return to
+
     def set_wechat_adapter(self, adapter: Any):
         """Inject the active WeChat iLink adapter for proactive sending."""
         self._wechat_adapter = adapter
@@ -481,6 +489,132 @@ class ExtendedTools:
         plans = self.planner.list_plans(status)
         return {"status": "success", "plans": plans, "count": len(plans)}
 
+    # ------------------------------------------------------------------
+    # GitHub community tools (Phase 6)
+    # ------------------------------------------------------------------
+
+    @agent_tool(description="Search GitHub repositories by keywords. Uses GitHub's public search API. Returns repo name, description, stars, and URL. Use to discover relevant open-source tools, libraries, and projects.")
+    async def do_github_search(self, query: str, language: str = "", sort: str = "stars", limit: int = 10) -> dict:
+        """Search GitHub repositories. Useful for finding new tools, libraries, or references.
+
+        Args:
+            query: Search keywords (e.g. 'openai agent framework python')
+            language: Filter by programming language (e.g. 'python', 'typescript')
+            sort: Sort by 'stars', 'updated', or 'best-match' (default: stars)
+            limit: Max results (default: 10, max: 30)
+        """
+        import requests
+        params = {
+            "q": query + (f"+language:{language}" if language else ""),
+            "sort": sort if sort != "best-match" else "",
+            "per_page": min(limit, 30),
+            "order": "desc",
+        }
+        try:
+            resp = requests.get(
+                "https://api.github.com/search/repositories",
+                params=params,
+                headers={"Accept": "application/vnd.github.v3+json"},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("items", [])
+            results = []
+            for r in items[:min(limit, 30)]:
+                results.append({
+                    "name": r.get("full_name", ""),
+                    "description": (r.get("description") or "")[:200],
+                    "stars": r.get("stargazers_count", 0),
+                    "url": r.get("html_url", ""),
+                    "language": r.get("language") or "",
+                    "updated": (r.get("updated_at") or "")[:10],
+                })
+            return {
+                "status": "success",
+                "total_count": data.get("total_count", 0),
+                "results": results,
+                "count": len(results),
+            }
+        except requests.RequestException as e:
+            return {"status": "error", "msg": f"GitHub API search failed: {e}"}
+        except Exception as e:
+            return {"status": "error", "msg": f"GitHub search error: {e}"}
+
+    @agent_tool(description="Fetch trending repositories from GitHub. Returns a list of trending repos for the specified language and time range. Use to discover popular new projects.")
+    async def do_github_trending(self, language: str = "", since: str = "daily") -> dict:
+        """Fetch trending GitHub repositories (unofficial trending endpoint).
+
+        Args:
+            language: Programming language filter, e.g. 'python', 'typescript', '' for all
+            since: Time range: 'daily', 'weekly', 'monthly' (default: daily)
+        """
+        import re
+        import requests
+        url = "https://github.com/trending"
+        if language:
+            url += f"/{language}"
+        url += f"?since={since}"
+        try:
+            resp = requests.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; OAA/1.0)",
+            }, timeout=20)
+            resp.raise_for_status()
+            html = resp.text
+
+            # Parse trending repos from the HTML
+            repos = []
+            # Match repo blocks: h2 with a[href="/owner/name"]
+            pattern = r'<h[23]\s+class="[^"]*">\s*<a\s+href="/([^/"]+/[^/"]+)"[^>]*>'
+            for match in re.finditer(pattern, html):
+                full_name = match.group(1).strip()
+                if full_name.count("/") != 1:
+                    continue
+                repos.append({"name": full_name})
+                if len(repos) >= 25:
+                    break
+
+            if not repos:
+                return {"status": "error", "msg": "Failed to parse trending page — it may have changed structure"}
+
+            # Fetch star counts via search API for each repo (batch with single query)
+            names = [r["name"] for r in repos[:10]]
+            search_query = " OR ".join(f"repo:{n}" for n in names)
+            try:
+                sr = requests.get(
+                    "https://api.github.com/search/repositories",
+                    params={"q": search_query, "per_page": 10},
+                    headers={"Accept": "application/vnd.github.v3+json"},
+                    timeout=15,
+                )
+                if sr.ok:
+                    details = {d["full_name"]: d for d in sr.json().get("items", [])}
+                    for r in repos:
+                        d = details.get(r["name"])
+                        if d:
+                            r["description"] = (d.get("description") or "")[:200]
+                            r["stars"] = d.get("stargazers_count", 0)
+                            r["url"] = d.get("html_url", "")
+                            r["language"] = d.get("language") or ""
+                        else:
+                            r["url"] = f"https://github.com/{r['name']}"
+            except Exception:
+                for r in repos:
+                    r["url"] = f"https://github.com/{r['name']}"
+
+            return {
+                "status": "success",
+                "since": since,
+                "language": language or "all",
+                "results": repos,
+                "count": len(repos),
+                "note": "Trending data parsed from github.com/trending",
+            }
+        except requests.RequestException as e:
+            return {"status": "error", "msg": f"Failed to fetch GitHub trending: {e}"}
+        except Exception as e:
+            return {"status": "error", "msg": f"GitHub trending error: {e}"}
+
     async def do_skill_search(self, args: dict) -> dict:
         """Search ClawHub skill market or GitHub for reusable skills."""
         query = args.get("query", "")
@@ -794,10 +928,12 @@ Delete this section if no resources are required.
 
     async def do_wechat_send_text(self, args: dict) -> dict:
         """Proactively send a WeChat text message to a contact."""
-        to = args.get("to", "")
+        to = self._resolve_recipient(args.get("to", ""))
         text = args.get("text", "")
-        if not to or not text:
-            return {"status": "error", "msg": "to and text are required"}
+        if not to:
+            return {"status": "error", "msg": "请指定收件人（wxid），或在微信中说「发给我」自动使用当前用户"}
+        if not text:
+            return {"status": "error", "msg": "text is required"}
         if not self._wechat_adapter:
             return {"status": "error", "msg": "微信适配器未连接，请先扫码登录"}
         if not await self._confirm("wechat_send_text", f"To: {to}"):
@@ -810,10 +946,12 @@ Delete this section if no resources are required.
 
     async def do_wechat_send_file(self, args: dict) -> dict:
         """Send a local file to a WeChat contact via CDN upload."""
-        to = args.get("to", "")
+        to = self._resolve_recipient(args.get("to", ""))
         file_path = args.get("file_path", "")
-        if not to or not file_path:
-            return {"status": "error", "msg": "to and file_path are required"}
+        if not to:
+            return {"status": "error", "msg": "请指定收件人（wxid），或在微信中说「发给我」自动使用当前用户"}
+        if not file_path:
+            return {"status": "error", "msg": "file_path is required"}
         if not self._wechat_adapter:
             return {"status": "error", "msg": "微信适配器未连接，请先扫码登录"}
         if not await self._confirm("wechat_send_file", f"To: {to}, File: {file_path}"):
@@ -1240,24 +1378,3 @@ Delete this section if no resources are required.
         result = await self.dingtalk._run(arg_list)
         return {"status": "success" if result.get("ok") else "error", "data": result}
 
-    # ------------------------------------------------------------------
-    # call_xiaoer — 愣小二子任务调用
-    # ------------------------------------------------------------------
-
-    @agent_tool
-    async def do_call_xiaoer(self, prompt: str) -> dict:
-        """让愣小二处理简单子任务。返回文本结果。"""
-        agent = getattr(self, '_oaa_agent', None)
-        if agent is None or not getattr(agent, 'local_llm', None):
-            return {"status": "error", "msg": "愣小二未就绪，请确认本地模型已启用并正在运行"}
-        try:
-            response = await agent.local_llm.chat([
-                {"role": "system", "content": "你是愣小二，专注于处理简单任务。回答要简短直接。"},
-                {"role": "user", "content": prompt},
-            ])
-            content = (response.content or "").strip()
-            if not content:
-                return {"status": "error", "msg": "愣小二返回了空结果"}
-            return {"status": "ok", "result": content}
-        except Exception as e:
-            return {"status": "error", "msg": f"愣小二调用失败: {e}"}

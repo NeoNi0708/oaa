@@ -8,7 +8,7 @@ import json
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from ..logging_config import get_logger
 
@@ -34,6 +34,23 @@ class TaskScheduler:
         self._tasks: list[dict] = self._load()
         self._running = False
         self._due_callback = None  # async callable(task_dict) for auto-execution
+        self._last_check_min: int = -1  # prevent double-fire within same minute
+        self._notify_callback: Callable[[str, dict], None] | None = None  # push notification
+
+    def set_notify_callback(self, callback: Callable[[str, dict], None]):
+        """Register a callback for real-time UI push notifications."""
+        self._notify_callback = callback
+
+    def _notify(self, action: str, task: dict):
+        """Push a task_updated notification to registered callback."""
+        if self._notify_callback:
+            try:
+                self._notify_callback("task_updated", {
+                    "action": action,
+                    "task": task,
+                })
+            except Exception:
+                pass
 
     def _load(self) -> list[dict]:
         if self._tasks_file.exists():
@@ -77,6 +94,7 @@ class TaskScheduler:
         }
         self._tasks.append(new)
         self._save()
+        self._notify("create", new)
         return new
 
     def find_conflicts(self, start_hour: int, start_minute: int,
@@ -130,14 +148,23 @@ class TaskScheduler:
                         t[k] = v
                 t["updated_at"] = datetime.now().isoformat()
                 self._save()
+                self._notify("update", t)
                 return t
         return None
 
     def delete(self, task_id: str) -> bool:
         before = len(self._tasks)
+        # Capture task data before removing for notification
+        deleted_task = None
+        for t in self._tasks:
+            if t["id"] == task_id:
+                deleted_task = dict(t)
+                break
         self._tasks = [t for t in self._tasks if t["id"] != task_id]
         if len(self._tasks) < before:
             self._save()
+            if deleted_task:
+                self._notify("delete", deleted_task)
             return True
         return False
 
@@ -149,6 +176,7 @@ class TaskScheduler:
             t["updated_at"] = datetime.now().isoformat()
             t["last_run"] = datetime.now().isoformat()
             self._save()
+            self._notify("complete", t)
         return t
 
     # ------------------------------------------------------------------
@@ -159,10 +187,20 @@ class TaskScheduler:
         """Check if a task is due at *now* based on its cycle configuration."""
         if not task.get("enabled", True):
             return False
-        hour = task.get("start_hour", 0)
-        minute = task.get("start_minute", 0)
+        hour = int(task.get("start_hour", 0))
+        minute = int(task.get("start_minute", 0))
         if now.hour != hour or now.minute != minute:
             return False
+
+        # Skip if last_run is within the same minute (already fired)
+        last_run = task.get("last_run")
+        if last_run:
+            try:
+                lr = datetime.fromisoformat(last_run) if isinstance(last_run, str) else datetime.min
+                if lr.hour == now.hour and lr.minute == now.minute and lr.day == now.day:
+                    return False
+            except (ValueError, TypeError):
+                pass
 
         cycle = task.get("cycle", "daily")
         cycle_day = task.get("cycle_day", 0)
@@ -203,16 +241,22 @@ class TaskScheduler:
         won't delay the next check cycle.
         """
         self._running = True
-        _last_minute = -1  # prevent double-fire within the same minute
         while self._running:
             try:
+                now = datetime.now()
+                current_min = now.minute
+                # Skip if we already checked this minute (prevents double-fire on 30s cycle)
+                if current_min == self._last_check_min:
+                    await asyncio.sleep(30)
+                    continue
+                self._last_check_min = current_min
+
                 due = self.get_due_tasks()
                 for task in due:
                     logger.info("Task due: %s (%s)", task["name"], task["id"])
                     task["last_run"] = datetime.now().isoformat()
                     # Auto-execute tasks that have an execution_prompt
                     if task.get("execution_prompt") and self._due_callback:
-                        import asyncio
                         asyncio.create_task(self._due_callback(task))
                 if due:
                     self._save()

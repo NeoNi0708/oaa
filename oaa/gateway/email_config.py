@@ -248,19 +248,25 @@ class EmailConfigManager:
     async def _test_imap(account: dict) -> Optional[str]:
         """Test IMAP connection. Returns error string or None on success."""
         import imaplib
+        import ssl
 
         try:
-            loop = asyncio.get_event_loop()
             server = account.get("imap_server", "")
             port = account.get("imap_port", 993)
             username = account.get("username", "")
             password = account.get("auth_code", "")
 
             def _run():
-                conn = imaplib.IMAP4_SSL(server, port, timeout=15)
+                # 创建兼容的 SSL 上下文：允许 TLS 1.0+，最低安全级别以兼容旧邮件服务器（如139邮箱）
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ctx.minimum_version = ssl.TLSVersion.TLSv1
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+
+                conn = imaplib.IMAP4_SSL(server, port, timeout=15, ssl_context=ctx)
                 try:
                     conn.login(username, password)
-                    # Try listing mailboxes as a basic operation test
                     conn.list()
                     return None
                 except imaplib.IMAP4.error as e:
@@ -287,7 +293,6 @@ class EmailConfigManager:
         import ssl
 
         try:
-            loop = asyncio.get_event_loop()
             server = account.get("smtp_server", "")
             port = account.get("smtp_port", 587)
             username = account.get("username", "")
@@ -296,12 +301,22 @@ class EmailConfigManager:
 
             def _run():
                 if port == 465:
-                    conn = smtplib.SMTP_SSL(server, port, timeout=15,
-                                            context=ssl.create_default_context())
+                    # 兼容旧邮件服务器的 SSL 上下文
+                    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                    ctx.minimum_version = ssl.TLSVersion.TLSv1
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+                    conn = smtplib.SMTP_SSL(server, port, timeout=15, context=ctx)
                 else:
                     conn = smtplib.SMTP(server, port, timeout=15)
                     if use_tls:
-                        conn.starttls(context=ssl.create_default_context())
+                        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                        ctx.minimum_version = ssl.TLSVersion.TLSv1
+                        ctx.check_hostname = False
+                        ctx.verify_mode = ssl.CERT_NONE
+                        ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+                        conn.starttls(context=ctx)
 
                 try:
                     conn.login(username, password)

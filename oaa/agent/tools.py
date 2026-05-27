@@ -125,7 +125,7 @@ class AtomicTools(BaseHandler):
     _MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
     _BLOCKED_CONTENT_TYPES = {
         "application/x-msdownload", "application/x-msdos-program",
-        "application/x-executable", "application/octet-stream",
+        "application/x-executable",
     }
 
     def __init__(self, data_dir: str, permissions: Optional[PermissionsManager] = None):
@@ -170,6 +170,14 @@ class AtomicTools(BaseHandler):
     def set_wechat_cli_path(self, path: str):
         """Set the path to wechat-cli binary for WeChat data tools."""
         self._wechat_cli_path = path
+
+    def set_clone_manager(self, mgr):
+        """Inject the CloneManager for safe self-modification."""
+        self._clone_mgr = mgr
+
+    def set_preferences_store(self, store):
+        """Inject the PreferencesStore for structured user preferences."""
+        self._prefs_store = store
 
     async def dispatch(self, tool_name: str, args: dict) -> Any:
         """Dispatch tool call and record successful completions for trust tracking."""
@@ -2345,3 +2353,233 @@ class AtomicTools(BaseHandler):
         else:
             result["msg"] += "，但执行器未连接——请等待定时触发"
         return result
+
+    # ------------------------------------------------------------------
+    # Clone tools — safe self-modification via isolated code copy
+    # ------------------------------------------------------------------
+
+    @agent_tool(
+        name="clone_create",
+        description="Create an isolated copy of the OAA source tree. The clone lives in the data directory and excludes runtime data (workspace, memory, db), build artifacts (node_modules, dist), and git history. Use this when you need to make complex or risky self-modifications — edit the clone first, test, then sync back."
+    )
+    async def do_clone_create(self) -> dict:
+        """Create a source code clone for safe self-modification."""
+        mgr = getattr(self, "_clone_mgr", None)
+        if mgr is None:
+            return {"status": "error", "msg": "CloneManager 未初始化"}
+        return await asyncio.to_thread(mgr.create)
+
+    @agent_tool(
+        name="clone_edit",
+        description="Apply a text edit to a file in the clone (not the live file!). Similar to self_improve but targets the cloned copy. Use clone_sync to push changes to live after testing. Parameters: path (relative to OAA root, e.g. oaa/agent/tools.py), old_content (exact text to replace), new_content (replacement text), description (summary of the change)."
+    )
+    async def do_clone_edit(self, path: str, old_content: str,
+                            new_content: str, description: str = "") -> dict:
+        """Edit a file inside the clone."""
+        mgr = getattr(self, "_clone_mgr", None)
+        if mgr is None:
+            return {"status": "error", "msg": "CloneManager 未初始化"}
+        return await asyncio.to_thread(mgr.apply_edit, path, old_content, new_content)
+
+    @agent_tool(
+        name="clone_sync",
+        description="Sync all pending clone modifications to the live source tree. Each modified file is backed up before overwrite. After sync, call reload_module for the changes to take effect."
+    )
+    async def do_clone_sync(self) -> dict:
+        """Sync clone modifications to live system."""
+        mgr = getattr(self, "_clone_mgr", None)
+        if mgr is None:
+            return {"status": "error", "msg": "CloneManager 未初始化"}
+        from .repair_loop import get_active_proposal_id
+        prop_id = get_active_proposal_id()
+        return await asyncio.to_thread(mgr.sync, prop_id)
+
+    @agent_tool(
+        name="clone_discard",
+        description="Delete the clone directory. Any unsynced modifications will be lost. Idempotent — safe to call even if no clone exists."
+    )
+    async def do_clone_discard(self) -> dict:
+        """Delete the clone directory."""
+        mgr = getattr(self, "_clone_mgr", None)
+        if mgr is None:
+            return {"status": "error", "msg": "CloneManager 未初始化"}
+        return await asyncio.to_thread(mgr.discard)
+
+    @agent_tool(
+        name="clone_status",
+        description="Show the clone status: whether it exists, when it was created, how many files have been modified, and which files. Use before sync to review pending changes."
+    )
+    async def do_clone_status(self) -> dict:
+        """Show clone status and pending modifications."""
+        mgr = getattr(self, "_clone_mgr", None)
+        if mgr is None:
+            return {"status": "error", "msg": "CloneManager 未初始化"}
+        return await asyncio.to_thread(mgr.status)
+
+    # ------------------------------------------------------------------
+    # Preference tools — structured user preference management
+    # ------------------------------------------------------------------
+
+    @agent_tool(
+        name="preference_get",
+        description="Get a user preference by key. Use when you need to know a specific user preference (e.g., report style, notification channel). Returns the value and metadata."
+    )
+    async def do_preference_get(self, key: str) -> dict:
+        """Get a single user preference by key."""
+        store = getattr(self, "_prefs_store", None)
+        if store is None:
+            return {"status": "error", "msg": "PreferencesStore 未初始化"}
+        pref = store.get(key)
+        if pref is None:
+            return {"status": "error", "msg": f"偏好不存在: {key}"}
+        return {"status": "success", "preference": pref}
+
+    @agent_tool(
+        name="preference_search",
+        description="Search user preferences by keyword. Matches against keys and descriptions. Returns all matches (enabled first). Use when you want to find relevant preferences for the current task."
+    )
+    async def do_preference_search(self, query: str = "") -> dict:
+        """Search preferences by keyword."""
+        store = getattr(self, "_prefs_store", None)
+        if store is None:
+            return {"status": "error", "msg": "PreferencesStore 未初始化"}
+        results = store.search(query)
+        return {"status": "success", "preferences": results, "count": len(results)}
+
+    @agent_tool(
+        name="preference_set",
+        description="Set a user preference. Use when the user explicitly expresses a preference about how you should behave (e.g. 'report briefly', 'always confirm before deleting'). The preference will be remembered across sessions and shown in your system prompt. Parameters: key (short identifier), value (the preference value), description (human-readable explanation of what this means)."
+    )
+    async def do_preference_set(self, key: str, value: str,
+                                description: str = "") -> dict:
+        """Set a user preference (agent-sourced)."""
+        store = getattr(self, "_prefs_store", None)
+        if store is None:
+            return {"status": "error", "msg": "PreferencesStore 未初始化"}
+        result = store.set(key, value, description=description, source="agent")
+        return {"status": "success", "preference": result}
+
+    # ------------------------------------------------------------------
+    # Self code review — Phase 6
+    # ------------------------------------------------------------------
+
+    @agent_tool(
+        name="self_code_review",
+        description="Review your own source code for bugs, anti-patterns, and improvements. Reads the specified source file and analyzes it for quality issues, security concerns, and optimization opportunities. Use before making changes or when troubleshooting. Returns structured findings with line references."
+    )
+    async def do_self_code_review(self, path: str) -> dict:
+        """Review own source code for quality issues.
+
+        Args:
+            path: File path relative to OAA root, e.g. 'oaa/agent/tools.py'
+        """
+        # Resolve the source file path
+        full_path = self._resolve_source_path(path)
+        if not full_path:
+            return {"status": "error", "msg": f"File not found: {path}"}
+
+        if not os.path.isfile(full_path):
+            return {"status": "error", "msg": f"Not a file: {path}"}
+
+        try:
+            with open(full_path, "r", encoding="utf-8") as f:
+                source = f.read()
+        except OSError as exc:
+            return {"status": "error", "msg": f"Cannot read file: {exc}"}
+
+        if not source.strip():
+            return {"status": "error", "msg": "File is empty"}
+
+        # Basic static checks (lint-like, no LLM needed)
+        lines = source.split("\n")
+        findings = []
+        _warned_lines = set()
+
+        # Check 1: overly long lines
+        for i, line in enumerate(lines, 1):
+            if len(line) > 200 and i not in _warned_lines:
+                findings.append({
+                    "type": "style",
+                    "line": i,
+                    "severity": "warning",
+                    "message": f"Line too long ({len(line)} chars, max 200 recommended)",
+                })
+                _warned_lines.add(i)
+
+        # Check 2: bare except clauses
+        for i, line in enumerate(lines, 1):
+            if re.match(r"^\s*except\s*:", line) and i not in _warned_lines:
+                findings.append({
+                    "type": "bug_risk",
+                    "line": i,
+                    "severity": "warning",
+                    "message": "Bare except: catches all exceptions, may hide bugs",
+                })
+                _warned_lines.add(i)
+
+        # Check 3: TODO/FIXME markers
+        for i, line in enumerate(lines, 1):
+            if re.search(r"#\s*(TODO|FIXME|HACK|XXX)", line, re.IGNORECASE) and i not in _warned_lines:
+                findings.append({
+                    "type": "incomplete",
+                    "line": i,
+                    "severity": "info",
+                    "message": f"Unresolved marker: {re.search(r'#\s*(TODO|FIXME|HACK|XXX)\b.*', line).group(0).strip()}",
+                })
+                _warned_lines.add(i)
+
+        # Check 4: print statements (should use logger)
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if re.match(r"^\s*print\s*\(", stripped) and "logger" not in line and i not in _warned_lines:
+                # Exclude common test/demo scenarios
+                if "tests/" not in path and "demo" not in path.lower():
+                    findings.append({
+                        "type": "style",
+                        "line": i,
+                        "severity": "info",
+                        "message": "print() used instead of logger",
+                    })
+                    _warned_lines.add(i)
+
+        # Check 5: large functions (simple heuristic — count lines between def and next def/class)
+        _in_def = False
+        _def_start = 0
+        _def_name = ""
+        _def_indent = 0
+        for i, line in enumerate(lines, 1):
+            if re.match(r"^\s*def\s+\w+\s*\(", line):
+                if _in_def and i - _def_start > 80:
+                    findings.append({
+                        "type": "complexity",
+                        "line": _def_start,
+                        "severity": "warning",
+                        "message": f"Function '{_def_name}' is {i - _def_start} lines long, consider refactoring",
+                    })
+                _in_def = True
+                _def_start = i
+                _def_name = re.match(r"^\s*def\s+(\w+)", line).group(1)
+                _def_indent = len(line) - len(line.lstrip())
+            elif _in_def and re.match(r"^\S", line) and _def_indent > 0 and len(line) - len(line.lstrip()) <= _def_indent:
+                if i - _def_start > 80:
+                    findings.append({
+                        "type": "complexity",
+                        "line": _def_start,
+                        "severity": "warning",
+                        "message": f"Function '{_def_name}' is {i - _def_start} lines long, consider refactoring",
+                    })
+                _in_def = False
+
+        return {
+            "status": "success",
+            "file": path,
+            "line_count": len(lines),
+            "char_count": len(source),
+            "findings": findings,
+            "finding_count": len(findings),
+            "summary": {
+                "errors": len([f for f in findings if f["severity"] == "error"]),
+                "warnings": len([f for f in findings if f["severity"] == "warning"]),
+                "info": len([f for f in findings if f["severity"] == "info"]),
+            },
+        }

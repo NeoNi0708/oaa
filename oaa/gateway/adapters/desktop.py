@@ -58,6 +58,13 @@ _MANAGEMENT_TYPES = {
     "save_email",
     "delete_email",
     "test_email",
+    # Chat bubble rich content
+    "chat_action",
+    "get_action_status",
+    # User preferences
+    "list_preferences",
+    "update_preference",
+    "delete_preference",
 }
 
 
@@ -275,7 +282,8 @@ class DesktopAdapter:
         This keeps the WebSocket main loop responsive so that management
         requests (config, tasks, …) are not blocked while the LLM runs.
         """
-        content = data.get("payload", {}).get("content", "")
+        payload = data.get("payload", {})
+        content = payload.get("content", "")
         if not content.strip():
             return
 
@@ -283,9 +291,14 @@ class DesktopAdapter:
         # WebSocket to address.
         token = _current_ws.set(websocket)
 
+        route_override = payload.get("route_override")
+        metadata = {}
+        if route_override in ("local", "cloud"):
+            metadata["route_override"] = route_override
+
         from ..gateway import Message
 
-        msg = Message("desktop", "local_user", content)
+        msg = Message("desktop", "local_user", content, metadata=metadata)
         if self._management:
             self._management.set_agent_state("thinking")
 
@@ -336,7 +349,11 @@ class DesktopAdapter:
         """Send a single agent chunk to the WebSocket client."""
         msg_type = chunk["type"]
         if msg_type == "done":
-            payload = {"type": "done", "payload": {"content": chunk["content"]}}
+            route = chunk.get("route")
+            payload_data = {"content": chunk["content"]}
+            if route:
+                payload_data["route"] = route
+            payload = {"type": "done", "payload": payload_data}
         elif msg_type == "tool_call":
             payload = {"type": "tool_call", "payload": {"name": chunk["name"], "args": chunk["args"]}}
         elif msg_type == "status":

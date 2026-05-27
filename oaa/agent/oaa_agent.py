@@ -26,7 +26,6 @@ from .skill_manager import SkillManager
 from .tool_schema import ATOMIC_TOOLS_SCHEMA, BROWSER_TOOLS_SCHEMA, DINGTALK_TOOLS_SCHEMA, EXTENDED_TOOLS_SCHEMA, FEISHU_TOOLS_SCHEMA, MCP_TOOLS_SCHEMA, WECHAT_TOOLS_SCHEMA
 from .tool_decorator import collect_tool_schemas
 from .tools import AtomicTools
-from .complexity_evaluator import ComplexityEvaluator
 from .metrics import MetricsCollector
 
 logger = get_logger("agent.oaa_agent")
@@ -45,7 +44,6 @@ OAA_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file_
 # The per-LLM-call timeout in loop.py (_LLM_TIMEOUT=90s) is shorter — this is
 # the safety net for infinite tool-call loops or unresponsive tool chains.
 _PROCESS_TIMEOUT = 600  # 10 minutes
-_LOCAL_GIVEUP_PHRASES = ("这个得叫我大哥来", "叫大哥", "需要更强大的模型")
 
 
 class _MergedHandler(BaseHandler):
@@ -100,13 +98,6 @@ class OAAAgent:
         ensure_data_dir(config.data_dir)
         ensure_bundled_cli(config.data_dir)
 
-        # 本地模型自动安装（只在启用配置时才检查）
-        if config.local_model.enabled:
-            from ..init import ensure_local_llm
-            install_result = ensure_local_llm(config.data_dir)
-            if install_result.get("error"):
-                logger.warning(f"本地模型安装失败: {install_result['error']}")
-
         self.config = config
         self.identity: dict = load_identity(config.data_dir)
         self.permissions = permissions
@@ -156,6 +147,13 @@ class OAAAgent:
         self.atomic.set_scheduler(scheduler)
         self.atomic.set_tool_group_manager(self)
         self.atomic.set_wechat_cli_path(config.wechat.wechat_cli_path)
+        # CloneManager + PreferencesStore for safe self-modification
+        from .clone_manager import CloneManager
+        from .preferences_store import PreferencesStore
+        self._clone_mgr = CloneManager(config.data_dir, OAA_ROOT)
+        self._prefs_store = PreferencesStore(config.data_dir)
+        self.atomic.set_clone_manager(self._clone_mgr)
+        self.atomic.set_preferences_store(self._prefs_store)
         self.extended = ExtendedTools(
             config.data_dir, permissions=permissions, wechat_adapter=wechat_adapter,
             dingtalk_client_id=config.dingtalk.client_id,
@@ -163,7 +161,6 @@ class OAAAgent:
             image_gen_config=config.image_gen,
         )
         self.extended.set_skill_manager(self.skill_mgr)
-        self.extended._oaa_agent = self  # 让 call_xiaoer 工具能访问 local_llm
         self.browser = BrowserTools()
         self.search = AiSearchTools(
             tavily_api_key=config.search.tavily_api_key,
@@ -196,118 +193,12 @@ class OAAAgent:
         self._active_skill_plugin: str | None = None
         self._plugin_extra_prompt: str = ""
 
+        # Channel context — set per-message by process_message()
+        self._channel_source: str = ""
+        self._channel_user_id: str = ""
+
         # P4 Policy engine — runtime rule enforcement for tool calls
         self._policy_engine = PolicyEngine()
-
-        # 本地模型 evaluator（仅用于路由判断，local_llm 由 OAAApp 注入）
-        _local_cfg = config.local_model
-        _eval_config = {
-            "confidence_threshold": _local_cfg.confidence_threshold,
-            "keywords_local": _local_cfg.keywords_local,
-            "keywords_cloud_analysis": _local_cfg.keywords_cloud_analysis,
-            "keywords_cloud_creation": _local_cfg.keywords_cloud_creation,
-            "keywords_cloud_external": _local_cfg.keywords_cloud_external,
-            "keywords_step": _local_cfg.keywords_step,
-        }
-        self._evaluator = ComplexityEvaluator(_eval_config)
-        self.local_llm = None       # 由 OAAApp 在 llama-server 就绪后注入
-        self._local_fallback = False  # True 时跳过 evaluator，直接走云端
-
-    def set_local_llm(self, llm_client):
-        """注入本地模型的 LLMClient 实例。由 OAAApp 在 llama-server 就绪后调用。"""
-        self.local_llm = llm_client
-        logger.info("本地模型 LLMClient 已注入")
-
-    async def _run_local(self, user_input: str) -> AsyncGenerator[dict, None]:
-        """本地模型简化路径——单次 LLM 调用，无 agent loop。"""
-        local_prompt = (
-            "你是愣小二，二愣（AI 助手）的得力小弟。\n\n"
-            "你能做:\n"
-            "- 翻译、总结、提取信息、分类整理\n"
-            "- 编写简单代码、格式化输出\n"
-            "- 回答常识问题（不需查资料）\n\n"
-            "你不能做（说'这个得叫我大哥来'）:\n"
-            "- 数学计算、复杂推理\n"
-            "- 查资料、搜索、读文件\n"
-            "- 分析商业问题、多步推理\n\n"
-            "回答简短直接，不确定不强答。"
-        )
-        yield {"type": "status", "content": "愣小二正在处理..."}
-        try:
-            response = await self.local_llm.chat([
-                {"role": "system", "content": local_prompt},
-                {"role": "user", "content": user_input},
-            ])
-            content = (response.content or "").strip()
-
-            # 质量门禁
-            quality = self._check_local_quality(content, user_input)
-            if not quality["passed"]:
-                logger.info(f"Local quality check failed: {quality['reason']}, falling back to cloud")
-                self.config.local_model.fallback_count += 1
-                async for chunk in self._cloud_fallback(user_input):
-                    yield chunk
-                return
-
-            # 统计
-            self.config.local_model.local_calls += 1
-            if hasattr(response, 'usage') and response.usage:
-                self.config.local_model.tokens_saved += (
-                    response.usage.get("total_tokens", 0)
-                )
-
-            yield {"type": "llm_output", "content": content}
-            yield {"type": "done", "content": content, "route": "local"}
-
-        except Exception as e:
-            logger.warning(f"Local model failed: {e}, falling back to cloud")
-            self.config.local_model.fallback_count += 1
-            async for chunk in self._cloud_fallback(user_input):
-                yield chunk
-
-    def _check_local_quality(self, output: str, input_text: str) -> dict:
-        """检查本地模型输出质量。返回 {"passed": bool, "reason": str}。"""
-        if len(output) < 5:
-            return {"passed": False, "reason": "output_too_short"}
-        # 检测重复循环（连续重复的短句）
-        words = output.split()
-        if len(words) >= 6:
-            for window in [2, 3]:
-                segments = [
-                    " ".join(words[i:i+window])
-                    for i in range(0, len(words), window)
-                ]
-                if any(segments.count(s) > 3 for s in segments):
-                    return {"passed": False, "reason": "repetition"}
-        # 模型明确认输
-        if any(kw in output for kw in _LOCAL_GIVEUP_PHRASES):
-            return {"passed": False, "reason": "model_gave_up"}
-        # 与输入关键词重叠率太低（简单校验）
-        input_kws = set(w for w in input_text.split() if len(w) > 1)
-        output_kws = set(w for w in output.split() if len(w) > 1)
-        if input_kws and output_kws:
-            overlap = len(input_kws & output_kws) / len(input_kws)
-            if overlap < 0.05:
-                return {"passed": False, "reason": "irrelevant_output"}
-        return {"passed": True, "reason": ""}
-
-    async def _cloud_fallback(self, user_input: str, history=None) -> AsyncGenerator[dict, None]:
-        """降级路径：跳过 evaluator，直接走云端完整 agent loop。"""
-        self._local_fallback = True
-        try:
-            async for chunk in self.process_message(user_input, history=history):
-                yield chunk
-        finally:
-            self._local_fallback = False
-
-    async def stop_local_llm(self):
-        """关闭本地 LLM 连接。"""
-        if self.local_llm:
-            try:
-                await self.local_llm.close()
-            except Exception:
-                logger.warning("关闭本地 LLM 连接时出错", exc_info=True)
-            self.local_llm = None
 
     def set_channel_adapters(self, adapters: dict):
         """Inject runtime channel adapter instances for status introspection.
@@ -680,6 +571,11 @@ class OAAAgent:
             if recent:
                 result += "\n\n## 近期对话摘要\n\n以下是你近期完成的工作和讨论的话题。当你觉得用户的问题可能是「继续之前的话题」时，在这里找找线索：\n\n" + recent
 
+        # Inject user preferences (top 5 enabled)
+        prefs_text = self._prefs_store.get_injection_text()
+        if prefs_text:
+            result += "\n\n" + prefs_text
+
         # Inject tool-group directory — only show unloaded groups
         result += "\n\n## 工具组目录\n\n"
         loaded = self._loaded_groups
@@ -698,7 +594,9 @@ class OAAAgent:
 
         return result
 
-    async def process_message(self, user_input: str, history: list | None = None) -> AsyncGenerator[dict, None]:
+    async def process_message(self, user_input: str, history: list | None = None,
+                               route_override: str | None = None,
+                               source: str = "", user_id: str = "") -> AsyncGenerator[dict, None]:
         """Process a single user message through the full agent pipeline.
 
         1. System prompt construction (identity + skill listing)
@@ -712,28 +610,20 @@ class OAAAgent:
             user_input: The user's message text.
             history: Optional list of prior message dicts (role/content) to
                      prepend as conversation context.
+            route_override: Deprecated — kept for API compatibility.
+            source: Channel the message came from (e.g. "wechat", "desktop").
+            user_id: The sender's user ID in that channel (e.g. wxid).
 
         Yields dict chunks with keys ``type``, ``content``, and optionally
         ``name`` / ``args`` / ``result``.
         """
-        logger.info("Processing message: %s...", user_input[:80])
+        # Store channel context so _inject_tools_awareness can reference it
+        self._channel_source = source
+        self._channel_user_id = user_id
+        logger.info("Processing message [%s/%s]: %s...", source, user_id, user_input[:80])
 
-        # Step 0: 本地模型路由（仅在本地模型启用且就绪时，跳过 evaluator 降级路径）
-        if not self._local_fallback and self.config.local_model.enabled and self.local_llm:
-            decision = self._evaluator.evaluate(user_input)
-            if decision.route == "local":
-                logger.info(f"Route to LOCAL (score={decision.score}): {decision.reasons}")
-                async for chunk in self._run_local(user_input):
-                    yield chunk
-                return
-            elif decision.override and decision.route == "cloud":
-                logger.info(f"Route to CLOUD (user override @cloud)")
-                self._evaluator.record_correction(user_input)
-                self.config.local_model.cloud_calls += 1
-            else:
-                self.config.local_model.cloud_calls += 1
-        else:
-            self.config.local_model.cloud_calls += 1
+        # Step 0: Route — always cloud (local model has been removed)
+        logger.info("Route to CLOUD")
 
         # Step 1: System prompt (always uses identity-only, model selects skill)
         system_prompt = self.build_system_prompt()
@@ -842,13 +732,16 @@ class OAAAgent:
                         "Message done | tools=%d | skill=%s | result_len=%d",
                         len(trajectory), skill_loaded or "-", len(final_result),
                     )
-                yield chunk
+                if chunk["type"] == "done":
+                    yield {**chunk, "route": "cloud"}
+                else:
+                    yield chunk
         except asyncio.TimeoutError:
             timed_out = True
             producer.cancel()
             final_result = f"处理超时（超过{_PROCESS_TIMEOUT // 60}分钟），请重试或拆分问题"
             logger.warning("process_message timed out after %ds", _PROCESS_TIMEOUT)
-            yield {"type": "done", "content": final_result}
+            yield {"type": "done", "content": final_result, "route": "cloud"}
         finally:
             if not producer.done():
                 producer.cancel()
@@ -884,4 +777,80 @@ class OAAAgent:
                         self.archiver.summarize_and_archive(user_input, final_result)
                     )
 
+            # Phase 3: Task retrospective — fire-and-forget analysis
+            if not timed_out and trajectory and loop._execution_chain:
+                asyncio.create_task(
+                    self._run_retrospective(
+                        user_input, trajectory, final_result, loop._execution_chain,
+                    )
+                )
+
             logger.info("Message complete | tools=%d timed_out=%s", len(trajectory), timed_out)
+
+    async def _run_retrospective(self, user_input: str, trajectory: list[dict],
+                                  final_result: str, execution_chain: list[dict]):
+        """Post-task retrospective — analyze execution chain and extract lessons.
+
+        Triggered after tasks with errors or complex tool chains.
+        Fire-and-forget (non-blocking, runs as asyncio.Task).
+
+        Findings are written to HOT memory for future reference.
+        """
+        has_errors = any(c.get("status") == "error" for c in execution_chain)
+        is_complex = len(execution_chain) >= 3
+        if not has_errors and not is_complex:
+            return
+
+        steps = []
+        for c in execution_chain:
+            tool = c.get("tool", "?")
+            status = c.get("status", "?")
+            error = c.get("error", "")
+            args = c.get("args", {})
+            args_hint = ", ".join(f"{k}={v}" for k, v in list(args.items())[:2])
+            if error:
+                steps.append(f"  - {tool}({args_hint}): {status} — {error[:120]}")
+            else:
+                steps.append(f"  - {tool}({args_hint}): {status}")
+
+        chain_summary = "\n".join(steps)
+
+        prompt = (
+            "你是一个 AI 任务复盘专家。分析以下任务执行过程，提取可改进的经验：\n\n"
+            f"用户请求: {user_input[:300]}\n\n"
+            f"执行步骤:\n{chain_summary}\n\n"
+            f"最终结果: {final_result[:300]}\n\n"
+            "请分析：\n"
+            "1. 遇到了什么问题？根因是工具 bug、LLM 选错工具/参数、还是外部环境？\n"
+            "2. 有什么可以改进的地方？\n"
+            "3. 从这个任务中学到了什么经验？\n\n"
+            "以 JSON 格式回答：\n"
+            '{"lesson": "一句话总结经验（中文，10字以上）", '
+            '"issue": "遇到的主要问题（如无则空字符串）", '
+            '"suggestion": "改进建议（如无则空字符串）"}'
+        )
+
+        try:
+            response = await self.llm.chat([
+                {"role": "system", "content": "你是一个严谨的任务复盘专家。只输出 JSON。"},
+                {"role": "user", "content": prompt},
+            ])
+            raw = response.content.strip()
+            if "```json" in raw:
+                raw = raw.split("```json")[1].split("```")[0].strip()
+            elif "```" in raw:
+                raw = raw.split("```")[1].split("```")[0].strip()
+
+            import json
+            result = json.loads(raw)
+            lesson = (result.get("lesson") or "").strip()
+            if lesson and len(lesson) > 10:
+                await self.memory.add_to_hot(f"[任务复盘] {lesson}")
+                logger.info("Retrospective lesson extracted: %s", lesson)
+
+            issue = (result.get("issue") or "").strip()
+            suggestion = (result.get("suggestion") or "").strip()
+            if issue or suggestion:
+                logger.info("Retrospective: issue=%s suggestion=%s", issue, suggestion)
+        except Exception as exc:
+            logger.debug("Retrospective analysis failed: %s", exc)

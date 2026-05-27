@@ -102,74 +102,6 @@ class TestToolFailureIntegration:
 # Test: memory health detection
 # ===================================================================
 
-class TestMemoryHealthIntegration:
-    @pytest.mark.asyncio
-    async def test_hot_memory_over_80_lines_alerts(self):
-        """When HOT memory exceeds 80 lines, inspection should alert."""
-        with tempfile.TemporaryDirectory() as tmp:
-            mm = MemoryManager(tmp)
-            inspector = IdleInspector(memory_mgr=mm)
-
-            # Fill HOT.md with >80 lines
-            hot_path = os.path.join(tmp, "HOT.md")
-            lines = [f"- [{i}] line {i}" for i in range(90)]
-            with open(hot_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines))
-
-            result = inspector._check_memory_health()
-            assert result is not None
-            assert "80" in result or "接近" in result
-
-    @pytest.mark.asyncio
-    async def test_memory_health_no_alert_below_50(self):
-        """HOT memory below 50 lines should not trigger any alert."""
-        with tempfile.TemporaryDirectory() as tmp:
-            mm = MemoryManager(tmp)
-            inspector = IdleInspector(memory_mgr=mm)
-
-            hot_path = os.path.join(tmp, "HOT.md")
-            lines = [f"- line {i}" for i in range(20)]
-            with open(hot_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines))
-
-            result = inspector._check_memory_health()
-            assert result is None
-
-
-# ===================================================================
-# Test: correction pattern detection
-# ===================================================================
-
-class TestCorrectionPatternsIntegration:
-    @pytest.mark.asyncio
-    async def test_repeated_correction_creates_proposal(self):
-        """Same lesson appearing 2+ times should create a config_change proposal."""
-        with tempfile.TemporaryDirectory() as tmp:
-            mm = MemoryManager(tmp)
-            store = ProposalStore(tmp)
-            inspector = IdleInspector(memory_mgr=mm, proposal_store=store)
-
-            await mm.add_correction("user said use file_write", "always use file_write to save files")
-            await mm.add_correction("user corrected again", "always use file_write to save files")
-
-            result = await inspector._check_correction_patterns()
-            assert result is not None
-            assert store.count_pending() >= 1
-
-            proposal = store.list_pending()[0]
-            assert proposal["type"] == "config_change"
-
-    @pytest.mark.asyncio
-    async def test_single_correction_no_proposal(self):
-        """A single correction should not trigger any proposal."""
-        with tempfile.TemporaryDirectory() as tmp:
-            mm = MemoryManager(tmp)
-            inspector = IdleInspector(memory_mgr=mm)
-
-            await mm.add_correction("some context", "a lesson to learn")
-
-            result = await inspector._check_correction_patterns()
-            assert result is None
 
 
 # ===================================================================
@@ -291,13 +223,12 @@ class TestInspectNoCrash:
 
     @pytest.mark.asyncio
     async def test_inspect_line_c_no_crash(self):
-        """_inspect_line_c() returns None gracefully with minimal deps."""
+        """_inspect_line_c() returns None gracefully (stub in Phase 2)."""
         with tempfile.TemporaryDirectory() as tmp:
             mm = MemoryManager(tmp)
             inspector = IdleInspector(memory_mgr=mm, evolution=EvolutionEngine(tmp))
             result = await inspector._inspect_line_c()
-            # May be None or a proposal, but should not crash
-            assert result is None or isinstance(result, str)
+            assert result is None
 
 
 # ===================================================================

@@ -29,10 +29,7 @@ logger = get_logger("agent.idle_inspector")
 # Minimum seconds between idle inspections
 _INSPECTION_COOLDOWN = 1800  # 30 minutes (lineA — lightweight checks only)
 
-# LineC — daily heavy checks (memory health, self-learning, etc.)
-_LINE_C_COOLDOWN = 86400  # 24 hours
-
-# Disk usage — weekly check (moved from lineA, now part of lineC)
+# Disk usage — weekly standalone check
 _DISK_CHECK_COOLDOWN = 604800  # 7 days
 
 # Max times the same proposal is delivered before suppression
@@ -40,16 +37,20 @@ _MAX_PROPOSAL_REPEATS = 3
 
 
 class IdleInspector:
-    """Multi-line idle inspection: LineA(background), LineB(task-triggered), LineC(daily), LineD(immediate).
+    """Multi-line idle inspection: LineA(background), LineB(task-triggered), LineD(immediate).
 
     LineA — Background loop every ``_INSPECTION_COOLDOWN`` (30 min):
         channel_health, memory_usage (lightweight, no LLM)
     LineB — Task-triggered (对话完成 + idle ≥15 min):
         tool_failures (current task only), usage_patterns (current task only)
-    LineC — Daily schedule (off-peak):
-        memory_health, correction_patterns, self-learning (LLM), disk_usage (weekly)
     LineD — Immediate:
         due_tasks (auto-execute, no confirmation needed)
+
+    Weekly standalone — disk_usage check (every 7 days)
+
+    Note: LineC (daily: memory_health, correction_patterns, self_learn) was
+    removed in Phase 2 to free inspection capacity for task retrospection
+    (see Phase 3 — reflection_scheduler).
     """
 
     def __init__(self, scheduler: Optional["TaskScheduler"] = None,
@@ -65,7 +66,6 @@ class IdleInspector:
         self._channel_adapters = channel_adapters or {}
         self._llm = llm
         self._last_check: float = time.time()
-        self._last_line_c_check: float = 0.0
         self._last_disk_check: float = 0.0
         self._last_activity_time: float = time.time()
         self._last_task_tools: set = set()
@@ -227,7 +227,7 @@ class IdleInspector:
         logger.info("IdleInspector background task stopped")
 
     async def _background_loop(self, interval: int):
-        """Periodic inspection loop — lineA(30min) + lineB(task-triggered, 15min idle) + lineC(daily)."""
+        """Periodic inspection loop — lineA(30min) + lineB(task-triggered, 15min idle) + weekly disk."""
         while True:
             await asyncio.sleep(interval)
             if self._paused:
@@ -244,12 +244,12 @@ class IdleInspector:
                     if b_proposal and self._notify_callback:
                         await self._notify_callback(b_proposal)
 
-                # LineC: daily heavy checks (memory health, self-learning, disk usage)
-                if time.time() - self._last_line_c_check >= _LINE_C_COOLDOWN:
-                    c_proposal = await self._inspect_line_c()
-                    if c_proposal and self._notify_callback:
-                        await self._notify_callback(c_proposal)
-                    self._last_line_c_check = time.time()
+                # Weekly disk usage check (standalone, not part of lineC)
+                if time.time() - self._last_disk_check >= _DISK_CHECK_COOLDOWN:
+                    d_proposal = self._check_disk_usage()
+                    if d_proposal and self._notify_callback:
+                        await self._notify_callback(d_proposal)
+                    self._last_disk_check = time.time()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -265,9 +265,7 @@ class IdleInspector:
             self._check_due_tasks,
             self._check_evolution_refinements,
             self._check_usage_patterns,
-            self._check_memory_health,
             self._check_tool_failures,
-            self._check_correction_patterns,
             self._check_disk_usage,
             self._check_channel_health,
             self._check_memory_usage,
@@ -335,101 +333,9 @@ class IdleInspector:
         return None
 
     async def _inspect_line_c(self) -> str | None:
-        """Run lineC inspections (daily, off-peak, heavy checks involving LLM).
-
-        Checks run in priority order — returns the first proposal found:
-        1. Memory health (HOT density, archive status)
-        2. Correction patterns (repeated lessons)
-        3. Disk usage (weekly only, not every day)
-        4. Self-learning (LLM-based skill gap analysis)
-        """
-        # 1. Memory health — no LLM needed
-        proposal = self._check_memory_health()
-        if proposal:
-            if await self._store_proposal(proposal):
-                return proposal
-
-        # 2. Correction patterns — reads correction history
-        proposal = await self._check_correction_patterns()
-        if proposal:
-            if await self._store_proposal(proposal):
-                return proposal
-
-        # 3. Disk usage — weekly granularity
-        if time.time() - self._last_disk_check >= _DISK_CHECK_COOLDOWN:
-            proposal = self._check_disk_usage()
-            if proposal:
-                if await self._store_proposal(proposal):
-                    return proposal
-            self._last_disk_check = time.time()
-
-        # 4. Self-learning — LLM-based skill gap analysis (most expensive)
-        proposal = await self._self_learn()
-        if proposal:
-            if await self._store_proposal(proposal, dedup_key="self_learn:skill_gap", max_repeats=1):
-                return proposal
-
+        """Legacy — kept for backward compatibility.  Disk check now runs
+        directly in ``_background_loop``.  Returns None."""
         return None
-
-    async def _self_learn(self) -> str | None:
-        """Self-learning: analyze skill usage patterns with LLM, propose exploration.
-
-        Heavy operation — only runs in lineC (daily). Uses LLM to identify
-        gaps in the current skill set and suggest ClawHub/GitHub searches.
-        Does NOT execute searches itself — creates a proposal the agent can
-        act on when approved.
-        """
-        if not self._evolution:
-            return None
-
-        try:
-            stats = self._evolution.stats
-        except Exception:
-            return None
-
-        skill_usage = stats.get("skill_usage", {})
-        if not skill_usage:
-            return None
-
-        # Find top 3 most used skills/domains
-        top_skills = sorted(skill_usage.items(), key=lambda x: -x[1])[:5]
-        top_summary = "\n".join(f"  - {name}: {count}次" for name, count in top_skills)
-
-        # Check already installed/crystallized skills
-        crystallized_names = {c["name"] for c in stats.get("crystallized", [])}
-
-        # Use LLM to analyze skill gaps (skipped if no LLM available)
-        llm_analysis = ""
-        if self._llm and top_skills:
-            try:
-                prompt = (
-                    "根据以下当前技能使用数据，分析 agent 可能缺少什么有用的技能。\n"
-                    "只输出 1-2 句分析结论，不要列清单。\n\n"
-                    f"常用技能:\n{top_summary}\n"
-                    f"已固化技能: {', '.join(crystallized_names) if crystallized_names else '无'}\n"
-                )
-                llm_response = await self._llm.chat([{"role": "user", "content": prompt}])
-                llm_analysis = getattr(llm_response, 'content', '') or ''
-            except Exception as exc:
-                logger.debug("Self-learn LLM skipped: %s", exc)
-
-        # Build a concise proposal
-        lines = [
-            "🌙 日调度分析：以下技能使用频繁，可考虑扩展能力：",
-            "",
-            top_summary,
-        ]
-        if crystallized_names:
-            lines.append(f"\n已固化: {', '.join(crystallized_names)}")
-        if llm_analysis:
-            lines.append(f"\n{llm_analysis}")
-        lines.append(
-            "\n建议: 用 ``skill_search`` 探索 ClawHub/GitHub 上是否有更好的替代技能，"
-            "或用 ``skill_create`` 将高频操作固化为新技能。"
-        )
-        lines.append("\n在进化工厂页面点击「批准执行」或「忽略」")
-
-        return "\n".join(lines)
 
     async def _store_proposal(self, proposal_text: str, dedup_key: str = "",
                               max_repeats: int = 0) -> bool:
@@ -708,61 +614,21 @@ class IdleInspector:
         )
         return proposal
 
-    def _check_memory_health(self) -> str | None:
-        """Check memory system health — density and archive status.
-
-        Suggests cleanup when HOT memory approaches capacity or archived
-        topics could be promoted back.
-        """
-        if not self._memory_mgr:
-            return None
-
-        suggestions = []
-
-        # 1. Check HOT memory density
-        try:
-            hot = self._memory_mgr.load_hot()
-            if hot:
-                line_count = len(hot.split("\n"))
-                if line_count > 80:
-                    suggestions.append(
-                        f"持久记忆已存储 {line_count} 条记录，接近压缩上限。"
-                        f"建议审查整理，保留最有价值的信息。"
-                    )
-                elif line_count > 50:
-                    suggestions.append(
-                        f"持久记忆已有 {line_count} 条记录，可适时回顾整理。"
-                    )
-        except Exception:
-            pass
-
-        # 2. Check archive topics for potential review
-        try:
-            warm_topics = self._memory_mgr.list_warm_topics()
-            if warm_topics:
-                suggestions.append(
-                    f"存档区有 {len(warm_topics)} 个主题文件，"
-                    f"可回顾是否有可重新纳入 HOT 记忆的内容。"
-                )
-        except Exception:
-            pass
-
-        if not suggestions:
-            return None
-
-        proposal = (
-            "💡 空闲分析：发现以下可改进的方向：\n\n"
-            + "\n".join(f"  - {s}" for s in suggestions)
-            + "\n\n在进化工厂页面点击「批准执行」或「忽略」"
-        )
-        return proposal
-
     async def _check_tool_failures(self, tool_filter: set[str] | None = None) -> str | None:
-        """Check logged tool failures and create structured proposals.
+        """Check logged tool failures with root cause analysis.
 
-        When a tool fails ≥2 times, creates a ``Proposal`` with structured
-        actions (``read_own_source`` → ``self_improve`` → pycache → reload)
-        and stores it in ``ProposalStore``.  Returns notification text.
+        Failure categories and their handling:
+
+        ==================== ========== ==============================================
+        Category             Threshold  Action
+        ==================== ========== ==============================================
+        ``tool_bug``         ≥2         Create ``TYPE_TOOL_FIX`` proposal
+        ``llm_error``        ≥3         Create correction entry (NOT tool-fix)
+        ``parameter_error``  ≥3         Create correction entry (NOT tool-fix)
+        ``unknown`` (+LLM)   ≥2         LLM analyzes execution chain, then acts
+        ``unknown`` (no LLM) ≥2         Conservative fallback: treat as ``tool_bug``
+        ``infra_error``      any        Skip (transient)
+        ==================== ========== ==============================================
         """
         if not self._memory_mgr:
             return None
@@ -771,169 +637,318 @@ class IdleInspector:
             failures = self._memory_mgr.load_tool_failures(50)
         except Exception:
             return None
-
         if not failures:
             return None
 
-        # Skip known stub/limitation tools
+        # Skip stub / known-init errors
         _STUB_TOOLS = frozenset()
-
-        # Skip failures caused by missing initialization (not tool bugs)
-        _SKIP_ERRORS = (
-            "未初始化", "not initialized", "未配置",
-        )
+        _SKIP_ERRORS = ("未初始化", "not initialized", "未配置")
         valid_failures = [
             f for f in failures
             if f["tool"] not in _STUB_TOOLS
             and not any(s in f.get("error", "") for s in _SKIP_ERRORS)
         ]
+        if not valid_failures:
+            return None
 
-        tool_counts = Counter(f["tool"] for f in valid_failures)
+        # Load successes for recovery check
+        try:
+            successes = self._memory_mgr.load_tool_successes(100)
+        except Exception:
+            successes = []
 
-        for tool, count in tool_counts.most_common(3):
-            if count < 2:
+        # Tool → source file mapping (same as before)
+        tool_to_file = {
+            "ask_user": "oaa/agent/tools.py",
+            "file_write": "oaa/agent/tools.py",
+            "file_patch": "oaa/agent/tools.py",
+            "shell_run": "oaa/agent/tools.py",
+            "code_run": "oaa/agent/tools.py",
+            "code_exec": "oaa/agent/tools.py",
+            "read_own_source": "oaa/agent/tools.py",
+            "list_own_structure": "oaa/agent/tools.py",
+            "reload_module": "oaa/agent/tools.py",
+            "rollback_change": "oaa/agent/tools.py",
+            "memory_recall": "oaa/agent/tools.py",
+            "correction_log": "oaa/agent/tools.py",
+            "self_reflect": "oaa/agent/tools.py",
+            "update_working_checkpoint": "oaa/agent/tools.py",
+            "word_doc": "oaa/agent/extended_tools.py",
+            "excel_xlsx": "oaa/agent/extended_tools.py",
+            "email_send": "oaa/agent/extended_tools.py",
+            "skill_load": "oaa/agent/extended_tools.py",
+            "skill_create": "oaa/agent/extended_tools.py",
+            "ai_search": "oaa/agent/ai_search_tool.py",
+            "web_scan": "oaa/agent/extended_tools.py",
+            "plan_create": "oaa/agent/extended_tools.py",
+            "plan_update": "oaa/agent/extended_tools.py",
+            "plan_list": "oaa/agent/extended_tools.py",
+        }
+
+        from collections import defaultdict
+        by_tool: dict[str, list[dict]] = defaultdict(list)
+        for f in valid_failures:
+            by_tool[f["tool"]].append(f)
+
+        for tool, tool_fails in by_tool.items():
+            if len(tool_fails) < 2:
                 continue
-            # Skip ignored tools
-            if self.is_tool_ignored(tool):
-                continue
-            # Skip if not in tool_filter (lineB filtering)
             if tool_filter is not None and tool not in tool_filter:
                 continue
-            # Skip if proposal already exists for this tool
+            if self.is_tool_ignored(tool):
+                continue
             if self._proposal_store and self._should_skip_proposal(tool, "tool_fix"):
                 continue
 
-            latest = [f for f in valid_failures if f["tool"] == tool][-1]
+            # Check resolved by subsequent success
+            tool_successes = [s for s in successes if s["tool"] == tool]
+            if tool_fails and tool_successes:
+                last_fail_ts = tool_fails[-1].get("timestamp", "")
+                last_success_ts = tool_successes[-1].get("timestamp", "")
+                if last_success_ts >= last_fail_ts:
+                    continue
+
+            # Analyze category distribution
+            cats = Counter(f.get("category", "unknown") for f in tool_fails)
+            total = len(tool_fails)
+            latest = tool_fails[-1]
             error_snippet = latest.get("error", "")[:120]
 
-            tool_to_file = {
-                "ask_user": "oaa/agent/tools.py",
-                "file_write": "oaa/agent/tools.py",
-                "file_patch": "oaa/agent/tools.py",
-                "shell_run": "oaa/agent/tools.py",
-                "code_run": "oaa/agent/tools.py",
-                "code_exec": "oaa/agent/tools.py",
-                "read_own_source": "oaa/agent/tools.py",
-                "list_own_structure": "oaa/agent/tools.py",
-                "reload_module": "oaa/agent/tools.py",
-                "rollback_change": "oaa/agent/tools.py",
-                "memory_recall": "oaa/agent/tools.py",
-                "correction_log": "oaa/agent/tools.py",
-                "self_reflect": "oaa/agent/tools.py",
-                "update_working_checkpoint": "oaa/agent/tools.py",
-                "word_doc": "oaa/agent/extended_tools.py",
-                "excel_xlsx": "oaa/agent/extended_tools.py",
-                "email_send": "oaa/agent/extended_tools.py",
-                "skill_load": "oaa/agent/extended_tools.py",
-                "skill_create": "oaa/agent/extended_tools.py",
-                "ai_search": "oaa/agent/ai_search_tool.py",
-                "web_scan": "oaa/agent/extended_tools.py",
-                "plan_create": "oaa/agent/extended_tools.py",
-                "plan_update": "oaa/agent/extended_tools.py",
-                "plan_list": "oaa/agent/extended_tools.py",
-            }
-            source_file = tool_to_file.get(tool, "oaa/agent/tools.py")
+            # ----------------------------------------------------------------
+            # tool_bug (≥2) → create tool-fix proposal immediately
+            # ----------------------------------------------------------------
+            if cats.get("tool_bug", 0) >= 2:
+                source_file = tool_to_file.get(tool, "oaa/agent/tools.py")
+                problem_context = {
+                    "type": "tool_failure",
+                    "tool_name": tool,
+                    "failure_count": total,
+                    "last_error": error_snippet,
+                    "error_history": [f.get("error", "")[:200] for f in tool_fails if f.get("error")][-3:],
+                    "tool_source": source_file,
+                    "categories": dict(cats),
+                    "analysis": "代码异常 — 需检查源码修复",
+                }
+                if self._proposal_store:
+                    from .proposal import Proposal, TYPE_TOOL_FIX
+                    prop = Proposal(
+                        type=TYPE_TOOL_FIX,
+                        title=f"{tool} 累计失败 {total} 次需修复",
+                        problem=f"工具 {tool} 累计失败 {total} 次（{cats.get('tool_bug', 0)} 次为代码异常）。最后错误: {error_snippet}",
+                        benefit=f"修复后 {tool} 可正常使用",
+                        target=tool,
+                        actions=None,
+                        problem_context=problem_context,
+                    )
+                    await self._proposal_store.add(prop)
+                return (
+                    "🔧 空闲诊断：发现工具 **{}** 存在代码异常（失败 {} 次）\n\n"
+                    "  - 最后错误: {}\n"
+                    "  - 类别: 代码异常 — agent 将自动分析源码并修复\n\n"
+                    "在进化工厂页面点击「批准执行」或「忽略」"
+                ).format(tool, total, error_snippet)
 
-            # Build problem_context instead of templated actions
-            # The repair_loop will feed this to the agent and let it decide
-            # the repair approach dynamically.
-            problem_context = {
-                "type": "tool_failure",
-                "tool_name": tool,
-                "failure_count": count,
-                "last_error": error_snippet,
-                "error_history": [f.get("error", "")[:200] for f in failures if f["tool"] == tool][-3:],
-                "tool_source": source_file,
-            }
+            # ----------------------------------------------------------------
+            # llm_error + parameter_error (combined ≥3) → correction entry
+            # ----------------------------------------------------------------
+            llm_count = cats.get("llm_error", 0)
+            param_count = cats.get("parameter_error", 0)
+            if llm_count + param_count >= 3:
+                if llm_count >= param_count:
+                    # LLM chose wrong tool or wrong arguments
+                    errors = [f.get("error", "")[:150] for f in tool_fails
+                              if f.get("category") == "llm_error"]
+                    contexts = [f.get("context", "") for f in tool_fails if f.get("context")]
+                    top_err = Counter(e for e in errors if e).most_common(1)
+                    err_detail = top_err[0][0] if top_err else error_snippet
+                    ctx_detail = f"（任务: {contexts[-1]}）" if contexts else ""
+                    lesson = (
+                        f"工具 {tool} 的多次失败源于 LLM 选择了错误的参数或方法。"
+                        f"常见错误: {err_detail}{ctx_detail}"
+                    )
+                else:
+                    # Parameter content errors (bad path, URL, etc.)
+                    errors = [f.get("error", "")[:150] for f in tool_fails
+                              if f.get("category") == "parameter_error"]
+                    top_err = Counter(e for e in errors if e).most_common(1)
+                    err_detail = top_err[0][0] if top_err else error_snippet
+                    lesson = (
+                        f"工具 {tool} 的参数错误 — 检查输入的路径/URL/参数是否正确。"
+                        f"常见错误: {err_detail}"
+                    )
 
-            # Create structured proposal (no fixed actions — repair_loop handles it)
-            if self._proposal_store:
-                from .proposal import Proposal, TYPE_TOOL_FIX
-                prop = Proposal(
-                    type=TYPE_TOOL_FIX,
-                    title=f"{tool} 累计失败 {count} 次需修复",
-                    problem=f"工具 {tool} 累计失败 {count} 次。最后错误: {error_snippet}",
-                    benefit=f"修复后 {tool} 可正常使用",
-                    target=tool,
-                    actions=None,  # repair_loop dynamically resolves these
-                    problem_context=problem_context,
-                )
-                await self._proposal_store.add(prop)
-                prop_id = prop.id
-            else:
-                prop_id = ""
+                logger.info("Tool %s: creating correction entry (%s), not tool-fix", tool,
+                            "llm_error" if llm_count >= param_count else "parameter_error")
+                if self._memory_mgr:
+                    await self._memory_mgr.add_correction(
+                        context=f"工具 {tool} 的 {total} 次失败归类为 {'LLM 选择不当' if llm_count >= param_count else '参数错误'}",
+                        lesson=lesson,
+                    )
+                continue
 
-            # Return notification text
-            lines = [
-                f"**{tool}** 最近失败 {count} 次",
-                f"  - 最后错误: {error_snippet}",
-                f"  - agent 将自动分析根因并选择修复方案",
-            ]
-            if prop_id:
-                lines.append(f"  - 提案ID: {prop_id}（可用 proposal_approve 执行）")
+            # ----------------------------------------------------------------
+            # unknown (≥2) → LLM analysis if available, else conservative fallback
+            # ----------------------------------------------------------------
+            if cats.get("unknown", 0) >= 2:
+                if self._llm:
+                    analysis = await self._llm_analyze_failures(tool, tool_fails, cats)
+                    if analysis:
+                        rec = analysis.get("recommendation", "")
+                        if rec == "tool_bug":
+                            # LLM confirmed it's a tool bug — create fix proposal
+                            source_file = tool_to_file.get(tool, "oaa/agent/tools.py")
+                            problem_context = {
+                                "type": "tool_failure",
+                                "tool_name": tool,
+                                "failure_count": total,
+                                "last_error": error_snippet,
+                                "error_history": [f.get("error", "")[:200] for f in tool_fails if f.get("error")][-3:],
+                                "tool_source": source_file,
+                                "categories": dict(cats),
+                                "analysis": analysis.get("reasoning", "LLM 分析确认工具异常"),
+                            }
+                            if self._proposal_store:
+                                from .proposal import Proposal, TYPE_TOOL_FIX
+                                prop = Proposal(
+                                    type=TYPE_TOOL_FIX,
+                                    title=f"{tool} 累计失败 {total} 次需修复",
+                                    problem=f"工具 {tool} 累计失败 {total} 次。LLM 分析: {analysis.get('reasoning', '')[:200]}",
+                                    benefit=f"修复后 {tool} 可正常使用",
+                                    target=tool,
+                                    actions=None,
+                                    problem_context=problem_context,
+                                )
+                                await self._proposal_store.add(prop)
+                            return (
+                                "🔧 空闲诊断：发现工具 **{}** 存在异常（失败 {} 次）\n\n"
+                                "  - 最后错误: {}\n"
+                                "  - LLM 分析: {}\n\n"
+                                "在进化工厂页面点击「批准执行」或「忽略」"
+                            ).format(tool, total, error_snippet, analysis.get("reasoning", "")[:200])
+                        elif rec in ("llm_error", "parameter_error"):
+                            # LLM says it's not a tool bug — create correction entry
+                            await self._memory_mgr.add_correction(
+                                context=f"工具 {tool} 的 {total} 次失败（LLM 分析）",
+                                lesson=analysis.get("reasoning", f"LLM 分析认为属于 {rec}，而非工具异常"),
+                            )
+                            continue
+                        # Unknown recommendation — skip
+                        continue
+                    # LLM analysis failed — skip (don't create false positives)
+                    logger.debug("LLM analysis returned empty for %s failures, skipping", tool)
+                    continue
+                else:
+                    # No LLM available — conservative fallback for backward compat
+                    # Treat as potential tool bug (old records without category)
+                    source_file = tool_to_file.get(tool, "oaa/agent/tools.py")
+                    problem_context = {
+                        "type": "tool_failure",
+                        "tool_name": tool,
+                        "failure_count": total,
+                        "last_error": error_snippet,
+                        "error_history": [f.get("error", "")[:200] for f in tool_fails if f.get("error")][-3:],
+                        "tool_source": source_file,
+                        "categories": dict(cats),
+                        "analysis": "无法确定根因（无 LLM 分析）— 按潜在工具异常处理",
+                    }
+                    if self._proposal_store:
+                        from .proposal import Proposal, TYPE_TOOL_FIX
+                        prop = Proposal(
+                            type=TYPE_TOOL_FIX,
+                            title=f"{tool} 累计失败 {total} 次需检查",
+                            problem=f"工具 {tool} 累计失败 {total} 次，无法自动分析根因。最后错误: {error_snippet}",
+                            benefit=f"修复后 {tool} 可正常使用",
+                            target=tool,
+                            actions=None,
+                            problem_context=problem_context,
+                        )
+                        await self._proposal_store.add(prop)
+                    return (
+                        "🔧 空闲诊断：工具 **{}** 失败 {} 次（无法自动分析根因）\n\n"
+                        "  - 最后错误: {}\n"
+                        "  - 已生成提案，请在进化工厂查看\n\n"
+                        "在进化工厂页面点击「批准执行」或「忽略」"
+                    ).format(tool, total, error_snippet)
 
-            return (
-                "🔧 空闲诊断：发现以下工具存在反复失败：\n\n"
-                + "\n\n".join(lines)
-                + "\n\n在进化工厂页面点击「批准执行」或「忽略」"
-            )
+            # infra_error: silently skip
+            # Other low-count categories: skip
 
         return None
 
-    async def _check_correction_patterns(self) -> str | None:
-        """Check for repeated correction patterns and propose modify_own_prompt.
+    async def _llm_analyze_failures(self, tool: str, tool_fails: list[dict],
+                                     cats: Counter) -> dict | None:
+        """Use LLM to analyze tool failure execution chains and determine root cause.
 
-        When the same lesson appears 2+ times in recent corrections,
-        creates a structured Proposal with ``modify_own_prompt`` action.
+        Returns a dict with ``recommendation`` (``tool_bug`` / ``llm_error`` /
+        ``parameter_error``) and ``reasoning`` (summary text).
+        Returns ``None`` if analysis fails or LLM is unavailable.
         """
-        if not self._memory_mgr:
+        if not self._llm:
             return None
+
+        # Build a compact summary of the failures with their execution chains
+        fail_lines = []
+        for f in tool_fails[-5:]:  # last 5 failures
+            ts = f.get("timestamp", "?")[:16]
+            err = f.get("error", "")[:200]
+            ctx = f.get("context", "")[:150]
+            chain_raw = f.get("chain", "")
+            chain_summary = ""
+            if chain_raw:
+                try:
+                    import json
+                    chain = json.loads(chain_raw)
+                    chain_summary = " → ".join(
+                        f"{c.get('tool', '?')}({c.get('status', '?')})"
+                        for c in chain[-4:]
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    chain_summary = chain_raw[:200]
+            fail_lines.append(
+                f"  [{ts}] error: {err}\n"
+                f"        context: {ctx}\n"
+                f"        chain: {chain_summary}"
+            )
+
+        summary = "\n".join(fail_lines)
+
+        prompt = (
+            "你是一个 AI 根因分析专家。分析以下工具调用失败记录，判断根本原因属于哪一类：\n\n"
+            "1. **tool_bug**: 工具代码本身有 bug（如 KeyError, TypeError, 逻辑错误）\n"
+            "2. **llm_error**: LLM 选择了错误的工具、传了无效参数、或策略失误\n"
+            "3. **parameter_error**: 参数格式正确但内容无效（路径不存在、URL 404、权限不足）\n"
+            "4. **infra_error**: 基础设施问题（网络超时、服务不可用）\n\n"
+            f"工具名称: {tool}\n"
+            f"总失败次数: {len(tool_fails)}\n"
+            f"当前分类统计: {dict(cats)}\n\n"
+            f"失败记录（含执行链）：\n{summary}\n\n"
+            "请以 JSON 格式回答，不要包含多余文字：\n"
+            '{"recommendation": "tool_bug|llm_error|parameter_error", '
+            '"reasoning": "用一句话解释分析结论（中文）"}'
+        )
 
         try:
-            corrections = self._memory_mgr.load_recent_corrections(20)
-        except Exception:
+            response = await self._llm.chat([
+                {"role": "system", "content": "你是一个严谨的 AI 根因分析专家。只输出 JSON。"},
+                {"role": "user", "content": prompt},
+            ])
+            raw = response.content.strip()
+            # Extract JSON from potential markdown fences
+            if "```json" in raw:
+                raw = raw.split("```json")[1].split("```")[0].strip()
+            elif "```" in raw:
+                raw = raw.split("```")[1].split("```")[0].strip()
+            import json
+            result = json.loads(raw)
+            if result.get("recommendation") not in ("tool_bug", "llm_error", "parameter_error"):
+                logger.debug("LLM analysis returned unexpected recommendation: %s", result.get("recommendation"))
+                return None
+            logger.info("LLM root cause analysis for %s: %s → %s",
+                        tool, result["recommendation"], result.get("reasoning", ""))
+            return result
+        except Exception as exc:
+            logger.debug("LLM analysis failed for %s: %s", tool, exc)
             return None
-
-        if len(corrections) < 2:
-            return None
-
-        lessons = [c["lesson"] for c in corrections if c.get("lesson")]
-        repeated = [(l, c) for l, c in Counter(lessons).items() if c >= 2]
-
-        if not repeated:
-            return None
-
-        for lesson, count in repeated[:3]:
-            target = f"correction:{lesson[:40]}"
-            if self.is_tool_ignored(target):
-                continue
-            if self._proposal_store and self._should_skip_proposal(target, "config_change"):
-                continue
-
-            actions = [
-                {"tool": "modify_own_prompt", "args": {"action": "write", "section": "agents", "content": lesson},
-                 "description": f"将规则「{lesson}」写入 agents 段"},
-            ]
-            if self._proposal_store:
-                from .proposal import Proposal, TYPE_CONFIG_CHANGE
-                await self._proposal_store.add(Proposal(
-                    type=TYPE_CONFIG_CHANGE,
-                    title=f"修正模式：{lesson[:40]}",
-                    problem=f"该教训重复出现 {count} 次，说明 agent 未记住",
-                    benefit=f"写入提示词后 agent 不再重复犯错",
-                    target=target,
-                    actions=actions,
-                ))
-
-            return (
-                "📝 响应模式优化：发现以下反复修正：\n\n"
-                + f"  - **{lesson}**（重复 {count} 次）\n"
-                + f"    操作: 用 ``modify_own_prompt action=write section=agents`` "
-                + "在 agents 段中加入该规则"
-                + "\n\n在进化工厂页面点击「批准执行」或「忽略」"
-            )
-
-        return None
 
     # ------------------------------------------------------------------
     # Phase 6: Disk usage check

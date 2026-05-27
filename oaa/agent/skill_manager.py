@@ -39,13 +39,29 @@ class SkillInfo:
         self.sop_md: str = ""
         self.knowledge: list[str] = []
         self.tools: list[dict] = []
+        self.identity_md: str = ""           # P2 skill plugin: persona/style
+        self.rules_data: dict = {}            # P2 skill plugin: constraints
         self._description: str = ""
+        self._display_name: str = ""  # Chinese name from SKILL.md heading
+        self._summary: str = ""       # First-paragraph summary
         self._mtime_cache: dict[str, float] = {}
 
     @property
     def description(self) -> str:
-        """Short description from SKILL.md frontmatter, or name as fallback."""
-        return self._description or self.name
+        """Short description from SKILL.md frontmatter, or summary, or name as fallback."""
+        return self._description or self._summary or self.name
+
+    @property
+    def display_name(self) -> str:
+        """Chinese display name from SKILL.md heading, or name as fallback."""
+        return self._display_name or self.name
+
+    @property
+    def tool_names(self) -> set[str]:
+        """Return the set of tool names defined in this skill's tools.json (P2 plugin)."""
+        if isinstance(self.tools, list):
+            return {t for t in self.tools if isinstance(t, str)}
+        return set()
 
     def _mtime(self, file_path: Path) -> float:
         """Return mtime of *file_path* or 0 if it doesn't exist."""
@@ -76,6 +92,21 @@ class SkillInfo:
             raw = skill_file.read_text(encoding="utf-8")
             meta, body = _parse_frontmatter(raw)
             self._description = meta.get("description", "")
+            self._display_name = meta.get("name", "")
+            # Extract first # heading as display_name fallback
+            if not self._display_name and body:
+                m = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
+                if m:
+                    self._display_name = m.group(1).strip()
+            # Extract first paragraph as summary fallback
+            if not self._description and body:
+                # Remove headings, then find first non-empty paragraph
+                clean = re.sub(r"^#+\s+.*$", "", body, flags=re.MULTILINE).strip()
+                for para in clean.split("\n\n"):
+                    para = para.strip()
+                    if para and len(para) > 5:
+                        self._summary = para[:120].strip()
+                        break
             self.skill_md = body
 
         # SOP.md
@@ -92,6 +123,16 @@ class SkillInfo:
                 if f.is_file() and f.suffix in (".md", ".txt"):
                     knowledge.append(f.read_text(encoding="utf-8"))
             self.knowledge = knowledge
+
+        # identity.md — P2 skill plugin persona
+        identity_file = skill_path / "identity.md"
+        if self._changed("identity_md", identity_file) and identity_file.exists():
+            self.identity_md = identity_file.read_text(encoding="utf-8")
+
+        # rules.json — P2 skill plugin constraints
+        rules_file = skill_path / "rules.json"
+        if self._changed("rules_data", rules_file) and rules_file.exists():
+            self.rules_data = json.loads(rules_file.read_text(encoding="utf-8"))
 
         # tools.json
         tools_file = skill_path / "tools.json"

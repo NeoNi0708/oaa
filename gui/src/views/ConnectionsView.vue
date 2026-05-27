@@ -955,9 +955,11 @@ setTimeout(() => loadEmails(), 100)
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
   width: 480px;
   max-width: 90vw;
-  max-height: 85vh;
+  height: 85vh;
+  max-height: 680px;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   animation: slideUp 0.25s ease;
 }
 @keyframes slideUp {
@@ -971,6 +973,7 @@ setTimeout(() => loadEmails(), 100)
   justify-content: space-between;
   padding: var(--oaa-space-5) var(--oaa-space-6);
   border-bottom: 1px solid var(--oaa-border-subtle);
+  flex-shrink: 0;
 }
 .modal-header h3 {
   font-size: var(--oaa-text-lg);
@@ -1002,6 +1005,8 @@ setTimeout(() => loadEmails(), 100)
   display: flex;
   flex-direction: column;
   gap: var(--oaa-space-4);
+  flex: 1;
+  min-height: 0;
 }
 
 .form-group {
@@ -1040,7 +1045,6 @@ setTimeout(() => loadEmails(), 100)
 .advanced-details {
   border: 1px solid var(--oaa-border-subtle);
   border-radius: var(--oaa-radius-md);
-  overflow: hidden;
 }
 .advanced-summary {
   font-size: var(--oaa-text-xs);
@@ -1086,6 +1090,7 @@ setTimeout(() => loadEmails(), 100)
   gap: var(--oaa-space-3);
   padding: var(--oaa-space-4) var(--oaa-space-6);
   border-top: 1px solid var(--oaa-border-subtle);
+  flex-shrink: 0;
 }
 
 /* Toast */

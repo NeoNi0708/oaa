@@ -272,20 +272,46 @@ class MemoryManager:
         return "\n\n".join(parts)
 
     # ------------------------------------------------------------------
-    # Tool failure tracking
+    # Tool result tracking (failures + successes)
     # ------------------------------------------------------------------
 
-    def add_tool_failure(self, tool_name: str, args: dict, error_msg: str) -> dict:
-        """Record a tool execution failure to tool_failures.md."""
+    _FAILURE_CATEGORIES = frozenset({
+        "tool_bug", "llm_error", "parameter_error", "infra_error", "unknown",
+    })
+
+    def add_tool_failure(self, tool_name: str, args: dict, error_msg: str,
+                         category: str = "unknown",
+                         task_context: str = "",
+                         execution_chain: list | None = None) -> dict:
+        """Record a tool execution failure to tool_failures.md.
+
+        Args:
+            category: root cause category — ``tool_bug`` (code bug),
+                      ``llm_error`` (wrong tool/args chosen by LLM),
+                      ``parameter_error`` (valid args but bad content),
+                      ``infra_error`` (network/auth/permission transient),
+                      or ``unknown`` (needs LLM analysis).
+            task_context: what the agent was trying to do.
+            execution_chain: recent tool calls leading to this failure,
+                             each as ``{"tool": str, "args": dict, "status": str}``.
+        """
+        if category not in self._FAILURE_CATEGORIES:
+            category = "unknown"
         import json
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         args_str = json.dumps(args, ensure_ascii=False)[:200]
+        chain_str = json.dumps(execution_chain or [], ensure_ascii=False)[:800]
         entry = (
             f"\n## {timestamp}\n"
             f"- **tool**: {tool_name}\n"
             f"- **error**: {error_msg[:300]}\n"
             f"- **args**: {args_str}\n"
+            f"- **category**: {category}\n"
         )
+        if task_context:
+            entry += f"- **context**: {task_context[:300]}\n"
+        if execution_chain:
+            entry += f"- **chain**: {chain_str}\n"
         path = self._dir / "tool_failures.md"
         existing = path.read_text(encoding="utf-8") if path.exists() else ""
         path.write_text(existing + entry, encoding="utf-8")
@@ -303,22 +329,34 @@ class MemoryManager:
                 continue
             lines = block.strip().split("\n")
             header = lines[0].strip()
-            tool = ""
-            error = ""
-            args = ""
-            for l in lines:
-                if l.startswith("- **tool**"):
-                    tool = l.split(":", 1)[-1].strip()
-                elif l.startswith("- **error**"):
-                    error = l.split(":", 1)[-1].strip()
-                elif l.startswith("- **args**"):
-                    args = l.split(":", 1)[-1].strip()
-            entries.append({
+            entry: dict = {
                 "timestamp": header,
-                "tool": tool,
-                "error": error,
-                "args": args,
-            })
+                "tool": "",
+                "error": "",
+                "args": "",
+                "category": "unknown",
+                "context": "",
+                "chain": "",
+            }
+            for l in lines:
+                key_val = l.split(":", 1)
+                if len(key_val) < 2:
+                    continue
+                key_part = key_val[0].strip().lstrip("- **").rstrip("**")
+                val = key_val[1].strip()
+                if key_part == "tool":
+                    entry["tool"] = val
+                elif key_part == "error":
+                    entry["error"] = val
+                elif key_part == "args":
+                    entry["args"] = val
+                elif key_part == "category":
+                    entry["category"] = val
+                elif key_part == "context":
+                    entry["context"] = val
+                elif key_part == "chain":
+                    entry["chain"] = val
+            entries.append(entry)
         return entries[-limit:]
 
     def count_tool_failures(self, since_timestamp: str = "") -> dict:
@@ -328,3 +366,48 @@ class MemoryManager:
             entries = [e for e in entries if e["timestamp"] >= since_timestamp]
         tool_counts = Counter(e["tool"] for e in entries)
         return {"status": "success", "total": len(entries), "by_tool": dict(tool_counts)}
+
+    # ------------------------------------------------------------------
+    # Tool success tracking
+    # ------------------------------------------------------------------
+
+    def add_tool_success(self, tool_name: str, args: dict) -> dict:
+        """Record a tool execution success to tool_successes.md."""
+        import json
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        args_str = json.dumps(args, ensure_ascii=False)[:200]
+        entry = (
+            f"\n## {timestamp}\n"
+            f"- **tool**: {tool_name}\n"
+            f"- **args**: {args_str}\n"
+        )
+        path = self._dir / "tool_successes.md"
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + entry, encoding="utf-8")
+        return {"status": "success"}
+
+    def load_tool_successes(self, limit: int = 50) -> list[dict]:
+        """Return the most recent *limit* tool success records."""
+        path = self._dir / "tool_successes.md"
+        if not path.exists():
+            return []
+        text = path.read_text(encoding="utf-8")
+        entries = []
+        for block in re.split(r"\n## ", text):
+            if not block.strip():
+                continue
+            lines = block.strip().split("\n")
+            header = lines[0].strip()
+            tool = ""
+            args = ""
+            for l in lines:
+                if l.startswith("- **tool**"):
+                    tool = l.split(":", 1)[-1].strip()
+                elif l.startswith("- **args**"):
+                    args = l.split(":", 1)[-1].strip()
+            entries.append({
+                "timestamp": header,
+                "tool": tool,
+                "args": args,
+            })
+        return entries[-limit:]

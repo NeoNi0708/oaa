@@ -6,6 +6,7 @@ export interface ChatMessage {
   name?: string
   args?: string
   result?: string
+  route?: 'local' | 'cloud'
 }
 
 export interface QRCodeData {
@@ -18,6 +19,24 @@ export interface ConfirmRequest {
   requestId: string
   operation: string
   details: string
+}
+
+export interface WorkEntry {
+  id: number
+  type: 'llm_output' | 'tool_call' | 'tool_result' | 'status' | 'error' | 'done'
+  content: string
+  name?: string
+  args?: string
+  result?: string
+  step_id?: number
+  phase?: string
+  duration?: number
+}
+
+function _isErrorMessage(text: string): boolean {
+  return /^模型调用失败/.test(text)
+    || /^处理超时/.test(text)
+    || text.includes('[系统错误]')
 }
 
 // Management response payload (same shape from all handlers)
@@ -49,6 +68,12 @@ export function useWebSocket() {
   const configUpdated = ref(0)  // incremented on config_updated push events
   const proposalCompleted = ref(0)  // incremented on proposal_completed push events
   const channelStatusChanged = ref(0)  // incremented on channel_disconnected push
+  const tasksUpdated = ref(0)  // incremented on task_updated push events
+  const proposalAdded = ref(0)  // incremented on proposal_added push events
+  const workEntries = ref<WorkEntry[]>([])
+  let _workEntryId = 0
+  // When true, the next llm_output starts a fresh assistant bubble (set after tool_call/tool_result)
+  let _bubbleClosed = false
 
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let isDestroyed = false
@@ -107,32 +132,93 @@ export function useWebSocket() {
         // Chat / streaming chunk
         switch (data.type) {
           case 'done': {
-            // Trim to prevent whitespace-only bubbles showing as empty
-            const finalContent = (p.content || streamingContent.value || '').trim()
-            if (finalContent) {
-              messages.value.push({ role: 'assistant', content: finalContent })
-            }
             streaming.value = false
-            streamingContent.value = ''
+            // 标记当前气泡已结束，下次 llm_output 从新气泡开始
+            _bubbleClosed = true
             statusText.value = ''
             currentTool.value = null
+
+            const finalContent = (p.content || streamingContent.value || '').trim()
+            const finalRoute = (p.route || data.route) as 'local' | 'cloud' | undefined
+
+            if (finalContent && !_isErrorMessage(finalContent)) {
+              // If no streaming happened (no llm_output chunks), push to chat now
+              if (streamingContent.value === '') {
+                messages.value.push({ role: 'assistant', content: finalContent, route: finalRoute })
+              } else {
+                // Attach route to the last assistant message
+                const lastMsg = messages.value[messages.value.length - 1]
+                if (lastMsg && lastMsg.role === 'assistant') {
+                  messages.value[messages.value.length - 1] = { ...lastMsg, route: finalRoute || lastMsg.route }
+                }
+              }
+            } else if (_isErrorMessage(finalContent)) {
+              // Error → work panel only, don't pollute chat
+              workEntries.value.push({
+                id: ++_workEntryId,
+                type: 'error',
+                content: finalContent,
+              })
+            }
+            streamingContent.value = ''
             break
           }
           case 'llm_output': {
             streaming.value = true
-            streamingContent.value = (streamingContent.value || '') + (p.content || '')
+            const chunk = p.content || ''
+            streamingContent.value = (streamingContent.value || '') + chunk
+            // Only show in chat area (not work panel) — stream into assistant bubble
+            const msgs = messages.value
+            if (_bubbleClosed && chunk.trim()) {
+              // Tool call happened since last llm_output — start a new bubble
+              msgs.push({ role: 'assistant', content: chunk })
+              _bubbleClosed = false
+            } else {
+              if (msgs.length > 0 && msgs[msgs.length - 1].role === 'assistant') {
+                msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], content: msgs[msgs.length - 1].content + chunk }
+              } else if (chunk.trim()) {
+                msgs.push({ role: 'assistant', content: chunk })
+              }
+            }
             break
           }
           case 'status': {
             statusText.value = p.content || ''
+            workEntries.value.push({
+              id: ++_workEntryId,
+              type: 'status',
+              content: p.content || '',
+              step_id: p.step_id,
+            })
             break
           }
           case 'tool_call': {
+            _bubbleClosed = true
             currentTool.value = { name: p.name || '', args: JSON.stringify(p.args || {}) }
+            workEntries.value.push({
+              id: ++_workEntryId,
+              type: 'tool_call',
+              content: p.name || '',
+              name: p.name,
+              args: JSON.stringify(p.args || {}),
+              step_id: p.step_id,
+              phase: p.phase || 'plan',
+            })
             break
           }
           case 'tool_result': {
+            _bubbleClosed = true
             currentTool.value = null
+            workEntries.value.push({
+              id: ++_workEntryId,
+              type: 'tool_result',
+              content: '',
+              name: p.name || '',
+              result: typeof p.result === 'string' ? p.result.slice(0, 200) : JSON.stringify(p.result || {}).slice(0, 200),
+              step_id: p.step_id,
+              phase: p.phase || 'result',
+              duration: p.duration,
+            })
             break
           }
           case 'qr_code': {
@@ -159,6 +245,14 @@ export function useWebSocket() {
           }
           case 'channel_disconnected': {
             channelStatusChanged.value++
+            break
+          }
+          case 'task_updated': {
+            tasksUpdated.value++
+            break
+          }
+          case 'proposal_added': {
+            proposalAdded.value++
             break
           }
         }
@@ -225,6 +319,26 @@ export function useWebSocket() {
     statusText.value = ''
   }
 
+  function clearWorkEntries() {
+    workEntries.value = []
+    _workEntryId = 0
+  }
+
+  /** List user preferences with optional enabled_only filter. */
+  async function listPreferences(enabledOnly = false): Promise<MgmtResponse> {
+    return sendRequest('list_preferences', { enabled_only: enabledOnly })
+  }
+
+  /** Create or update a user preference (source=user_override). */
+  async function updatePreference(key: string, value: string, description = ''): Promise<MgmtResponse> {
+    return sendRequest('update_preference', { key, value, description })
+  }
+
+  /** Delete a user preference by key. */
+  async function deletePreference(key: string): Promise<MgmtResponse> {
+    return sendRequest('delete_preference', { key })
+  }
+
   function respondToConfirm(confirmed: boolean) {
     if (!ws.value || ws.value.readyState !== WebSocket.OPEN || !confirmRequest.value) return
     ws.value.send(JSON.stringify({
@@ -241,8 +355,12 @@ export function useWebSocket() {
     reconnectTimer = setTimeout(() => connect(), 3000)
   }
 
-  function send(content: string) {
+  function send(content: string, routeOverride?: 'auto' | 'local' | 'cloud') {
     if (!ws.value || ws.value.readyState !== WebSocket.OPEN) return
+    // Clear work entries from previous task
+    clearWorkEntries()
+    // Reset bubble tracking for new conversation
+    _bubbleClosed = false
     // Don't reset state if still processing — backend cancels old task on new message
     if (!streaming.value && !currentTool.value) {
       statusText.value = ''
@@ -251,9 +369,13 @@ export function useWebSocket() {
     streamingContent.value = ''
 
     messages.value.push({ role: 'user', content })
+    const payload: Record<string, unknown> = { content }
+    if (routeOverride && routeOverride !== 'auto') {
+      payload.route_override = routeOverride
+    }
     ws.value.send(JSON.stringify({
       type: 'message',
-      payload: { content },
+      payload,
     }))
   }
 
@@ -282,10 +404,18 @@ export function useWebSocket() {
     confirmRequest,
     configUpdated,
     proposalCompleted,
+    channelStatusChanged,
+    tasksUpdated,
+    proposalAdded,
+    workEntries,
     send,
     sendRequest,
+    listPreferences,
+    updatePreference,
+    deletePreference,
     respondToConfirm,
     clearQRCode,
     clearStatus,
+    clearWorkEntries,
   }
 }

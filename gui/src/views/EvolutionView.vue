@@ -300,6 +300,68 @@
       </div>
     </div>
 
+    <!-- ================================ -->
+    <!-- 用户偏好 -->
+    <!-- ================================ -->
+    <div v-if="activeTab === 'prefs'" key="prefs" class="tab-content">
+      <div v-if="prefsLoading" class="loading-row">
+        <span class="loading-spinner"></span>
+        <span>加载用户偏好...</span>
+      </div>
+
+      <template v-else>
+        <!-- Add new preference -->
+        <div class="pref-add-card oaa-card">
+          <div class="pref-add-row">
+            <input v-model="newPrefKey" class="oaa-input pref-input-sm" placeholder="Key" @keyup.enter="addPreference" />
+            <input v-model="newPrefVal" class="oaa-input pref-input-sm" placeholder="Value" @keyup.enter="addPreference" />
+            <input v-model="newPrefDesc" class="oaa-input pref-input-lg" placeholder="Description (可选)" @keyup.enter="addPreference" />
+            <button class="oaa-btn oaa-btn--primary oaa-btn--sm" @click="addPreference" :disabled="!newPrefKey || !newPrefVal">添加</button>
+          </div>
+        </div>
+
+        <!-- Preference list (empty state) -->
+        <div v-if="preferences.length === 0" class="empty-state">
+          <div class="empty-icon">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3">
+              <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </div>
+          <p class="empty-text">暂无用户偏好</p>
+          <p class="empty-hint">Agent 会自动学习您的偏好，您也可以手动添加</p>
+        </div>
+
+        <!-- Preference list -->
+        <div v-else class="pref-list">
+          <div v-for="pref in preferences" :key="pref.key" class="oaa-card pref-card">
+            <div class="pref-row">
+              <div class="pref-info">
+                <span class="pref-key">{{ pref.key }}</span>
+                <span v-if="pref.source === 'user_override'" class="pref-source-tag">用户设定</span>
+                <span v-else class="pref-source-tag pref-source-agent">Agent 学习</span>
+              </div>
+              <div class="pref-actions">
+                <button class="oaa-btn oaa-btn--ghost oaa-btn--xs" :title="pref.enabled ? '点击禁用' : '点击启用'"
+                  @click="togglePreference(pref)">
+                  <span v-if="pref.enabled" style="color:var(--oaa-green-400)">●</span>
+                  <span v-else style="color:var(--oaa-color-disabled)">○</span>
+                </button>
+                <button class="oaa-btn oaa-btn--ghost oaa-btn--xs" style="color:var(--oaa-red-400)" @click="deletePreference(pref.key)" :title="'删除 ' + pref.key">✕</button>
+              </div>
+            </div>
+            <div class="pref-row">
+              <input v-model="pref._editVal" class="oaa-input pref-input-val" :placeholder="pref.value"
+                @blur="savePreference(pref)" @keyup.enter="savePreference(pref)" />
+              <span v-if="pref.description" class="pref-desc">{{ pref.description }}</span>
+            </div>
+            <div class="pref-meta">
+              <span class="pref-date">{{ formatDate(pref.updated_at) }}</span>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+
     <!-- Toast notification -->
     <div v-if="toast.show" :class="['toast', toast.type]">
       {{ toast.message }}
@@ -311,7 +373,7 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { useWebSocket } from '../composables/useWebSocket'
 
-const { sendRequest, proposalCompleted } = useWebSocket()
+const { sendRequest, listPreferences, updatePreference, deletePreference: deletePrefApi, proposalCompleted, proposalAdded } = useWebSocket()
 
 const activeTab = ref('pending')
 const loading = ref(true)
@@ -322,6 +384,7 @@ const toast = ref({ show: false, type: 'success', message: '' })
 const tabs = [
   { id: 'pending', icon: '📋', label: '待处理提案' },
   { id: 'history', icon: '📜', label: '执行历史' },
+  { id: 'prefs', icon: '⚙️', label: '用户偏好' },
   { id: 'stats', icon: '📊', label: '统计' },
 ]
 
@@ -457,13 +520,99 @@ async function loadStats() {
 // Tab change -> lazy load stats
 // Auto-refresh proposal list when background task completes
 watch(proposalCompleted, () => { loadProposals(); loadStats(); loadMetrics() })
+watch(proposalAdded, () => { loadProposals(); loadStats(); loadMetrics() })
 
 watch(activeTab, (tab) => {
+  if (tab === 'prefs') loadPreferences()
   if (tab === 'stats') {
     if (!statsData.value) loadStats()
     loadMetrics()
   }
 })
+
+// ---- Preferences tab ----
+const prefsLoading = ref(false)
+const preferences = ref<any[]>([])
+const newPrefKey = ref('')
+const newPrefVal = ref('')
+const newPrefDesc = ref('')
+
+async function loadPreferences() {
+  prefsLoading.value = true
+  try {
+    const resp = await listPreferences(false)
+    if (resp.ok) {
+      preferences.value = (resp.preferences || []).map((p: any) => ({ ...p, _editVal: p.value }))
+    }
+  } catch { /* ignore */ }
+  prefsLoading.value = false
+}
+
+async function addPreference() {
+  const key = newPrefKey.value.trim()
+  const val = newPrefVal.value.trim()
+  if (!key || !val) return
+  try {
+    const resp = await updatePreference(key, val, newPrefDesc.value.trim())
+    if (resp.ok) {
+      showToast(`偏好已添加: ${key}`)
+      newPrefKey.value = ''
+      newPrefVal.value = ''
+      newPrefDesc.value = ''
+      await loadPreferences()
+    } else {
+      showToast(resp.error || '添加失败', 'error')
+    }
+  } catch (e: any) {
+    showToast('添加失败: ' + (e.message || e), 'error')
+  }
+}
+
+async function savePreference(pref: any) {
+  const newVal = pref._editVal?.trim()
+  if (!newVal || newVal === pref.value) return
+  try {
+    const resp = await updatePreference(pref.key, newVal, pref.description || '')
+    if (resp.ok) {
+      showToast(`偏好已更新: ${pref.key}`)
+      pref.value = newVal
+    } else {
+      showToast(resp.error || '更新失败', 'error')
+    }
+  } catch (e: any) {
+    showToast('更新失败: ' + (e.message || e), 'error')
+  }
+}
+
+async function togglePreference(pref: any) {
+  try {
+    await deletePrefApi(pref.key)
+    const resp = await updatePreference(pref.key, pref.value, pref.description || '')
+    if (resp.ok) {
+      pref.enabled = !pref.enabled
+      showToast(pref.enabled ? '已启用' : '已禁用')
+    }
+  } catch (e: any) {
+    showToast('操作失败: ' + (e.message || e), 'error')
+  }
+}
+
+function deletePreference(key: string) {
+  const fn = async () => {
+    try {
+      const resp = await deletePrefApi(key)
+      if (resp.ok) {
+        showToast(`已删除: ${key}`)
+        await loadPreferences()
+      } else {
+        showToast(resp.error || '删除失败', 'error')
+      }
+    } catch (e: any) {
+      showToast('删除失败: ' + (e.message || e), 'error')
+    }
+  }
+  fn()
+}
 
 const typeLabels: Record<string, string> = {
   tool_fix: '工具修复',
@@ -1024,6 +1173,88 @@ onMounted(() => {
   grid-template-columns: 1fr 1fr;
   gap: var(--oaa-space-4);
 }
+
+/* ---- Preferences tab ---- */
+.pref-add-card {
+  margin-bottom: var(--oaa-space-4);
+  padding: var(--oaa-space-4);
+}
+.pref-add-row {
+  display: flex;
+  gap: var(--oaa-space-2);
+  align-items: center;
+}
+.pref-input-sm {
+  width: 140px;
+  flex-shrink: 0;
+}
+.pref-input-lg {
+  flex: 1;
+  min-width: 0;
+}
+.pref-input-val {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--oaa-text-sm);
+}
+.pref-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oaa-space-2);
+}
+.pref-card {
+  padding: var(--oaa-space-3) var(--oaa-space-4);
+}
+.pref-row {
+  display: flex;
+  align-items: center;
+  gap: var(--oaa-space-2);
+  margin-bottom: var(--oaa-space-1);
+}
+.pref-info {
+  display: flex;
+  align-items: center;
+  gap: var(--oaa-space-2);
+  min-width: 0;
+  flex-shrink: 0;
+}
+.pref-key {
+  font-weight: 600;
+  font-size: var(--oaa-text-sm);
+  color: var(--oaa-color-primary);
+  font-family: monospace;
+}
+.pref-source-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--oaa-blue-100, #dbeafe);
+  color: var(--oaa-blue-700, #1d4ed8);
+}
+.pref-source-agent {
+  background: var(--oaa-purple-100, #f3e8ff);
+  color: var(--oaa-purple-700, #7e22ce);
+}
+.pref-actions {
+  display: flex;
+  gap: var(--oaa-space-1);
+  margin-left: auto;
+}
+.pref-desc {
+  font-size: var(--oaa-text-xs);
+  color: var(--oaa-color-muted);
+  margin-left: var(--oaa-space-1);
+}
+.pref-meta {
+  display: flex;
+  gap: var(--oaa-space-2);
+  margin-top: var(--oaa-space-1);
+}
+.pref-date {
+  font-size: 11px;
+  color: var(--oaa-color-disabled);
+}
+
 .info-card {
   background: var(--oaa-bg-surface);
   border: 1px solid var(--oaa-border-subtle);

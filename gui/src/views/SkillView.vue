@@ -57,7 +57,7 @@
               </div>
               <div class="skill-info">
                 <div class="skill-name">
-                  {{ skill.name }}
+                  {{ skill.display_name || skill.name }}
                   <span v-if="skill.current" class="skill-current-tag">当前</span>
                 </div>
                 <div class="skill-desc">{{ skill.description }}</div>
@@ -233,7 +233,7 @@
           ref="marketIframe"
           src="https://cn.clawhub-mirror.com"
           class="market-iframe"
-          sandbox="allow-scripts allow-forms"
+          sandbox="allow-scripts allow-forms allow-same-origin"
           title="技能市场"
           @load="onIframeLoad"
           @error="onIframeError"
@@ -285,6 +285,20 @@ function retryIframe() {
   }
 }
 
+// Timeout: if iframe doesn't load within 15s, show error
+let iframeTimer: ReturnType<typeof setTimeout> | null = null
+onMounted(() => {
+  iframeTimer = setTimeout(() => {
+    if (iframeLoading.value) {
+      iframeLoading.value = false
+      iframeError.value = '连接超时，请检查网络后重试'
+    }
+  }, 15000)
+})
+onUnmounted(() => {
+  if (iframeTimer) clearTimeout(iframeTimer)
+})
+
 const tabs = [
   { id: 'repo', icon: '📦', label: '技能仓库' },
   { id: 'evolution', icon: '🧬', label: '自生技能' },
@@ -298,6 +312,7 @@ const tabs = [
 interface Skill {
   icon: string
   name: string
+  display_name?: string
   description: string
   active: boolean
   current: boolean
@@ -345,22 +360,22 @@ const fallbackSkillGroups: SkillGroup[] = [
   {
     category: '外贸业务核心',
     skills: [
-      { icon: '🌐', name: '外贸业务综合', description: '综合处理外贸业务流程', active: true, current: false, toolsCount: 3, knowledgeCount: 5 },
-      { icon: '💼', name: '业务助理', description: '协助处理日常业务事务', active: true, current: false, toolsCount: 4, knowledgeCount: 3 },
-      { icon: '📄', name: '报价单制作', description: '快速生成专业报价单文档', active: true, current: false, toolsCount: 2, knowledgeCount: 2 },
-      { icon: '📝', name: '合同审核', description: '审核合同条款，识别风险', active: true, current: false, toolsCount: 1, knowledgeCount: 4 },
-      { icon: '🤝', name: '客户支持', description: '提供客户售前售后咨询', active: true, current: false, toolsCount: 2, knowledgeCount: 3 },
-      { icon: '✉', name: '邮件撰写', description: '撰写与优化外贸业务邮件', active: true, current: false, toolsCount: 1, knowledgeCount: 2 },
-      { icon: '📋', name: '询盘处理', description: '处理客户询盘，回复方案', active: true, current: false, toolsCount: 2, knowledgeCount: 2 },
-      { icon: '👥', name: '客户关系管理', description: '管理客户信息与跟进记录', active: false, current: false, toolsCount: 0, knowledgeCount: 2 },
-      { icon: '💰', name: '财务助理', description: '报价核算、成本分析', active: true, current: false, toolsCount: 3, knowledgeCount: 2 },
-      { icon: '📞', name: '跟进提醒', description: '自动跟进客户与项目进度', active: false, current: false, toolsCount: 0, knowledgeCount: 1 },
-      { icon: '🚚', name: '物流协调', description: '物流运输与报关事务', active: false, current: false, toolsCount: 0, knowledgeCount: 2 },
-      { icon: '📊', name: '市场分析', description: '分析行业趋势与市场数据', active: true, current: false, toolsCount: 2, knowledgeCount: 3 },
-      { icon: '🔍', name: '市场调研', description: '执行市场调研并生成报告', active: true, current: false, toolsCount: 3, knowledgeCount: 2 },
-      { icon: '🎯', name: '客户开发', description: '自动化客户开发与外拓', active: false, current: false, toolsCount: 0, knowledgeCount: 1 },
-      { icon: '🛒', name: '采购管理', description: '供应商筛选与采购流程', active: false, current: false, toolsCount: 0, knowledgeCount: 2 },
-      { icon: '🔎', name: '搜索执行', description: '定向搜索任务，收集信息', active: true, current: false, toolsCount: 1, knowledgeCount: 1 },
+      { icon: '🌐', name: 'foreign-trade-general', display_name: '外贸业务综合', description: '综合处理外贸业务流程，定义 Agent 行为边界', active: true, current: false, toolsCount: 3, knowledgeCount: 5 },
+      { icon: '💼', name: 'business-assistant', display_name: '业务助理', description: '协助处理日常外贸业务事务', active: true, current: false, toolsCount: 4, knowledgeCount: 3 },
+      { icon: '📄', name: 'quotation-maker', display_name: '报价单制作', description: '快速生成专业报价单文档', active: true, current: false, toolsCount: 2, knowledgeCount: 2 },
+      { icon: '📝', name: 'contract-review', display_name: '合同审核', description: '审核合同条款，识别风险', active: true, current: false, toolsCount: 1, knowledgeCount: 4 },
+      { icon: '🤝', name: 'customer-support', display_name: '客户支持', description: '提供客户售前售后咨询', active: true, current: false, toolsCount: 2, knowledgeCount: 3 },
+      { icon: '✉', name: 'email-writer', display_name: '邮件撰写', description: '撰写与优化外贸业务邮件', active: true, current: false, toolsCount: 1, knowledgeCount: 2 },
+      { icon: '📋', name: 'inquiry-handling', display_name: '询盘处理', description: '处理客户询盘，回复方案', active: true, current: false, toolsCount: 2, knowledgeCount: 2 },
+      { icon: '👥', name: 'customer-relationship', display_name: '客户关系管理', description: '管理客户信息与跟进记录', active: false, current: false, toolsCount: 0, knowledgeCount: 2 },
+      { icon: '💰', name: 'finance', display_name: '财务助理', description: '报价核算、成本分析', active: true, current: false, toolsCount: 3, knowledgeCount: 2 },
+      { icon: '📞', name: 'follow-up', display_name: '跟进提醒', description: '自动跟进客户与项目进度', active: false, current: false, toolsCount: 0, knowledgeCount: 1 },
+      { icon: '🚚', name: 'logistics-coordination', display_name: '物流协调', description: '物流运输与报关事务', active: false, current: false, toolsCount: 0, knowledgeCount: 2 },
+      { icon: '📊', name: 'market-analyst', display_name: '市场分析', description: '分析行业趋势与市场数据', active: true, current: false, toolsCount: 2, knowledgeCount: 3 },
+      { icon: '🔍', name: 'market-researcher', display_name: '市场调研', description: '执行市场调研并生成报告', active: true, current: false, toolsCount: 3, knowledgeCount: 2 },
+      { icon: '🎯', name: 'outreach-prospecting', display_name: '客户开发', description: '自动化客户开发与外拓', active: false, current: false, toolsCount: 0, knowledgeCount: 1 },
+      { icon: '🛒', name: 'purchaser', display_name: '采购管理', description: '供应商筛选与采购流程', active: false, current: false, toolsCount: 0, knowledgeCount: 2 },
+      { icon: '🔎', name: 'search-execution', display_name: '搜索执行', description: '定向搜索任务，收集潜在客户与市场信息', active: true, current: false, toolsCount: 1, knowledgeCount: 1 },
     ],
   },
   {
@@ -419,7 +434,7 @@ const filteredGroups = computed(() => {
   return groups.map(group => ({
     ...group,
     skills: group.skills.filter(s =>
-      s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)
+      (s.display_name || s.name).toLowerCase().includes(q) || s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)
     ),
   })).filter(g => g.skills.length > 0)
 })
@@ -587,12 +602,14 @@ onMounted(async () => {
       for (const s of skills) {
         const cat = s.category || '未分类'
         if (!groupMap.has(cat)) groupMap.set(cat, [])
-        const desc = s.tools_count > 0
+        const displayName = (s as any).display_name || s.name
+        const desc = (s as any).description || (s.tools_count > 0
           ? `${s.tools_count} 工具 · ${s.knowledge_count} 知识文档`
-          : '需安装依赖或配置'
+          : '需安装依赖或配置')
         groupMap.get(cat)!.push({
           icon: inferIcon(s.name),
           name: s.name,
+          display_name: displayName,
           description: desc,
           active: s.loaded && s.tools_count > 0,
           current: s.name === currentName,
@@ -648,10 +665,13 @@ onActivated(async () => {
       for (const s of resp.skills as BackendSkill[]) {
         const cat = s.category || '未分类'
         if (!groupMap.has(cat)) groupMap.set(cat, [])
+        const displayName = (s as any).display_name || s.name
+        const desc = (s as any).description || (s.tools_count > 0 ? `${s.tools_count} 工具 · ${s.knowledge_count} 知识文档` : '需安装依赖或配置')
         groupMap.get(cat)!.push({
           icon: inferIcon(s.name),
           name: s.name,
-          description: s.tools_count > 0 ? `${s.tools_count} 工具 · ${s.knowledge_count} 知识文档` : '需安装依赖或配置',
+          display_name: displayName,
+          description: desc,
           active: s.loaded && s.tools_count > 0,
           current: s.name === currentName,
           toolsCount: s.tools_count,

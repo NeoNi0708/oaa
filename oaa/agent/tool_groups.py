@@ -78,10 +78,12 @@ _reg("skills",
      "skill_search", "skill_install", "skill_load", "skill_create",
 )
 
-# --- Self-modification / evolution (7 tools) ---
+# --- Self-modification / evolution (8 tools) ---
 _reg("self_modify",
-     "self_improve", "modify_own_prompt", "reload_module",
+     "self_improve", "modify_own_prompt", "reload_module", "self_code_review",
      "rollback_change", "tool_create", "tool_delete", "tool_list",
+     # Clone tools belong to self_modify group
+     "clone_create", "clone_edit", "clone_sync", "clone_discard", "clone_status",
 )
 
 # --- Office documents (2 tools) ---
@@ -109,9 +111,10 @@ _reg("browser",
      "web_scan",
 )
 
-# --- GitHub (2 tools) ---
+# --- GitHub (4 tools) ---
 _reg("github",
      "github_repo", "github_content",
+     "github_search", "github_trending",
 )
 
 # --- Diagnostics (2 tools) — health/module/download moved to core

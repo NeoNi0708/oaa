@@ -28,7 +28,7 @@
         <p>加载中...</p>
       </div>
       <div v-else-if="tasks.length === 0" class="empty-state">
-        <p>暂无定时任务，点击上方「新建」创建</p>
+        <p>暂无定时任务，可让 OAA 帮你创建</p>
       </div>
       <div v-else class="task-list">
         <div v-for="task in activeTasks" :key="task.id" class="task-card">
@@ -51,139 +51,9 @@
             <button class="oaa-btn oaa-btn--sm" :class="task.enabled ? 'oaa-btn--secondary' : 'oaa-btn--primary'" @click="toggleTask(task.id)">
               {{ task.enabled ? '暂停' : '启用' }}
             </button>
-            <button class="oaa-btn oaa-btn--sm oaa-btn--ghost" @click="copyTask(task)">复制</button>
+            <button class="oaa-btn oaa-btn--sm oaa-btn--ghost" @click="openEditModal(task)">编辑</button>
             <button class="oaa-btn oaa-btn--sm oaa-btn--ghost" @click="confirmDeleteTask(task.id)">删除</button>
           </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 新建任务表单 -->
-    <div v-if="activeSubTab === 'new'" class="tab-content">
-      <div class="form-card">
-        <div class="form-group">
-          <label class="oaa-label">任务类型</label>
-          <div class="radio-group">
-            <label class="radio-label">
-              <input type="radio" v-model="form.type" value="fixed" class="radio-input" />
-              <span class="radio-custom"></span>
-              <span class="radio-text">固定任务</span>
-            </label>
-            <label class="radio-label">
-              <input type="radio" v-model="form.type" value="reminder" class="radio-input" />
-              <span class="radio-custom"></span>
-              <span class="radio-text">提醒任务</span>
-            </label>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label class="oaa-label">任务名称</label>
-          <input v-model="form.name" type="text" class="oaa-input" placeholder="输入任务名称" />
-        </div>
-
-        <div class="form-group">
-          <label class="oaa-label">任务描述</label>
-          <textarea v-model="form.description" class="oaa-input form-textarea" rows="2" placeholder="输入任务描述"></textarea>
-        </div>
-
-        <div class="form-group">
-          <label class="oaa-label">执行周期</label>
-          <select v-model="form.cycle" class="oaa-select">
-            <option value="daily">每天</option>
-            <option value="weekly">每周</option>
-            <option value="monthly">每月</option>
-          </select>
-          <div v-if="form.cycle === 'weekly'" class="cycle-sub">
-            <span v-for="d in weekDays" :key="d.value"
-              :class="['day-chip', { active: form.cycleDay === d.value }]"
-              @click="form.cycleDay = d.value">
-              {{ d.label }}
-            </span>
-          </div>
-          <div v-if="form.cycle === 'monthly'" class="cycle-sub">
-            <select v-model.number="form.cycleDay" class="oaa-select cycle-select">
-              <option v-for="d in 31" :key="d" :value="d">{{ d }} 号</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label class="oaa-label">开始时间</label>
-            <div class="time-picker">
-              <select v-model.number="form.startHour" class="oaa-select time-select">
-                <option v-for="h in 24" :key="h-1" :value="h-1">{{ padZero(h-1) }}</option>
-              </select>
-              <span class="time-sep">:</span>
-              <select v-model.number="form.startMinute" class="oaa-select time-select">
-                <option v-for="m in 60" :key="m-1" :value="m-1">{{ padZero(m-1) }}</option>
-              </select>
-            </div>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label class="oaa-label">交付渠道</label>
-          <div class="checkbox-group">
-            <label v-for="ch in allChannels" :key="ch.value" class="checkbox-label">
-              <input type="checkbox" :value="ch.value" v-model="form.channels" class="checkbox-input" />
-              <span class="checkbox-custom"></span>
-              <span class="checkbox-text">{{ ch.label }}</span>
-            </label>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label class="oaa-label">
-            <span>任务汇报</span>
-          </label>
-          <div class="radio-group">
-            <label class="radio-label">
-              <input type="radio" v-model="form.report" :value="true" class="radio-input" />
-              <span class="radio-custom"></span>
-              <span class="radio-text">是</span>
-            </label>
-            <label class="radio-label">
-              <input type="radio" v-model="form.report" :value="false" class="radio-input" />
-              <span class="radio-custom"></span>
-              <span class="radio-text">否</span>
-            </label>
-          </div>
-          <div v-if="form.report" class="sub-option">
-            <label class="oaa-label" style="margin-top: 8px;">汇报渠道</label>
-            <div class="checkbox-group">
-              <label v-for="ch in allChannels" :key="ch.value" class="checkbox-label">
-                <input type="checkbox" :value="ch.value" v-model="form.reportChannels" class="checkbox-input" />
-                <span class="checkbox-custom"></span>
-                <span class="checkbox-text">{{ ch.label }}</span>
-              </label>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="form.type === 'reminder'" class="form-group">
-          <label class="oaa-label">收到确认</label>
-          <div class="radio-group">
-            <label class="radio-label">
-              <input type="radio" v-model="form.confirmReceipt" :value="true" class="radio-input" />
-              <span class="radio-custom"></span>
-              <span class="radio-text">是（用户必须回复"收到"，否则每 5 分钟重发）</span>
-            </label>
-            <label class="radio-label">
-              <input type="radio" v-model="form.confirmReceipt" :value="false" class="radio-input" />
-              <span class="radio-custom"></span>
-              <span class="radio-text">否</span>
-            </label>
-          </div>
-        </div>
-
-        <div class="form-actions">
-          <button class="oaa-btn oaa-btn--secondary" @click="resetForm">取消</button>
-          <button class="oaa-btn oaa-btn--primary" @click="saveTask" :disabled="!form.name.trim() || saving">
-            <span v-if="saving" class="task-btn-spinner"></span>
-            {{ saving ? '保存中...' : '保存' }}
-          </button>
         </div>
       </div>
     </div>
@@ -213,11 +83,120 @@
         </div>
       </div>
     </div>
+    <!-- 编辑任务弹窗 -->
+    <div v-if="editModalVisible" class="modal-overlay" @click.self="closeEditModal">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>编辑任务</h3>
+          <button class="modal-close-btn" @click="closeEditModal">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div v-if="editForm" class="edit-form">
+            <!-- 执行周期 -->
+            <div class="form-group">
+              <label class="oaa-label">执行周期</label>
+              <select v-model="editForm.cycle" class="oaa-select">
+                <option value="daily">每天</option>
+                <option value="weekly">每周</option>
+                <option value="monthly">每月</option>
+              </select>
+              <div v-if="editForm.cycle === 'weekly'" class="cycle-sub">
+                <span v-for="d in weekDays" :key="d.value"
+                  :class="['day-chip', { active: editForm.cycleDay === d.value }]"
+                  @click="editForm.cycleDay = d.value">
+                  {{ d.label }}
+                </span>
+              </div>
+              <div v-if="editForm.cycle === 'monthly'" class="cycle-sub">
+                <select v-model.number="editForm.cycleDay" class="oaa-select cycle-select">
+                  <option v-for="d in 31" :key="d" :value="d">{{ d }} 号</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- 执行时间 -->
+            <div class="form-row">
+              <div class="form-group flex-1">
+                <label class="oaa-label">执行时间</label>
+                <div class="time-picker">
+                  <select v-model.number="editForm.startHour" class="oaa-select time-select">
+                    <option v-for="h in 24" :key="h-1" :value="h-1">{{ padZero(h-1) }}</option>
+                  </select>
+                  <span class="time-sep">:</span>
+                  <select v-model.number="editForm.startMinute" class="oaa-select time-select">
+                    <option v-for="m in 60" :key="m-1" :value="m-1">{{ padZero(m-1) }}</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <!-- 任务名称 -->
+            <div class="form-group">
+              <label class="oaa-label">任务名称</label>
+              <input v-model="editForm.name" type="text" class="oaa-input" placeholder="输入任务名称" />
+            </div>
+
+            <!-- 内容要求 (execution_prompt) -->
+            <div class="form-group">
+              <label class="oaa-label">内容要求</label>
+              <textarea v-model="editForm.executionPrompt" class="oaa-input form-textarea" rows="4"
+                placeholder='告诉 OAA 到时间后应该做什么，如「搜集当天10条热点新闻并按格式整理」'></textarea>
+            </div>
+
+            <!-- 交付渠道 -->
+            <div class="form-group">
+              <label class="oaa-label">交付渠道</label>
+              <div class="checkbox-group">
+                <label v-for="ch in allChannels" :key="ch.value" class="checkbox-label">
+                  <input type="checkbox" :value="ch.value" v-model="editForm.channels" class="checkbox-input" />
+                  <span class="checkbox-custom"></span>
+                  <span class="checkbox-text">{{ ch.label }}</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- 汇报设置 -->
+            <div class="form-group">
+              <label class="oaa-label">任务汇报</label>
+              <div class="radio-group">
+                <label class="radio-label">
+                  <input type="radio" v-model="editForm.report" :value="true" class="radio-input" />
+                  <span class="radio-custom"></span>
+                  <span class="radio-text">是</span>
+                </label>
+                <label class="radio-label">
+                  <input type="radio" v-model="editForm.report" :value="false" class="radio-input" />
+                  <span class="radio-custom"></span>
+                  <span class="radio-text">否</span>
+                </label>
+              </div>
+              <div v-if="editForm.report" class="sub-option">
+                <label class="oaa-label" style="margin-top: 8px;">汇报渠道</label>
+                <div class="checkbox-group">
+                  <label v-for="ch in allChannels" :key="ch.value" class="checkbox-label">
+                    <input type="checkbox" :value="ch.value" v-model="editForm.reportChannels" class="checkbox-input" />
+                    <span class="checkbox-custom"></span>
+                    <span class="checkbox-text">{{ ch.label }}</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="oaa-btn oaa-btn--secondary" @click="closeEditModal">取消</button>
+          <button class="oaa-btn oaa-btn--primary" @click="saveEdit" :disabled="!editForm?.name.trim() || editSaving">
+            <span v-if="editSaving" class="task-btn-spinner"></span>
+            {{ editSaving ? '保存中...' : '保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useWebSocket } from '../composables/useWebSocket'
 
 type TaskType = 'fixed' | 'reminder'
@@ -229,6 +208,7 @@ interface ScheduledTask {
   type: TaskType
   name: string
   description: string
+  executionPrompt: string
   cycle: Cycle
   cycleDay: number
   startHour: number
@@ -257,6 +237,7 @@ interface BackendTask {
   report: boolean
   report_channels: string[]
   confirm_receipt: boolean
+  execution_prompt?: string
   created_at: string
   updated_at?: string
   last_run?: string | null
@@ -268,6 +249,7 @@ function fromBackendTask(bt: BackendTask): ScheduledTask {
     type: bt.type as TaskType,
     name: bt.name,
     description: bt.description,
+    executionPrompt: bt.execution_prompt || '',
     cycle: bt.cycle as Cycle,
     cycleDay: bt.cycle_day,
     startHour: bt.start_hour,
@@ -300,7 +282,7 @@ function toBackendTask(task: ScheduledTask): Record<string, unknown> {
   }
 }
 
-const { sendRequest } = useWebSocket()
+const { sendRequest, tasksUpdated } = useWebSocket()
 
 const weekDays = [
   { value: 1, label: '一' },
@@ -328,30 +310,29 @@ function channelLabel(ch: Channel) { return channelLabels[ch] }
 
 const subTabs = [
   { id: 'active', icon: '📋', label: '已有任务' },
-  { id: 'new', icon: '➕', label: '新建' },
   { id: 'done', icon: '✅', label: '已完成' },
 ]
 
 const activeSubTab = ref('active')
 const loading = ref(true)
-const saving = ref(false)
-
-const defaultForm = {
-  type: 'fixed' as TaskType,
-  name: '',
-  description: '',
-  cycle: 'daily' as Cycle,
-  cycleDay: 1,
-  startHour: 9,
-  startMinute: 0,
-  channels: ['chat'] as Channel[],
-  report: true,
-  reportChannels: ['chat', 'wechat'] as Channel[],
-  confirmReceipt: true,
-}
-
-const form = ref({ ...defaultForm })
 const tasks = ref<ScheduledTask[]>([])
+
+// Edit modal state
+const editModalVisible = ref(false)
+const editSaving = ref(false)
+interface EditForm {
+  id: string
+  name: string
+  cycle: Cycle
+  cycleDay: number
+  startHour: number
+  startMinute: number
+  executionPrompt: string
+  channels: Channel[]
+  report: boolean
+  reportChannels: Channel[]
+}
+const editForm = ref<EditForm | null>(null)
 
 // ------------------------------------------------------------------
 // Backend sync
@@ -381,6 +362,9 @@ onMounted(async () => {
   loading.value = false
 })
 
+// Auto-reload when backend pushes task updates
+watch(tasksUpdated, () => { loadTasksFromBackend() })
+
 const activeTasks = computed(() => tasks.value.filter(t => t.status === 'active'))
 const completedTasks = computed(() => tasks.value.filter(t => t.status === 'completed'))
 
@@ -396,41 +380,71 @@ function padZero(n: number) { return n.toString().padStart(2, '0') }
 // CRUD
 // ------------------------------------------------------------------
 
-async function saveTask() {
-  if (!form.value.name.trim()) return
-  saving.value = true
+function openEditModal(task: ScheduledTask) {
+  editForm.value = {
+    id: task.id,
+    name: task.name,
+    cycle: task.cycle,
+    cycleDay: task.cycleDay,
+    startHour: task.startHour,
+    startMinute: task.startMinute,
+    executionPrompt: task.executionPrompt || '',
+    channels: [...task.channels],
+    report: task.report,
+    reportChannels: [...task.reportChannels],
+  }
+  editModalVisible.value = true
+}
 
-  const task: ScheduledTask = {
-    id: '',  // backend generates the id
-    ...form.value,
-    enabled: true,
-    status: 'active',
-    createdAt: new Date().toISOString(),
+function closeEditModal() {
+  editModalVisible.value = false
+  editForm.value = null
+  editSaving.value = false
+}
+
+async function saveEdit() {
+  if (!editForm.value || !editForm.value.name.trim()) return
+  editSaving.value = true
+
+  const payload: Record<string, unknown> = {
+    id: editForm.value.id,
+    name: editForm.value.name,
+    cycle: editForm.value.cycle,
+    cycle_day: editForm.value.cycleDay,
+    start_hour: editForm.value.startHour,
+    start_minute: editForm.value.startMinute,
+    channels: editForm.value.channels,
+    report: editForm.value.report,
+    report_channels: editForm.value.reportChannels,
+  }
+  // Only send execution_prompt if user filled it in
+  if (editForm.value.executionPrompt.trim()) {
+    payload.execution_prompt = editForm.value.executionPrompt.trim()
   }
 
   try {
-    const resp = await sendRequest('save_task', { task: toBackendTask(task) })
-    if (resp.ok && resp.task) {
-      tasks.value.push(fromBackendTask(resp.task as BackendTask))
-    } else {
-      // Fallback: local save with generated id
-      task.id = `task_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
-      tasks.value.push(task)
+    const resp = await sendRequest('save_task', { task: payload })
+    if (resp.ok) {
+      // Reload tasks to get updated server state
+      await loadTasksFromBackend()
     }
   } catch {
-    // Offline: local save
-    task.id = `task_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
-    tasks.value.push(task)
-    localStorage.setItem('oaa_tasks', JSON.stringify(tasks.value))
+    // Offline: update locally
+    const t = tasks.value.find(t => t.id === editForm.value!.id)
+    if (t) {
+      t.name = editForm.value.name
+      t.cycle = editForm.value.cycle
+      t.cycleDay = editForm.value.cycleDay
+      t.startHour = editForm.value.startHour
+      t.startMinute = editForm.value.startMinute
+      t.channels = [...editForm.value.channels]
+      t.report = editForm.value.report
+      t.reportChannels = [...editForm.value.reportChannels]
+      localStorage.setItem('oaa_tasks', JSON.stringify(tasks.value))
+    }
   }
 
-  resetForm()
-  activeSubTab.value = 'active'
-  saving.value = false
-}
-
-function resetForm() {
-  form.value = { ...defaultForm }
+  closeEditModal()
 }
 
 async function toggleTask(id: string) {
@@ -453,11 +467,6 @@ async function toggleTask(id: string) {
     t.status = t.status === 'active' ? 'completed' : 'active'
     t.enabled = t.status === 'active'
   }
-}
-
-function copyTask(task: ScheduledTask) {
-  form.value = { ...task, name: task.name + ' (副本)' }
-  activeSubTab.value = 'new'
 }
 
 async function confirmDeleteTask(id: string) {
@@ -710,5 +719,74 @@ async function confirmDeleteTask(id: string) {
 
 @keyframes taskSpin {
   to { transform: rotate(360deg); }
+}
+
+/* --- Edit modal --- */
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.15s ease;
+}
+
+.modal-card {
+  background: var(--oaa-bg-surface);
+  border: 1px solid var(--oaa-border-subtle);
+  border-radius: var(--oaa-radius-xl);
+  width: 520px;
+  max-width: 92vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--oaa-space-5) var(--oaa-space-6);
+  border-bottom: 1px solid var(--oaa-border-subtle);
+}
+.modal-header h3 {
+  font-size: var(--oaa-text-xl);
+  font-weight: 600;
+  color: var(--oaa-color-primary);
+  margin: 0;
+}
+
+.modal-close-btn {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  color: var(--oaa-color-muted);
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+.modal-close-btn:hover { color: var(--oaa-color-primary); }
+
+.modal-body {
+  padding: var(--oaa-space-5) var(--oaa-space-6);
+  overflow-y: auto;
+  flex: 1;
+}
+
+.edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oaa-space-4);
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--oaa-space-3);
+  padding: var(--oaa-space-4) var(--oaa-space-6);
+  border-top: 1px solid var(--oaa-border-subtle);
 }
 </style>

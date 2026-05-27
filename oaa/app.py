@@ -59,6 +59,16 @@ class OAAApp:
                               scheduler=self.scheduler)
         # Wire LLM to EvolutionEngine so skill crystallization can use the same model
         self.evolution.set_llm(self.agent.llm)
+
+        # Phase 4: Weekly reflection scheduler
+        from oaa.agent.reflection_scheduler import ReflectionScheduler
+        self.reflection = ReflectionScheduler(
+            data_dir=self.config.data_dir,
+            memory_mgr=self.agent.memory,
+            evolution=self.evolution,
+            llm=self.agent.llm,
+            proposal_store=self.agent._proposal_store,
+        )
         self.worker = WorkerAgent(self.config)
         self.gateway = Gateway(self.agent, self.session_mgr)
 
@@ -103,7 +113,7 @@ class OAAApp:
             lambda prompt: asyncio.create_task(self._agent_heal(prompt))
         )
 
-        # Wire real-time push notifications for scheduler and proposal store
+# Wire real-time push notifications for scheduler and proposal store
         self.scheduler.set_notify_callback(mgmt._push_notification)
         if self.agent._proposal_store:
             self.agent._proposal_store.set_notify_callback(mgmt._push_notification)
@@ -244,20 +254,19 @@ class OAAApp:
         self.agent._idle_inspector.set_executor_callback(_executor_run)
         await self.agent._idle_inspector.start_background()
 
+        # Phase 4: Start weekly reflection scheduler (background, non-blocking)
+        asyncio.create_task(self.reflection.start())
+
         # Startup self-check: background task that waits for GUI client
         self._startup_notified: set[str] = set()
         self._notify_lock = asyncio.Lock()
         asyncio.create_task(self._startup_check())
 
-        # Register hook: when a Desktop GUI client connects, have agent report in
+# Register hook: when a Desktop GUI client connects, have agent report in
         self.desktop._on_first_client = self._notify_desktop
 
         # Wire a callback so management.py can send welcome when a new channel authenticates
         self.agent._on_channel_ready = self._notify_channel
-
-        # 启动本地模型（愣小二）
-        if self.config.local_model.enabled:
-            asyncio.create_task(self._start_local_llm())
 
         # Fix stale running proposals from previous session (app crash / kill)
         if self.agent._proposal_store:
@@ -373,73 +382,8 @@ class OAAApp:
         except Exception as exc:
             logger.warning("Startup check failed: %s", exc)
 
-    async def _start_local_llm(self):
-        """后台启动 llama-server，不阻塞主流程。"""
-        from ..llm import LLMClient
-        from ..config import ModelConfig
-
-        try:
-            # 动态导入 scripts/local_llm_manager（scripts/ 与 oaa/ 同级）
-            import importlib
-            _scripts_path = os.path.join(os.path.dirname(__file__), "..", "..", "scripts")
-            if _scripts_path not in sys.path:
-                sys.path.insert(0, os.path.abspath(_scripts_path))
-            mgr = importlib.import_module("local_llm_manager")
-            detect_gpu = mgr.detect_gpu
-            get_llama_server_path = mgr.get_llama_server_path
-            find_model = mgr.find_model
-            start_llama_server = mgr.start_llama_server
-            wait_for_server = mgr.wait_for_server
-
-            model_path = find_model(self.config.data_dir)
-            if not model_path:
-                logger.warning("未找到 GGUF 模型，愣小二不可用")
-                return
-
-            gpu = detect_gpu()
-            opts = get_llama_server_path(gpu)[1]
-            self._llama_proc = start_llama_server(
-                model_path, gpu_info=gpu,
-                port=self.config.local_model.port,
-                context_size=self.config.local_model.context_size,
-            )
-            if not self._llama_proc:
-                logger.warning("llama-server 启动失败")
-                return
-
-            ready = await asyncio.get_event_loop().run_in_executor(
-                None, wait_for_server, self.config.local_model.port, 60
-            )
-            if ready:
-                logger.info("愣小二就绪")
-                local_cfg = ModelConfig(
-                    provider="local-gguf",
-                    base_url=f"http://127.0.0.1:{self.config.local_model.port}/v1",
-                    api_key="not-needed",
-                    model_id="local-gguf",
-                )
-                local_llm = LLMClient(local_cfg)
-                self.agent.set_local_llm(local_llm)
-                logger.info("本地模型 LLMClient 已注入 agent")
-            else:
-                logger.warning("llama-server 未能在 60s 内就绪")
-        except Exception as e:
-            logger.warning(f"本地模型启动失败: {e}")
-
     async def stop(self):
         logger.info("Shutting down...")
-        # 关闭 llama-server
-        if hasattr(self, '_llama_proc') and self._llama_proc:
-            try:
-                self._llama_proc.terminate()
-                self._llama_proc.wait(timeout=10)
-            except Exception:
-                if self._llama_proc:
-                    self._llama_proc.kill()
-            self._llama_proc = None
-        if hasattr(self.agent, 'stop_local_llm'):
-            await self.agent.stop_local_llm()
-
         await self.agent._idle_inspector.stop_background()
         await self.worker.stop()
         self.scheduler.stop_loop()

@@ -4,6 +4,8 @@ Handles config, tasks, skills, evolution, and channel management requests.
 Each handler receives a payload dict and returns a response dict.
 """
 import asyncio
+import json
+import os
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -44,9 +46,13 @@ VALID_TYPES = {
     "save_email",
     "delete_email",
     "test_email",
-    # Local model (愣小二)
-    "get_local_model_config",
-    "save_local_model_config",
+    # Chat bubble rich content
+    "chat_action",
+    "get_action_status",
+    # User preferences
+    "list_preferences",
+    "update_preference",
+    "delete_preference",
 }
 _ = VALID_TYPES  # prevent import-stripping
 
@@ -88,6 +94,11 @@ class ManagementHandler:
         # and the Agent should diagnose + fix the root cause.
         # Receives a diagnostic prompt string.
         self._heal_callback: Callable[[str], None] | None = None
+
+        # Processed action IDs for chat bubble button idempotency
+        self._processed_actions_path = os.path.join(self._config.data_dir, "processed_actions.json")
+        self._processed_actions: set[str] = set()
+        self._load_processed_actions()
 
     def set_heal_callback(self, callback: Callable[[str], None]):
         """Register a callback to trigger agent self-healing on operation failures.
@@ -255,22 +266,6 @@ class ManagementHandler:
         # Count active sessions from the _config reference (stale reference, but close enough)
         uptime_sec = int(time.time() - self._start_time)
 
-        # 本地模型状态
-        c = self._config.local_model
-        running = (
-            self._agent is not None
-            and hasattr(self._agent, 'local_llm')
-            and self._agent.local_llm is not None
-        )
-        local_model = {
-            "enabled": c.enabled,
-            "running": running,
-            "local_calls": c.local_calls,
-            "cloud_calls": c.cloud_calls,
-            "tokens_saved": c.tokens_saved,
-            "fallback_count": c.fallback_count,
-        }
-
         return {
             "ok": True,
             "agent_state": self._agent_state,
@@ -279,7 +274,6 @@ class ManagementHandler:
             "chat_count": self._chat_count,
             "uptime_sec": uptime_sec,
             "timestamp": datetime.now().isoformat(),
-            "local_model": local_model,
         }
 
     # ------------------------------------------------------------------
@@ -1276,51 +1270,6 @@ class ManagementHandler:
     # Metrics
     # ------------------------------------------------------------------
 
-    # ------------------------------------------------------------------
-    # Local Model (愣小二)
-    # ------------------------------------------------------------------
-
-    def _handle_get_local_model_config(self, _payload: dict) -> dict:
-        """返回本地模型配置 + 统计。"""
-        c = self._config.local_model
-        return {"ok": True, "config": {
-            "enabled": c.enabled,
-            "model_path": c.model_path or "自动",
-            "port": c.port,
-            "context_size": c.context_size,
-            "gpu_layers": c.gpu_layers,
-            "confidence_threshold": c.confidence_threshold,
-            "keywords_local": c.keywords_local,
-            "keywords_cloud_analysis": c.keywords_cloud_analysis,
-            "keywords_cloud_creation": c.keywords_cloud_creation,
-            "keywords_cloud_external": c.keywords_cloud_external,
-            "keywords_step": c.keywords_step,
-            "stats": {
-                "local_calls": c.local_calls,
-                "cloud_calls": c.cloud_calls,
-                "tokens_saved": c.tokens_saved,
-                "fallback_count": c.fallback_count,
-            },
-        }}
-
-    async def _handle_save_local_model_config(self, payload: dict) -> dict:
-        """保存本地模型配置。"""
-        data = payload.get("config", {})
-        if not data:
-            return {"ok": False, "error": "No config data"}
-        c = self._config.local_model
-        for key in ("enabled", "port", "context_size", "gpu_layers",
-                     "confidence_threshold", "fallback_on_failure"):
-            if key in data:
-                setattr(c, key, data[key])
-        for key in ("keywords_local", "keywords_cloud_analysis",
-                     "keywords_cloud_creation", "keywords_cloud_external",
-                     "keywords_step"):
-            if key in data and isinstance(data[key], list):
-                setattr(c, key, data[key])
-        await self._config.save()
-        return {"ok": True}
-
     def _handle_get_metrics(self, _payload: dict) -> dict:
         """Return proactivity and LLM statistics from the metrics collector."""
         if self._agent is None or self._agent.metrics is None:
@@ -1334,6 +1283,131 @@ class ManagementHandler:
             "llm_metrics": llm_summary,
             "proactivity_ratio": tool_summary.get("proactivity_ratio", 1.0),
         }
+
+    # ------------------------------------------------------------------
+    # Chat bubble action handlers
+    # ------------------------------------------------------------------
+
+    def _load_processed_actions(self):
+        """Load processed action IDs from disk."""
+        try:
+            with open(self._processed_actions_path) as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                self._processed_actions = set(data)
+        except (FileNotFoundError, json.JSONDecodeError):
+            self._processed_actions = set()
+
+    def _save_processed_actions(self):
+        """Persist processed action IDs to disk."""
+        try:
+            os.makedirs(os.path.dirname(self._processed_actions_path), exist_ok=True)
+            with open(self._processed_actions_path, 'w') as f:
+                json.dump(list(self._processed_actions), f)
+        except OSError as exc:
+            logger.warning("Failed to save processed_actions: %s", exc)
+
+    def _handle_chat_action(self, payload: dict) -> dict:
+        """Handle a chat bubble button action.
+
+        Uses getattr convention to dispatch to _handle_{action}.
+        Tracks action_id for idempotency — already-processed actions
+        return immediately without re-execution.
+        """
+        action = payload.get("action", "")
+        args = payload.get("args", {})
+        action_id = payload.get("action_id", "")
+
+        if not action:
+            return {"ok": False, "error": "No action specified"}
+
+        # Idempotency check
+        if action_id and action_id in self._processed_actions:
+            return {"ok": True, "status": "already_processed", "action_id": action_id}
+
+        handler = getattr(self, f"_handle_{action}", None)
+        if handler is None:
+            return {"ok": False, "error": f"Unknown action: {action}"}
+
+        try:
+            result = handler(args)
+            if asyncio.iscoroutine(result):
+                # _handle_management in desktop.py already awaits coroutine results
+                pass
+            if action_id:
+                self._processed_actions.add(action_id)
+                self._save_processed_actions()
+            if result is None:
+                result = {"ok": True}
+            return result
+        except Exception as exc:
+            logger.exception("chat_action %s failed: %s", action, exc)
+            return {"ok": False, "error": str(exc)}
+
+    def _handle_get_action_status(self, payload: dict) -> dict:
+        """Query processed status for a list of action IDs.
+
+        Payload: {action_ids: string[]}
+        Returns: {statuses: {[id]: "done"|"pending"}}
+        """
+        ids = payload.get("action_ids", [])
+        if not isinstance(ids, list):
+            return {"ok": False, "error": "action_ids must be a list"}
+        statuses: dict[str, str] = {}
+        for aid in ids:
+            if isinstance(aid, str):
+                statuses[aid] = "done" if aid in self._processed_actions else "pending"
+        return {"statuses": statuses}
+
+    # ------------------------------------------------------------------
+    # Preference management (user preferences CRUD)
+    # ------------------------------------------------------------------
+
+    def _get_prefs_store(self):
+        """Get the PreferencesStore from the agent, with lazy import."""
+        if not self._agent:
+            return None
+        if not hasattr(self._agent, "_prefs_store"):
+            return None
+        return self._agent._prefs_store
+
+    def _handle_list_preferences(self, payload: dict) -> dict:
+        """List user preferences. Optional filter: enabled_only."""
+        store = self._get_prefs_store()
+        if store is None:
+            return {"ok": False, "error": "PreferencesStore 未初始化"}
+        enabled_only = payload.get("enabled_only", False)
+        prefs = store.list(enabled_only=enabled_only)
+        return {"ok": True, "preferences": prefs, "count": len(prefs)}
+
+    def _handle_update_preference(self, payload: dict) -> dict:
+        """Create or update a user preference (user-sourced).
+
+        Payload: {key, value, description?}
+        """
+        store = self._get_prefs_store()
+        if store is None:
+            return {"ok": False, "error": "PreferencesStore 未初始化"}
+        key = payload.get("key", "")
+        value = payload.get("value", "")
+        description = payload.get("description", "")
+        if not key or not value:
+            return {"ok": False, "error": "key 和 value 为必填"}
+        result = store.set(key, value, description=description, source="user_override")
+        return {"ok": True, "preference": result}
+
+    def _handle_delete_preference(self, payload: dict) -> dict:
+        """Delete a user preference by key."""
+        store = self._get_prefs_store()
+        if store is None:
+            return {"ok": False, "error": "PreferencesStore 未初始化"}
+        key = payload.get("key", "")
+        if not key:
+            return {"ok": False, "error": "key 为必填"}
+        deleted = store.delete(key)
+        if not deleted:
+            return {"ok": False, "error": f"偏好不存在: {key}"}
+        return {"ok": True, "deleted": key}
 
 
 # ---------------------------------------------------------------------------
