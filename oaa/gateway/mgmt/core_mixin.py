@@ -122,8 +122,8 @@ class CoreMixin:
         for cb in self._notify_callbacks:
             try:
                 cb(msg_type, payload)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Push notification callback failed: %s", exc)
 
     def _resolve_redacted_key(self, redacted_key: str, model_id: str) -> str:
         """Try to resolve a redacted API key against known full keys in config.

@@ -307,8 +307,8 @@ class OAAAgent:
                 for a in accounts:
                     email_lines.append(f"- {a.get('username', '?')} ({a.get('provider', '?')}) → email_send 可直接使用")
                 email_lines.append("\n收到发邮件任务时直接使用以上账户，不需要先检查配置。")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to load email accounts for system prompt: %s", exc)
         if email_lines:
             parts.append("\n".join(email_lines))
 
@@ -719,8 +719,8 @@ class OAAAgent:
                 plan_text = planner.get_active_plan_text()
                 if plan_text:
                     result += "\n\n" + plan_text
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to load active plan for system prompt: %s", exc)
 
         # Inject tool-group directory — only show unloaded groups
         result += "\n\n## 工具组目录\n\n"
@@ -1009,4 +1009,4 @@ class OAAAgent:
             if issue or suggestion:
                 logger.info("Retrospective: issue=%s suggestion=%s", issue, suggestion)
         except Exception as exc:
-            logger.debug("Retrospective analysis failed: %s", exc)
+            logger.warning("Retrospective analysis failed: %s", exc)

@@ -121,14 +121,14 @@ class ReflectionScheduler:
             try:
                 failures = self._memory_mgr.load_tool_failures(30)
             except Exception as exc:
-                logger.debug("Reflection: failed to load failures: %s", exc)
+                logger.warning("Reflection: failed to load failures: %s", exc)
 
         corrections = []
         if self._memory_mgr:
             try:
                 corrections = self._memory_mgr.load_recent_corrections(15)
             except Exception as exc:
-                logger.debug("Reflection: failed to load corrections: %s", exc)
+                logger.warning("Reflection: failed to load corrections: %s", exc)
 
         skill_usage = {}
         crystallized = []
@@ -139,7 +139,7 @@ class ReflectionScheduler:
 
         # Skip if nothing to analyze
         if not failures and not corrections and not skill_usage:
-            logger.debug("Reflection: no data to analyze")
+            logger.warning("Reflection: no data to analyze")
             return
 
         # LLM analysis
@@ -153,7 +153,7 @@ class ReflectionScheduler:
                 try:
                     await self._memory_mgr.add_to_hot(f"[周学习] {lesson}")
                 except Exception as exc:
-                    logger.debug("Reflection: failed to save lesson: %s", exc)
+                    logger.warning("Reflection: failed to save lesson: %s", exc)
 
         # Create proposal for actionable suggestions
         suggestion = analysis.get("suggestion", "").strip()
@@ -172,7 +172,7 @@ class ReflectionScheduler:
                         actions=None,
                     ))
             except Exception as exc:
-                logger.debug("Reflection: failed to create proposal: %s", exc)
+                logger.warning("Reflection: failed to create proposal: %s", exc)
 
         logger.info("Reflection complete: %d lessons, %s",
                     len(analysis.get("lessons", [])),
@@ -246,5 +246,5 @@ class ReflectionScheduler:
             logger.info("Reflection LLM result: %d lessons", len(result["lessons"]))
             return result
         except Exception as exc:
-            logger.debug("Reflection LLM call failed: %s", exc)
+            logger.warning("Reflection LLM call failed: %s", exc)
             return None

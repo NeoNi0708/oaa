@@ -1,6 +1,6 @@
 # OAA 问题追踪
 
-> 最后更新：2026-05-29 — 交互工具体系完工 + 执行护栏 + 记忆系统 + skillify
+> 最后更新：2026-05-30 — 静默错误审计 + 模型切换修复 + except 全面升级
 
 ---
 
@@ -2796,3 +2796,33 @@ oaa/agent/tools/
 - `from .extended_tools import ExtendedTools` / `from .management import ManagementHandler` 导入兼容
 - 无任何行为变更，纯结构拆分
 - 自愈系统错误行号缓存仅存于 `~/OAA/memory/error_log.json`（运行时数据），不影响安装程序
+
+---
+
+## 本次会话（2026-05-30）— 静默错误审计 + 模型切换修复 + except 全面升级
+
+### 修复
+
+| # | 文件 | 问题 | 修复 |
+|---|------|------|------|
+| 1 | `gateway/mgmt/config_mixin.py` | `set_config()` 方法不存在 + 回退导入路径错误 (`..llm` → `oaa.gateway.llm`) | 改为 `reconfigure()` + `...llm.client` |
+| 2 | `oaa_agent.py:310` | 邮箱加载失败静默吞错误 | `logger.warning` |
+| 3 | `oaa_agent.py:722` | 活跃计划加载失败静默吞错误 | `logger.warning` |
+| 4 | `oaa_agent.py:1012` | 对话后复盘失败仅 debug 日志 | `logger.warning` |
+| 5 | `app.py:272` | 微信巡检通知失败仅 debug | `logger.warning` |
+| 6 | `idle_inspector.py` | 5 处巡检/LLM分析/磁盘/内存失败仅 debug | `logger.warning` |
+| 7 | `simphtml.py` | 4 处裸 `except:`（会吞 KeyboardInterrupt） | `except Exception:` |
+| 8 | `core_mixin.py:125` | 通知回调失败 `pass` | `logger.warning` |
+| 9 | `evolution_mixin.py:235` | 工具验证器失败 `pass` | `logger.warning` |
+| 10 | `evolution_mixin.py:331` | 提案注入失败仅 debug | `logger.warning` |
+| 11 | `tools/_core.py:190` | 回滚记录失败仅 debug | `logger.warning` |
+| 12 | `reflection_scheduler.py` | 6 处反射管线失败仅 debug | `logger.warning` |
+
+### 根因
+
+`management.py` → `mgmt/` 包重构时，`_handle_switch_model` 被移到 `oaa/gateway/mgmt/config_mixin.py`，但：
+1. `set_config()` 是旧方法名（正确应为 `reconfigure()`）
+2. 回退导入 `from ..llm.client` 在 `oaa.gateway.mgmt` 下解析为 `oaa.gateway.llm`（不存在），应使用 `...llm.client`
+
+两层 `except` 把错误吞干净，导致每次切模型静默失败，`self._agent.llm` 始终是启动时的旧客户端。用户切到有额度的模型后实际请求仍走旧模型 API → 429。`except Exception` 全局审计发现 12 处类似问题，全部升级到 `logger.warning`。
+

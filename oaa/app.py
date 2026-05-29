@@ -269,7 +269,7 @@ class OAAApp:
                     await wechat.send_message(wechat._bot_user_id,
                         f"💡 空闲巡检发现优化项：\n\n{simple}")
                 except Exception as exc:
-                    logger.debug("WeChat inspector notify failed: %s", exc)
+                    logger.warning("WeChat inspector notify failed: %s", exc)
         self.agent._idle_inspector.set_notify_callback(_inspector_notify)
 
         self.agent._idle_inspector.set_executor_callback(_executor_run)

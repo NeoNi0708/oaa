@@ -323,7 +323,7 @@ class IdleInspector:
                 if result and isinstance(result, str):
                     await self._store_proposal(result)
             except Exception as exc:
-                logger.debug("Startup phase %s: %s", phase_method.__name__, exc)
+                logger.warning("Startup phase %s: %s", phase_method.__name__, exc)
 
     async def inspect(self) -> str | None:
         """Run lineA + lineD inspections (background, lightweight, every 30 min).
@@ -1198,13 +1198,13 @@ class IdleInspector:
             result = json.loads(raw)
             allowed = ("tool_bug", "llm_error", "parameter_error", "strategy_error")
             if result.get("recommendation") not in allowed:
-                logger.debug("LLM analysis returned unexpected recommendation: %s", result.get("recommendation"))
+                logger.warning("LLM analysis returned unexpected recommendation: %s", result.get("recommendation"))
                 return None
             logger.info("LLM chain analysis for task %s: %s → %s",
                         task_context[:40], result["recommendation"], result.get("reasoning", "")[:100])
             return result
         except Exception as exc:
-            logger.debug("LLM chain analysis failed: %s", exc)
+            logger.warning("LLM chain analysis failed: %s", exc)
             return None
 
     # ------------------------------------------------------------------
@@ -1232,7 +1232,7 @@ class IdleInspector:
                     "  3. 检查 logs 目录是否有大文件"
                 ).format(pct, free_gb)
         except Exception as exc:
-            logger.debug("Disk usage check failed: %s", exc)
+            logger.warning("Disk usage check failed: %s", exc)
         return None
 
     # ------------------------------------------------------------------
@@ -1287,5 +1287,5 @@ class IdleInspector:
                     "  - 必要时重启进程释放内存"
                 ).format(rss_mb, cpu_pct)
         except Exception as exc:
-            logger.debug("Memory check failed: %s", exc)
+            logger.warning("Memory check failed: %s", exc)
         return None

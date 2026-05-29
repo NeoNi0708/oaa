@@ -177,14 +177,14 @@ class ConfigMixin:
         # If agent has an LLM client, hot-swap its config
         if self._agent and hasattr(self._agent, 'llm') and self._agent.llm is not None:
             try:
-                self._agent.llm.set_config(new_cfg)
+                self._agent.llm.reconfigure(new_cfg)
                 logger.info("Hot-swapped LLM config to %s", model_id)
             except Exception as exc:
                 logger.warning("Failed to hot-swap LLM config: %s", exc)
 
                 # Fallback: recreate LLM client
                 try:
-                    from ..llm.client import LLMClient
+                    from ...llm.client import LLMClient
                     self._agent.llm = LLMClient(new_cfg)
                     logger.info("Recreated LLM client for %s", model_id)
                 except Exception as exc2:

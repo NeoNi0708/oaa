@@ -187,7 +187,7 @@ class AtomicTools(BaseHandler, CodeMixin, GitMixin, MemoryMixin, ScheduleMixin, 
                 change["backup"] = backup_path
             _record(self.data_dir, "_tool_level", change)
         except Exception as exc:
-            logger.debug("Failed to record rollback entry: %s", exc)
+            logger.warning("Failed to record rollback entry: %s", exc)
 
     def _clear_pycache(self, filepath: str):
         pycache_dir = os.path.join(os.path.dirname(filepath), "__pycache__")

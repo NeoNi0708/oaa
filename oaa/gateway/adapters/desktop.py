@@ -380,6 +380,8 @@ class DesktopAdapter:
             payload = {"type": "tool_result", "payload": {"name": chunk.get("name", ""), "result": chunk.get("result", "")}}
         elif msg_type == "qr_code":
             payload = {"type": "qr_code", "payload": {"url": chunk.get("url", ""), "channel": chunk.get("channel", ""), "state": chunk.get("state", "")}}
+        elif msg_type == "survey":
+            payload = {"type": "survey", "payload": {k: v for k, v in chunk.items() if k != "type"}}
         else:
             return
         try:

@@ -232,8 +232,8 @@ class EvolutionMixin:
                     recent = memory.get_tool_failures(tool_name, limit=1)
                     if recent:
                         return False, f"{tool_name} 仍有失败记录: {recent[0].get('error', 'unknown')[:100]}"
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Tool-failure verifier failed for %s: %s", tool_name, exc)
             return True, f"已确认 {tool_name} 无新失败记录"
 
         repair_loop.register_verifier("tool_failure", _make_tool_verifier)
@@ -328,7 +328,7 @@ class EvolutionMixin:
                 summary_parts.append(f"状态: {status}")
             await memory.add_to_hot(" ".join(summary_parts))
         except Exception as exc:
-            logger.debug("Failed to inject proposal result: %s", exc)
+            logger.warning("Failed to inject proposal result: %s", exc)
 
     async def _handle_proposal_ignore(self, payload: dict) -> dict:
         """Ignore a proposal by ID, optionally permanently."""
