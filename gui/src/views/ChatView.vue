@@ -64,7 +64,7 @@
     </div>
 
     <!-- Messages -->
-    <div class="messages" ref="msgContainer">
+    <div class="messages" ref="scrollRef">
       <div v-if="messages.length === 0 && !streaming" class="welcome">
         <div class="welcome-icon">
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -97,7 +97,13 @@
         <div class="msg-content">
           <div class="msg-sender">{{ roleLabel(msg) }}</div>
           <div class="msg-bubble">
-            <ChatBubble :message="msg" :streaming="streaming" :sendRequest="sendRequest" />
+            <ChatBubble
+              :message="msg"
+              :streaming="streaming"
+              :sendRequest="sendRequest"
+              @survey-submitted="onSurveySubmitted"
+              @choice-selected="onChoiceSelected"
+            />
           </div>
         </div>
       </div>
@@ -118,17 +124,6 @@
 
     <!-- Work panel -->
     <WorkPanel :workEntries="workEntries" :streaming="streaming" />
-
-    <!-- Survey form -->
-    <SurveyForm
-      v-if="pendingSurvey"
-      :surveyId="pendingSurvey.surveyId"
-      :title="pendingSurvey.title"
-      :description="pendingSurvey.description"
-      :questions="pendingSurvey.questions"
-      :sendRequest="sendRequest"
-      @submitted="pendingSurvey = null"
-    />
 
     <!-- Confirmation dialog -->
     <div v-if="confirmRequest" class="confirm-overlay" @click.self="respondToConfirm(false)">
@@ -200,7 +195,6 @@ import { useWebSocket, type ChatMessage } from '../composables/useWebSocket'
 import { useAgentStatus } from '../composables/useAgentStatus'
 import WorkPanel from '../components/WorkPanel.vue'
 import ChatBubble from '../components/ChatBubble.vue'
-import SurveyForm from '../components/SurveyForm.vue'
 
 interface ModelInfo {
   name: string
@@ -239,7 +233,7 @@ onErrorCaptured((err: Error) => {
 
 const input = ref('')
 const loading = ref(false)
-const msgContainer = ref<HTMLElement | null>(null)
+const scrollRef = ref<HTMLElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 
 // Route override toggle
@@ -480,9 +474,20 @@ watch(streamingContent, () => {
   nextTick(() => scrollToBottom())
 })
 
+function onSurveySubmitted(surveyId: string, answers: any) {
+  const idx = messages.value.findIndex(m => m.survey?.surveyId === surveyId)
+  if (idx >= 0) {
+    messages.value[idx] = { ...messages.value[idx], survey: undefined }
+  }
+}
+
+function onChoiceSelected(value: string, question: string) {
+  // choice submission handled by ChoicesForm internally
+}
+
 function scrollToBottom() {
-  if (msgContainer.value) {
-    msgContainer.value.scrollTop = msgContainer.value.scrollHeight
+  if (scrollRef.value) {
+    scrollRef.value.scrollTop = scrollRef.value.scrollHeight
   }
 }
 

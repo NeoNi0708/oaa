@@ -278,9 +278,7 @@ class CoreMixin:
             return {"ok": False, "error": "choice is required"}
         user_msg = f"[选择] {question}: {choice}"
         if self._agent:
-            import asyncio
-            asyncio.create_task(self._forward_survey_to_agent(user_msg))
-            return {"ok": True, "status": "forwarded"}
+            return {"ok": True, "status": "forwarded_to_agent", "user_message": user_msg}
         return {"ok": False, "error": "Agent not available"}
 
     def _handle_submit_survey(self, payload: dict) -> dict:
@@ -291,17 +289,8 @@ class CoreMixin:
         summary = "; ".join(f"{k}: {v if not isinstance(v,list) else ", ".join(v)}" for k,v in answers.items())
         user_msg = f"[问卷提交] 问卷 {survey_id} 的答案：{summary}"
         if self._agent:
-            import asyncio
-            asyncio.create_task(self._forward_survey_to_agent(user_msg))
-            return {"ok": True, "status": "forwarded"}
+            return {"ok": True, "status": "forwarded_to_agent", "user_message": user_msg}
         return {"ok": False, "error": "Agent not available"}
-
-    async def _forward_survey_to_agent(self, user_msg: str):
-        try:
-            async for chunk in self._agent.process_message(user_msg, [], source="desktop"):
-                self._push_notification("survey_result", chunk)
-        except Exception as exc:
-            logger.exception("Failed to forward survey: %s", exc)
 
     def _get_memory_store(self):
         """Lazy access to agent's MemoryStore."""

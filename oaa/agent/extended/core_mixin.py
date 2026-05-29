@@ -251,6 +251,10 @@ class CoreMixin:
         """Inject SkillManager reference for skill_load tool."""
         self._skill_mgr = mgr
 
+    def set_oaa_agent(self, agent):
+        """Inject OAAAgent reference so tools can set pending state for the loop."""
+        self._oaa_agent = agent
+
     def set_patch_manager(self, mgr):
         """Inject PatchManager for do_apply_patch/do_remove_patch tools."""
         self._patch_mgr = mgr

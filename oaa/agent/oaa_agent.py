@@ -188,6 +188,7 @@ class OAAAgent:
             image_gen_config=config.image_gen,
         )
         self.extended.set_skill_manager(self.skill_mgr)
+        self.extended.set_oaa_agent(self)
         self.browser = BrowserTools()
         self.search = AiSearchTools(
             tavily_api_key=config.search.tavily_api_key,

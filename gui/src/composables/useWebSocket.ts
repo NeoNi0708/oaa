@@ -60,7 +60,11 @@ interface PendingRequest {
 // 30s timeout for management requests
 const REQUEST_TIMEOUT_MS = 30_000
 
+let _wsInstance: ReturnType<typeof useWebSocket> | null = null
+
 export function useWebSocket() {
+  if (_wsInstance) return _wsInstance
+
   const ws = ref<WebSocket | null>(null)
   const connected = ref(false)
   const messages = ref<ChatMessage[]>([])
@@ -68,7 +72,6 @@ export function useWebSocket() {
   const streamingContent = ref('')
   const qrCode = ref<QRCodeData | null>(null)
   const statusText = ref('')
-const pendingSurvey = ref<any>(null)
   const currentTool = ref<{ name: string; args: string } | null>(null)
   const confirmRequest = ref<ConfirmRequest | null>(null)
   const configUpdated = ref(0)  // incremented on config_updated push events
@@ -244,13 +247,16 @@ const pendingSurvey = ref<any>(null)
             break
           }
           case 'survey': {
-            // Store survey in a separate ref to avoid being overwritten by streaming
-            pendingSurvey.value = {
-              surveyId: p.survey_id,
-              title: p.title,
-              description: p.description,
-              questions: p.questions,
-            }
+            messages.value.push({
+              role: 'assistant',
+              content: '',
+              survey: {
+                surveyId: p.survey_id,
+                title: p.title,
+                description: p.description,
+                questions: p.questions,
+              },
+            })
             break
           }
           case 'file': {
@@ -461,7 +467,7 @@ const pendingSurvey = ref<any>(null)
     ws.value?.close()
   })
 
-  return {
+  _wsInstance = {
     connected,
     messages,
     streaming,
@@ -477,7 +483,6 @@ const pendingSurvey = ref<any>(null)
     proposalAdded,
     patchesUpdated,
     workEntries,
-    pendingSurvey,
     send,
     sendRequest,
     listPreferences,
@@ -488,4 +493,7 @@ const pendingSurvey = ref<any>(null)
     clearStatus,
     clearWorkEntries,
   }
+  return _wsInstance
 }
+
+export type WebSocketAPI = ReturnType<typeof useWebSocket>

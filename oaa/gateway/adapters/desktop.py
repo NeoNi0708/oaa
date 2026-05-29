@@ -269,8 +269,9 @@ class DesktopAdapter:
 
         await self._send_response(websocket, msg_type, request_id, result)
 
-        # If a chat_action was forwarded to the agent, process it as a chat message
-        if (msg_type == "chat_action" and isinstance(result, dict)
+        # If a management action was forwarded to the agent, process it as a chat message
+        if (msg_type in ("chat_action", "submit_survey", "submit_choice")
+                and isinstance(result, dict)
                 and result.get("status") == "forwarded_to_agent"
                 and result.get("user_message")):
             asyncio.create_task(
