@@ -7,6 +7,11 @@ export interface ChatMessage {
   args?: string
   result?: string
   route?: 'local' | 'cloud'
+  survey?: any
+  chartOption?: any
+  filePreview?: any
+  taskboard?: any
+  choices?: any
 }
 
 export interface QRCodeData {
@@ -63,6 +68,7 @@ export function useWebSocket() {
   const streamingContent = ref('')
   const qrCode = ref<QRCodeData | null>(null)
   const statusText = ref('')
+const pendingSurvey = ref<any>(null)
   const currentTool = ref<{ name: string; args: string } | null>(null)
   const confirmRequest = ref<ConfirmRequest | null>(null)
   const configUpdated = ref(0)  // incremented on config_updated push events
@@ -70,6 +76,7 @@ export function useWebSocket() {
   const channelStatusChanged = ref(0)  // incremented on channel_disconnected push
   const tasksUpdated = ref(0)  // incremented on task_updated push events
   const proposalAdded = ref(0)  // incremented on proposal_added push events
+  const patchesUpdated = ref(0)  // incremented on patches_updated push events
   const workEntries = ref<WorkEntry[]>([])
   let _workEntryId = 0
   // When true, the next llm_output starts a fresh assistant bubble (set after tool_call/tool_result)
@@ -227,6 +234,63 @@ export function useWebSocket() {
             }
             break
           }
+          case 'chart': {
+            const chartBlock = '```oaa-chart\n' + JSON.stringify({ option: p.option }) + '\n```'
+            if (streamingContent.value !== '') {
+              streamingContent.value += '\n\n' + chartBlock
+            } else {
+              messages.value.push({ role: 'assistant', content: chartBlock })
+            }
+            break
+          }
+          case 'survey': {
+            // Store survey in a separate ref to avoid being overwritten by streaming
+            pendingSurvey.value = {
+              surveyId: p.survey_id,
+              title: p.title,
+              description: p.description,
+              questions: p.questions,
+            }
+            break
+          }
+          case 'file': {
+            messages.value.push({
+              role: 'assistant',
+              content: '[文件] ' + (p.title || p.path || ''),
+              filePreview: {
+                path: p.path,
+                fileType: p.file_type,
+                title: p.title,
+                size: p.size,
+              },
+            })
+            break
+          }
+          case 'taskboard': {
+            messages.value.push({
+              role: 'assistant',
+              content: '[任务清单]',
+              taskboard: { items: p.items },
+            })
+            break
+          }
+          case 'choices': {
+            messages.value.push({
+              role: 'assistant',
+              content: '[选择] ' + (p.question || ''),
+              choices: { question: p.question, options: p.options },
+            })
+            break
+          }
+          case 'notification': {
+            const icons: Record<string, string> = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌' }
+            const icon = icons[p.msg_type] || 'ℹ️'
+            messages.value.push({
+              role: 'assistant',
+              content: `${icon} **${p.title}**\n\n${p.message}`,
+            })
+            break
+          }
           case 'confirm_request': {
             confirmRequest.value = {
               requestId: data.request_id || '',
@@ -253,6 +317,10 @@ export function useWebSocket() {
           }
           case 'proposal_added': {
             proposalAdded.value++
+            break
+          }
+          case 'patches_updated': {
+            patchesUpdated.value++
             break
           }
         }
@@ -407,7 +475,9 @@ export function useWebSocket() {
     channelStatusChanged,
     tasksUpdated,
     proposalAdded,
+    patchesUpdated,
     workEntries,
+    pendingSurvey,
     send,
     sendRequest,
     listPreferences,

@@ -5,6 +5,7 @@
   "description": "Bundled CLI tools for OAA — wechat, dingtalk, feishu",
   "dependencies": {
     "@larksuite/cli": "*",
-    "dws": "*"
+    "dws": "*",
+    "@colbymchenry/codegraph": "latest"
   }
 }

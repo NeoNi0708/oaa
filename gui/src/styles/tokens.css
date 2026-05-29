@@ -365,3 +365,64 @@ body::before {
   color: var(--oaa-color-secondary);
   margin-bottom: var(--oaa-space-1);
 }
+
+/* ========================================================================
+   Light theme — Kenya Hara 东方极简 · 暖米白
+   Applied via <html data-theme="light">
+   ======================================================================== */
+[data-theme="light"] {
+  /* --- Primary (warm terra cotta) --- */
+  --oaa-primary: #b84a3a;
+  --oaa-primary-hover: #a33d2e;
+  --oaa-primary-active: #8d3123;
+  --oaa-primary-light: rgba(184, 74, 58, 0.10);
+  --oaa-primary-glow: rgba(184, 74, 58, 0.18);
+
+  /* Map blue tokens to warm accent so all primary UI elements match */
+  --oaa-blue-400: #b84a3a;
+  --oaa-blue-500: #b84a3a;
+  --oaa-blue-600: #a33d2e;
+  --oaa-blue-700: #8d3123;
+
+  /* --- Surfaces (warm rice-white) --- */
+  --oaa-bg-app: #f7f3ee;
+  --oaa-bg-sidebar: #f0ece7;
+  --oaa-bg-surface: #ffffff;
+  --oaa-bg-surface-hover: #faf8f6;
+  --oaa-bg-elevated: #ffffff;
+  --oaa-bg-input: #f0ece7;
+
+  /* --- Glass morphism (warm-tinted) --- */
+  --oaa-glass-bg: rgba(255, 255, 255, 0.85);
+  --oaa-glass-border: rgba(0, 0, 0, 0.04);
+  --oaa-glass-blur: 12px;
+
+  /* --- Borders (warm gray) --- */
+  --oaa-border-subtle: rgba(0, 0, 0, 0.04);
+  --oaa-border-default: rgba(0, 0, 0, 0.08);
+  --oaa-border-strong: rgba(0, 0, 0, 0.12);
+  --oaa-border-focus: var(--oaa-blue-500);
+
+  /* --- Text (warm dark, not pure black) --- */
+  --oaa-color-primary: #3d3733;
+  --oaa-color-secondary: #8d8580;
+  --oaa-color-muted: #b0a8a2;
+  --oaa-color-disabled: #ccc5bf;
+
+  /* --- Shadows (soft, warm-toned) --- */
+  --oaa-shadow-sm: 0 1px 3px rgba(120, 80, 60, 0.06);
+  --oaa-shadow-md: 0 4px 12px rgba(120, 80, 60, 0.06);
+  --oaa-shadow-lg: 0 8px 24px rgba(120, 80, 60, 0.08);
+  --oaa-shadow-glow: 0 0 20px var(--oaa-primary-glow);
+  --oaa-shadow-card: 0 1px 3px rgba(120, 80, 60, 0.04), 0 0 0 1px rgba(0, 0, 0, 0.03);
+
+  /* --- Status glows --- */
+  --oaa-success-glow: rgba(34, 197, 94, 0.20);
+  --oaa-warning-glow: rgba(245, 158, 11, 0.18);
+}
+
+[data-theme="light"] body::before {
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(184, 74, 58, 0.04) 0%, transparent 60%),
+    radial-gradient(ellipse at 80% 80%, rgba(210, 160, 110, 0.04) 0%, transparent 50%);
+}

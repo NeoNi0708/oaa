@@ -31,6 +31,7 @@
             <span class="entry-icon">🔧</span>
             <span class="entry-name">{{ entry.name }}</span>
             <span v-if="entry.args" class="entry-args">{{ entry.args }}</span>
+            <span v-if="entry.reasoning" class="entry-reasoning" :title="entry.reasoning">💭</span>
           </div>
 
           <!-- Tool result -->
@@ -331,5 +332,30 @@ function togglePanel() {
   font-family: var(--oaa-font-mono);
   font-size: 10px;
   margin-left: auto;
+}
+
+/* ------------------------------------------------------------------ */
+/* Light theme — 暖米白                                                 */
+/* ------------------------------------------------------------------ */
+[data-theme="light"] .work-panel {
+  background: var(--oaa-bg-surface);
+  border-top-color: rgba(0, 0, 0, 0.08);
+}
+
+[data-theme="light"] .work-toggle {
+  color: var(--oaa-color-secondary);
+}
+
+[data-theme="light"] .work-toggle:hover {
+  background: rgba(184, 74, 58, 0.04);
+  color: var(--oaa-blue-500);
+}
+
+[data-theme="light"] .work-step {
+  background: var(--oaa-bg-app);
+}
+
+[data-theme="light"] .work-step:hover {
+  background: var(--oaa-bg-surface-hover);
 }
 </style>

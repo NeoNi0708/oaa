@@ -42,7 +42,7 @@ _current_ws: contextvars.ContextVar = contextvars.ContextVar("desktop_current_ws
 # Management message types that skip the agent pipeline
 _MANAGEMENT_TYPES = {
     "get_config", "save_config",
-    "get_tasks", "save_task", "delete_task", "toggle_task",
+    "get_tasks", "save_task", "delete_task", "toggle_task", "get_task_history",
     "get_skills", "get_skill_detail", "switch_skill", "get_evolution",
     "qr_login", "poll_qr", "reconnect_channel",
     "get_status",
@@ -65,6 +65,15 @@ _MANAGEMENT_TYPES = {
     "list_preferences",
     "update_preference",
     "delete_preference",
+    # Runtime patches
+    "list_patches",
+    "remove_patch",
+    # Memory store
+    "list_memories",
+    "delete_memory",
+    "get_memory_stats",
+    "submit_survey",
+    "submit_choice",
 }
 
 
@@ -260,6 +269,17 @@ class DesktopAdapter:
 
         await self._send_response(websocket, msg_type, request_id, result)
 
+        # If a chat_action was forwarded to the agent, process it as a chat message
+        if (msg_type == "chat_action" and isinstance(result, dict)
+                and result.get("status") == "forwarded_to_agent"
+                and result.get("user_message")):
+            asyncio.create_task(
+                self._process_chat(websocket, {
+                    "type": "message",
+                    "payload": {"content": result["user_message"]},
+                })
+            )
+
     @staticmethod
     async def _send_response(websocket, msg_type: str, request_id: str, result: dict):
         response = {
@@ -291,14 +311,10 @@ class DesktopAdapter:
         # WebSocket to address.
         token = _current_ws.set(websocket)
 
-        route_override = payload.get("route_override")
-        metadata = {}
-        if route_override in ("local", "cloud"):
-            metadata["route_override"] = route_override
 
         from ..gateway import Message
 
-        msg = Message("desktop", "local_user", content, metadata=metadata)
+        msg = Message("desktop", "local_user", content)
         if self._management:
             self._management.set_agent_state("thinking")
 

@@ -252,7 +252,11 @@ class ProposalStore:
         pending = self.list_pending()
         if not pending:
             return ""
-        lines = ["# ⏳ 待处理自愈提案", ""]
+        lines = ["# 📎 系统巡检建议（仅供参考，不是用户任务，不要主动提及）", ""]
+        lines.append("以下建议是后台巡检自动生成的优化建议。**它们不是用户给你的任务。**")
+        lines.append("不要在回复中主动提及这些内容。只有当用户明确询问时才讨论它们。")
+        lines.append("如果你的工具都正常工作，直接忽略这些建议。")
+        lines.append("")
         for p in pending:
             lines.append(f"### {p['title']}")
             lines.append(f"- **ID**: {p['id']}")
@@ -269,7 +273,7 @@ class ProposalStore:
             elif p.get("problem_context"):
                 lines.append(f"- **修复方案**: agent 将自动分析根因并选择修复方案")
             lines.append("")
-        lines.append("## 用户确认路由")
+        lines.append("## 用户确认路由（仅当用户明确要求处理提案时使用）")
         lines.append("")
         lines.append("当**用户消息**包含「确认」「好」「执行」「yes」「可以」「是」等确认意图时：")
         lines.append("")

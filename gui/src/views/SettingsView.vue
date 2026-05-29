@@ -117,6 +117,37 @@
         </div>
       </section>
 
+      <!-- 搜索配置 -->
+      <section class="settings-section">
+        <div class="section-header">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          <h3>搜索配置</h3>
+        </div>
+        <p class="form-hint" style="margin-bottom: 12px;">配置 AI 搜索引擎的 API Key，Agent 将自动选择最优引擎（Tavily/Exa/AnySearch）</p>
+        <div class="form-group">
+          <label class="oaa-label">Tavily API Key</label>
+          <input v-model="form.tavilyKey" type="password" class="oaa-input" placeholder="tvly-..." style="margin-top: 4px;" />
+        </div>
+        <div class="form-group">
+          <label class="oaa-label">Exa API Key</label>
+          <input v-model="form.exaKey" type="password" class="oaa-input" placeholder="输入 Exa API Key" style="margin-top: 4px;" />
+        </div>
+        <div class="form-group">
+          <label class="oaa-label">AnySearch API Key</label>
+          <input v-model="form.anysearchKey" type="password" class="oaa-input" placeholder="as_sk_..." style="margin-top: 4px;" />
+        </div>
+        <div class="section-actions">
+          <span v-if="searchStatus" :class="['save-status', 'save-status--' + searchStatusType]">{{ searchStatus }}</span>
+          <button class="oaa-btn oaa-btn--primary" @click="saveSearchConfig" :disabled="searchSaving">
+            <svg v-if="searchSaving" class="btn-spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            保存搜索配置
+          </button>
+        </div>
+      </section>
+
       <!-- 权限管理 -->
       <section class="settings-section">
         <div class="section-header">
@@ -325,6 +356,10 @@ const defaultForm = {
   blacklistPathsText: '',
   // per-provider credentials — list per provider (new format)
   models: {} as Record<string, ModelStoreEntry[]>,
+  // search keys
+  tavilyKey: '',
+  exaKey: '',
+  anysearchKey: '',
 }
 
 const form = reactive({ ...defaultForm })
@@ -342,6 +377,10 @@ const workspaceStatusType = ref<'success' | 'error'>('success')
 const permissionSaving = ref(false)
 const permissionStatus = ref('')
 const permissionStatusType = ref<'success' | 'error'>('success')
+
+const searchSaving = ref(false)
+const searchStatus = ref('')
+const searchStatusType = ref<'success' | 'error'>('success')
 
 // Multi-model helpers
 const currentProviderModels = computed(() => form.models[form.provider] || [])
@@ -434,6 +473,12 @@ function applyConfig(backendConfig: Record<string, unknown>) {
   const perms = (backendConfig.permissions as Record<string, unknown>) || {}
   form.requireConfirm = (perms.require_confirm as string[]) || []
   form.blacklistPathsText = ((perms.blacklist_paths as string[]) || []).join('\n')
+
+  // Load search keys
+  const sc = (backendConfig.search as Record<string, string>) || {}
+  form.tavilyKey = sc.tavily_api_key || ''
+  form.exaKey = sc.exa_api_key || ''
+  form.anysearchKey = sc.anysearch_api_key || ''
 }
 
 // ------------------------------------------------------------------
@@ -623,6 +668,36 @@ async function savePermissions() {
   } finally {
     permissionSaving.value = false
     setTimeout(() => { permissionStatus.value = '' }, 4000)
+  }
+}
+
+async function saveSearchConfig() {
+  searchSaving.value = true
+  searchStatus.value = ''
+
+  const payload = {
+    search: {
+      tavily_api_key: form.tavilyKey,
+      exa_api_key: form.exaKey,
+      anysearch_api_key: form.anysearchKey,
+    },
+  }
+
+  try {
+    const resp = await sendRequest('save_config', { config: payload })
+    if (resp.ok) {
+      searchStatus.value = '✓ 搜索配置已保存'
+      searchStatusType.value = 'success'
+    } else {
+      searchStatus.value = '✗ ' + (resp.error || '保存失败')
+      searchStatusType.value = 'error'
+    }
+  } catch (e: any) {
+    searchStatus.value = '✗ 网络错误: ' + (e.message || '连接失败')
+    searchStatusType.value = 'error'
+  } finally {
+    searchSaving.value = false
+    setTimeout(() => { searchStatus.value = '' }, 4000)
   }
 }
 

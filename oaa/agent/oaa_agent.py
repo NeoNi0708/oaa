@@ -107,6 +107,10 @@ class OAAAgent:
         # Tiered memory system (HOT + corrections + warm/ + cold/)
         self.memory = MemoryManager(os.path.join(config.data_dir, "memory"))
 
+        # Structured memory store (Chroma + SQLite — semantic search, importance, digestion)
+        from .memory import MemoryStore
+        self._memory_store = MemoryStore(config.data_dir)
+
         # Metrics collector (proactivity + LLM stats)
         self.metrics = MetricsCollector(config.data_dir)
         if self.permissions:
@@ -138,9 +142,12 @@ class OAAAgent:
         skills_dir = os.path.join(config.data_dir, "skills")
         self.skill_mgr = SkillManager(skills_dir)
         self.skill_mgr.discover()
+        if self.evolution:
+            self.evolution.set_skill_manager(self.skill_mgr)
 
         self.atomic = AtomicTools(config.data_dir, permissions=permissions)
         self.atomic.set_memory_manager(self.memory)
+        self.atomic.set_memory_store(self._memory_store)
         self.atomic.set_archiver(self.archiver)
         self.atomic.set_proposal_store(self._proposal_store)
         self.atomic.set_idle_inspector(self._idle_inspector)
@@ -154,6 +161,26 @@ class OAAAgent:
         self._prefs_store = PreferencesStore(config.data_dir)
         self.atomic.set_clone_manager(self._clone_mgr)
         self.atomic.set_preferences_store(self._prefs_store)
+
+        # TodoStore — agent's external working memory
+        from .todo_store import TodoStore
+        self._todo_store = TodoStore()
+        self.atomic.set_todo_store(self._todo_store)
+
+        # Active plan — injected into system prompt so agent always sees it
+        self.active_plan: dict = {}
+        # Pending chart for display_chart tool
+        self._pending_chart = None
+        # Pending survey for create_survey tool
+        self._pending_survey = None
+        # Pending file for show_file tool
+        self._pending_file = None
+        # Pending taskboard for update_taskboard tool
+        self._pending_taskboard = None
+        # Pending notify for notify_user tool
+        self._pending_notify = None
+        # Pending choices for send_choices tool
+        self._pending_choices = None
         self.extended = ExtendedTools(
             config.data_dir, permissions=permissions, wechat_adapter=wechat_adapter,
             dingtalk_client_id=config.dingtalk.client_id,
@@ -211,6 +238,11 @@ class OAAAgent:
         if self._idle_inspector:
             self._idle_inspector._channel_adapters = adapters
 
+    def set_patch_manager(self, mgr):
+        """Inject PatchManager for do_apply_patch/do_remove_patch tools."""
+        self._patch_mgr = mgr
+        self.extended.set_patch_manager(mgr)
+
     def _build_channel_status(self) -> str:
         """Build a runtime status report of all channel adapters.
 
@@ -237,8 +269,8 @@ class OAAAgent:
             if name == "wechat":
                 if authed:
                     cli_ok = bool(getattr(self.config.wechat, "wechat_cli_path", ""))
-                    lines.append(f"- 微信 (iLink): ✅ 已连接 — wechat_send_file / wechat_send_text / wechat_send_typing 可用")
-                    lines.append(f"- 微信 (wechat-cli): {'✅ 已配置 — wechat_contacts / wechat_history / wechat_search / wechat_sessions 可用' if cli_ok else '❌ 未配置 — wechat_contacts / wechat_history / wechat_search / wechat_sessions 不可用'}")
+                    lines.append(f"- 微信 (iLink): ✅ 已连接 → wechat_send_text / wechat_send_file 可直接使用")
+                    lines.append(f"- 微信 (wechat-cli): {'✅ 已配置 → wechat_contacts / wechat_history 可用' if cli_ok else '❌ 未配置'}")
                 else:
                     lines.append(f"- 微信: ❌ 未连接（请先扫码登录）")
             elif name == "dingtalk":
@@ -249,7 +281,115 @@ class OAAAgent:
         if not lines:
             return ""
 
-        return "# 当前通道状态\n\n" + "\n".join(lines)
+        return "# 通道状态\n\n" + "\n".join(lines)
+
+    def _build_resource_status(self) -> str:
+        """Build a complete resource status: channels + email + search keys.
+
+        This tells the agent EXACTLY what is already configured so it can
+        use resources directly without checking first.
+        """
+        parts = []
+
+        # 1. Channel status
+        channel_status = self._build_channel_status()
+        if channel_status:
+            parts.append(channel_status)
+
+        # 2. Email accounts
+        email_lines = []
+        try:
+            from ..gateway.email_config import EmailConfigManager
+            email_mgr = EmailConfigManager(self.config.data_dir)
+            accounts = email_mgr.list_accounts()
+            if accounts:
+                email_lines.append("\n## 已配置邮箱账户\n")
+                for a in accounts:
+                    email_lines.append(f"- {a.get('username', '?')} ({a.get('provider', '?')}) → email_send 可直接使用")
+                email_lines.append("\n收到发邮件任务时直接使用以上账户，不需要先检查配置。")
+        except Exception:
+            pass
+        if email_lines:
+            parts.append("\n".join(email_lines))
+
+        # 3. Search key status
+        search_lines = ["\n## 搜索工具状态\n"]
+        search = self.config.search
+        keys_ok = []
+        keys_missing = []
+        for engine in ("tavily", "exa", "anysearch"):
+            key = getattr(search, f"{engine}_api_key", "")
+            if key and not ("****" in key):
+                keys_ok.append(engine)
+            else:
+                keys_missing.append(engine)
+
+        search_lines.append(f"- web_scan: ✅ 始终可用（抓取网页，不需要 Key）")
+        if keys_ok:
+            search_lines.append(f"- ai_search (有Key): {'/'.join(keys_ok)} 可用")
+        if keys_missing:
+            search_lines.append(f"- ai_search (缺Key): {'/'.join(keys_missing)} 不可用 → 需要时在GUI设置页面配置")
+        search_lines.append(f"- 自写 Python 代码: ✅ 始终可用（requests/urllib 抓取网页）")
+        search_lines.append(f"\n搜索任务优先级: web_scan → ai_search → 自写代码。一个失败立刻换下一个。")
+        parts.append("\n".join(search_lines))
+
+        return "\n".join(parts)
+
+    def reload_tools(self):
+        """Hot-reload all tool schemas and rebuild the handler.
+
+        Call after creating or modifying source-level tools so they
+        become available without restarting the process.
+        """
+        from .tool_decorator import collect_tool_schemas
+        from .tool_groups import GROUP_INDEX
+        # Re-collect @agent_tool schemas from all tool classes
+        atomic_schemas = collect_tool_schemas(self.atomic)
+        extended_schemas = collect_tool_schemas(ExtendedTools)
+        from .browser_tools import BrowserTools
+        browser_schemas = collect_tool_schemas(BrowserTools)
+        from .ai_search_tool import AiSearchTools
+        search_schemas = collect_tool_schemas(AiSearchTools)
+
+        extended_tools = atomic_schemas + extended_schemas + browser_schemas + search_schemas
+
+        from .tool_schema import (
+            WECHAT_TOOLS_SCHEMA, FEISHU_TOOLS_SCHEMA, DINGTALK_TOOLS_SCHEMA,
+            MCP_TOOLS_SCHEMA,
+        )
+        # Rebuild channel adapters
+        wechat_adapter = self._channel_adapters.get("wechat") if self._channel_adapters else None
+        if wechat_adapter and hasattr(wechat_adapter, "is_authenticated"):
+            authed = wechat_adapter.is_authenticated
+            if callable(authed):
+                authed = authed()
+        else:
+            authed = False
+        wechat_ok = authed and bool(getattr(self.config.wechat, "wechat_cli_path", ""))
+        dingtalk_ok = False
+        feishu_ok = False
+        if self._channel_adapters:
+            da = self._channel_adapters.get("dingtalk")
+            if da and hasattr(da, "is_authenticated"):
+                d_authed = da.is_authenticated
+                dingtalk_ok = d_authed() if callable(d_authed) else bool(d_authed)
+            fa = self._channel_adapters.get("feishu")
+            if fa and hasattr(fa, "is_authenticated"):
+                f_authed = fa.is_authenticated
+                feishu_ok = f_authed() if callable(f_authed) else bool(f_authed)
+
+        self._all_tools_schema = extended_tools
+        if wechat_ok:
+            self._all_tools_schema = self._all_tools_schema + WECHAT_TOOLS_SCHEMA
+        if feishu_ok:
+            self._all_tools_schema = self._all_tools_schema + FEISHU_TOOLS_SCHEMA
+        if dingtalk_ok:
+            self._all_tools_schema = self._all_tools_schema + DINGTALK_TOOLS_SCHEMA
+        self._all_tools_schema = self._all_tools_schema + MCP_TOOLS_SCHEMA
+
+        self._tools_schema = self._build_visible_schema()
+        self._handler = self.build_handler()
+        return True
 
     def build_handler(self) -> BaseHandler:
         """Build a merged handler that exposes atomic, extended, browser, and search tools."""
@@ -500,7 +640,9 @@ class OAAAgent:
 - Shell 提示:
 {chr(10).join(_shell_hints)}
 
-{self._build_channel_status()}
+{self._build_resource_status()}
+
+你是运行在云端大模型的 OAA 智能助理。能对话就说明网络正常，某个工具报"超时"是那个工具的问题，不是网络问题。系统巡检建议是后台自动生成的，不是用户任务，不要主动提及。
 
 ## 核心规则
 
@@ -508,20 +650,9 @@ class OAAAgent:
 
 （完整规则可通过 read_own_source("oaa/agent/system_rules.py") 查看）
 
-## 可用技能
+## 技能系统
 
-当遇到以下领域的任务时，调用 `skill_load("技能名称")` 加载对应技能的详细操作指南。
-加载后技能会提供专业知识、SOP 流程和注意事项。
-
-如果没有列出匹配的技能：
-1. 先用 `skill_search` 在 ClawHub 技能市场搜索现成的技能
-2. 或在 GitHub 上用 `ai_search` 搜索开源技能
-3. 找到后用 `skill_install` 安装，再用 `skill_load` 加载
-4. 如果确实没有现成的，用 `skill_create` 自己创建一个 SKILL.md
-
-**不要问用户"需要什么技能"——你自己找或自己写。**
-
-{skill_listing}
+需要技能时用 `skill_find("要做什么")` 搜索最匹配的技能，按需加载。如果找不到匹配的，用 `skill_search` 在技能市场找现成的，或用 `skill_create` 自己写。**技能按需加载，不提前预装。**
 
 ## 工作方式
 
@@ -532,6 +663,7 @@ class OAAAgent:
 - 多步任务 → 自己规划逐步执行，不要在每一步问"下一步怎么办"
 - 和用户说话简洁直接，不铺垫、不复述工具输出
 - **每次回应问自己：我是在解决问题，还是在汇报问题？**
+- **自动学习用户偏好** — 从对话中注意到用户信息时自动调用 preference_set：称呼/公司/职位、工作习惯（常用文档类型、工作时段）、沟通风格（直接/详细）、业务领域。不要向用户展示 key/value，用自然语言确认即可。
 
 ## 行为示例
 
@@ -555,9 +687,8 @@ class OAAAgent:
             if metrics_block:
                 result += "\n\n" + metrics_block
 
-        # Inject tiered memory (HOT + recent corrections)
-        memory_prompt = self.memory.build_memory_prompt()
-        result += "\n\n" + memory_prompt
+        # Inject structured memory (semantic search — graded top-5)
+        result += "\n\n" + self._memory_store.get_injection_text()
 
         # Inject pending structured proposals (self-healing closed loop)
         if self._proposal_store and self._proposal_store.has_pending():
@@ -575,6 +706,21 @@ class OAAAgent:
         prefs_text = self._prefs_store.get_injection_text()
         if prefs_text:
             result += "\n\n" + prefs_text
+
+        # Inject current todo list (agent's external working memory)
+        todo_text = self._todo_store.get_injection_text()
+        if todo_text:
+            result += "\n\n" + todo_text
+
+        # Inject active plan from planner (agent's long-term plan)
+        try:
+            planner = getattr(self.extended, "planner", None)
+            if planner:
+                plan_text = planner.get_active_plan_text()
+                if plan_text:
+                    result += "\n\n" + plan_text
+        except Exception:
+            pass
 
         # Inject tool-group directory — only show unloaded groups
         result += "\n\n## 工具组目录\n\n"
@@ -595,8 +741,7 @@ class OAAAgent:
         return result
 
     async def process_message(self, user_input: str, history: list | None = None,
-                               route_override: str | None = None,
-                               source: str = "", user_id: str = "") -> AsyncGenerator[dict, None]:
+                                               source: str = "", user_id: str = "") -> AsyncGenerator[dict, None]:
         """Process a single user message through the full agent pipeline.
 
         1. System prompt construction (identity + skill listing)
@@ -605,6 +750,13 @@ class OAAAgent:
 
         The model may call skill_load() at any time to retrieve detailed
         instructions for a specific skill — no pre-matching needed.
+
+        # Filter: suppress responses to system connection notifications
+        if user_input and ("【系统通知】" in user_input or "频道连接" in user_input
+                           or "通道刚刚连接" in user_input):
+            if "启动" not in user_input and "任务" not in user_input:
+                yield {"type": "done", "content": ""}
+                return
 
         Args:
             user_input: The user's message text.
@@ -623,7 +775,7 @@ class OAAAgent:
         logger.info("Processing message [%s/%s]: %s...", source, user_id, user_input[:80])
 
         # Step 0: Route — always cloud (local model has been removed)
-        logger.info("Route to CLOUD")
+        logger.info("Route")
 
         # Step 1: System prompt (always uses identity-only, model selects skill)
         system_prompt = self.build_system_prompt()
@@ -672,6 +824,9 @@ class OAAAgent:
             model_fallbacks=fallbacks,
             agent=self,  # P2 skill plugin
             policy_engine=self._policy_engine,  # P4 policy enforcement
+            planner=getattr(self.extended, "planner", None),  # auto plan-step advance
+            todo_store=self._todo_store,  # task-list sync
+            memory_store=self._memory_store,  # structured memory writes
         )
         loop.set_skill_context(system_prompt)
 
@@ -758,10 +913,11 @@ class OAAAgent:
                 if skill_loaded:
                     await self.evolution.record_skill_usage(skill_loaded)
 
-            if self.memory and skill_loaded:
+            if skill_loaded:
                 summary = (user_input[:80] + "...") if len(user_input) > 80 else user_input
-                await self.memory.add_to_hot(
-                    f"用技能「{skill_loaded}」完成了: {summary}"
+                self._memory_store.add(
+                    f"用技能「{skill_loaded}」完成了: {summary}",
+                    mem_type="event", source="agent",
                 )
 
             # Flush metrics periodically
@@ -845,7 +1001,7 @@ class OAAAgent:
             result = json.loads(raw)
             lesson = (result.get("lesson") or "").strip()
             if lesson and len(lesson) > 10:
-                await self.memory.add_to_hot(f"[任务复盘] {lesson}")
+                self._memory_store.add(lesson, mem_type="pattern", source="agent")
                 logger.info("Retrospective lesson extracted: %s", lesson)
 
             issue = (result.get("issue") or "").strip()

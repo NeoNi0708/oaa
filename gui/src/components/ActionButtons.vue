@@ -161,4 +161,21 @@ onMounted(async () => {
   color: var(--oaa-danger, #ef4444);
   padding: 4px 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* Light theme overrides                                               */
+/* ------------------------------------------------------------------ */
+[data-theme="light"] .action-btn {
+  border-color: var(--oaa-border-default);
+  background: var(--oaa-bg-surface);
+}
+
+[data-theme="light"] .action-btn--pending {
+  border-color: var(--oaa-border-default);
+  background: var(--oaa-bg-surface);
+}
+
+[data-theme="light"] .action-btn:hover:not(:disabled) {
+  background: var(--oaa-bg-surface-hover);
+}
 </style>

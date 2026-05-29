@@ -5,6 +5,7 @@ import asyncio
 import json
 import re
 import time
+import uuid
 from typing import Any, AsyncGenerator, Optional, TYPE_CHECKING
 
 from ..llm import LLMClient, LLMResponse
@@ -130,6 +131,9 @@ class AgentLoop:
         model_fallbacks: list | None = None,
         agent=None,  # OAAAgent reference for P2 skill plugin
         policy_engine=None,  # P4 PolicyEngine reference
+        planner=None,  # Planner reference for auto plan-step advancement
+        todo_store=None,  # TodoStore reference for auto task-status sync
+        memory_store=None,  # MemoryStore for structured memory writes
     ):
         self.llm = llm
         self.handler = handler
@@ -138,12 +142,19 @@ class AgentLoop:
         self._max_messages = max_messages
         self._memory_mgr = memory_mgr
         self._metrics = metrics_collector
+        self._planner = planner
+        self._todo_store = todo_store
+        self._memory_store = memory_store
         self._agent = agent
         self._policy_engine = policy_engine
         self._system_prompt = "You are OAA Agent."
         self._system_prompt_base = self._system_prompt  # saved for skill unload restore
         self._last_llm_content = ""
         self._continuation_count = 0
+        self._oaa_chart_retried = False
+        self._oaa_choices_injected = False
+        self._auto_taskboard_yielded = False
+        self._pre_flight_done = False
         self._model_fallbacks = model_fallbacks or []
         self._active_fallback_idx = -1  # -1 = primary model, 0+ = fallback index
         self._combined_tools = list(self.tools_schema)
@@ -211,6 +222,7 @@ class AgentLoop:
 
         # Reset execution chain for this task
         self._execution_chain = []
+        self._current_task_id = uuid.uuid4().hex[:12]
 
         messages: list[dict] = [
             {"role": "system", "content": self._system_prompt},
@@ -219,6 +231,7 @@ class AgentLoop:
             messages.extend(history)
         messages.append({"role": "user", "content": user_input})
 
+        # Pre-flight skipped -- handled by pacer + system rules
         turn = 0
         while turn < self.max_turns:
             turn += 1
@@ -230,6 +243,11 @@ class AgentLoop:
             last_error: Exception | None = None
             _llm_start = 0.0
             attempt = 0
+            # Pacer guidance: inject context-appropriate hint before each LLM call
+            _pg = self._pacer(turn, user_input)
+            if _pg:
+                messages.append({"role": "system", "content": _pg})
+
             while attempt < _MAX_RETRIES:
                 attempt += 1
                 try:
@@ -327,6 +345,9 @@ class AgentLoop:
                 yield {"type": "llm_output", "content": content}
                 self._last_llm_content = content
 
+            # Save reasoning for this turn's tool calls
+            _reasoning = (thinking or content)[:500] if (thinking or content) else ""
+
             # Auto-continuation: if response was truncated (max_tokens hit) with no tool calls,
             # re-prompt the LLM to continue from where it left off
             if not tool_calls and response and response.finish_reason in ("length", "max_tokens"):
@@ -346,6 +367,41 @@ class AgentLoop:
 
             if not tool_calls:
                 final_content = content or self._last_llm_content or ""
+
+                # Post-processing: auto-convert text bullet/numbered lists to interactive choices
+                if final_content and not getattr(self, '_oaa_choices_injected', False):
+                    _bullets = re.findall(r'(?:^|\n)\s*(?:\d+[\.\)、]\s*|[•\-*]\s*)(.+?)(?=\n|$)', final_content)
+                    _clean_bullets = [b.strip() for b in _bullets if len(b.strip()) > 5]
+                    if len(_clean_bullets) >= 2:
+                        self._oaa_choices_injected = True
+                        # Extract question from last line before bullets
+                        _lines = final_content.strip().split("\n")
+                        _question = "请选择"
+                        for l in reversed(_lines):
+                            l = l.strip()
+                            if l and not l.startswith(("•", "-", "*", "1", "2", "3", "4", "5", "6", "7", "8", "9")):
+                                _question = l[:80]
+                                break
+                        _opts = [{"label": b[:40], "value": b[:40]} for b in _clean_bullets[:6]]
+                        # Save answer by making the last assistant message contain the choices
+                        yield {"type": "choices", "question": _question, "options": _opts}
+                        yield {"type": "done", "content": final_content[:100] + "..."}
+                        return
+
+                # Post-processing: enforce oaa-chart for chart/image outputs
+                if self._execution_chain and final_content:
+                    _lc = final_content.lower()
+                    _has_chart = "```oaa-chart" in final_content or "oaa-chart" in final_content
+                    _mentions_chart = any(w in _lc for w in ["饼图", "柱状图", "折线图", "图表", "图片",
+                                                               "chart", "pie", "png", "jpg", "saved"])
+                    if _mentions_chart and not _has_chart and not getattr(self, '_oaa_chart_retried', False):
+                        self._oaa_chart_retried = True
+                        messages.append({"role": "user", "content":
+                            "【格式修正】你在回复中提到了图表/图片，但没有用 oaa-chart 展示。"
+                            "请重新输出，在回复中用 ```oaa-chart 代码块展示图表内容，再告知文件路径。"})
+                        yield {"type": "status", "content": "正在添加图表展示..."}
+                        continue
+
                 yield {"type": "done", "content": final_content}
                 return
 
@@ -367,7 +423,8 @@ class AgentLoop:
 
                 logger.debug("Step %d: Tool call: %s %s", step_id, tool_name, _summarize_args(args))
                 yield {"type": "tool_call", "name": tool_name, "args": args,
-                       "step_id": step_id, "phase": "plan"}
+                       "step_id": step_id, "phase": "plan",
+                       "reasoning": _reasoning or ""}
 
                 # Add assistant message with this single tool call
                 messages.append({
@@ -440,6 +497,58 @@ class AgentLoop:
                        "step_id": step_id, "phase": "result", "duration": round(t_dur, 2)}
                 logger.debug("Tool result: %s | status=%s", tool_name, _result_status(result))
 
+                # Auto-yield taskboard from todo_store after first tool (if has items)
+                if not getattr(self, '_auto_taskboard_yielded', False) and self._todo_store:
+                    tb_items = self._todo_store.get()
+                    if tb_items and len(tb_items) >= 2:
+                        yield {"type": "taskboard", "items": tb_items}
+                        self._auto_taskboard_yielded = True
+
+                # If send_choices was called, yield choices chunk
+                if tool_name == "send_choices" and self._agent:
+                    ch = getattr(self._agent, "_pending_choices", None)
+                    if ch:
+                        yield {"type": "choices", "question": ch["question"],
+                               "options": ch["options"]}
+                        self._agent._pending_choices = None
+
+                # If notify_user was called, yield notification chunk
+                if tool_name == "notify_user" and self._agent:
+                    n = getattr(self._agent, "_pending_notify", None)
+                    if n:
+                        yield {"type": "notification", "title": n["title"],
+                               "message": n["message"], "msg_type": n["type"]}
+                        self._agent._pending_notify = None
+
+                # If update_taskboard was called, yield taskboard chunk
+                if tool_name == "update_taskboard" and self._agent:
+                    tb = getattr(self._agent, "_pending_taskboard", None)
+                    if tb:
+                        yield {"type": "taskboard", "items": tb["items"]}
+                        self._agent._pending_taskboard = None
+
+                # If show_file was called, yield file chunk for frontend
+                if tool_name == "show_file" and self._agent:
+                    fdata = getattr(self._agent, "_pending_file", None)
+                    if fdata:
+                        yield {"type": "file", **fdata}
+                        self._agent._pending_file = None
+
+                # If create_survey was called, yield survey chunk for frontend
+                if tool_name == "create_survey" and self._agent:
+                    survey_data = getattr(self._agent, "_pending_survey", None)
+                    if survey_data:
+                        yield {"type": "survey", **survey_data}
+                        self._agent._pending_survey = None
+
+                # If display_chart was called, yield chart chunk for frontend rendering
+                if tool_name == "display_chart" and self._agent:
+                    chart_data = getattr(self._agent, "_pending_chart", None)
+                    if chart_data:
+                        yield {"type": "chart", "option": chart_data["option"],
+                               "title": chart_data.get("title", "")}
+                        self._agent._pending_chart = None
+
                 # Record in execution chain for root cause analysis
                 is_error = isinstance(result, dict) and result.get("status") == "error"
                 self._execution_chain.append({
@@ -447,6 +556,7 @@ class AgentLoop:
                     "args": {k: v for k, v in args.items() if k != "code"},  # omit large code blobs
                     "status": "error" if is_error else "ok",
                     "error": result.get("msg", "")[:200] if is_error else "",
+                    "reasoning": _reasoning,  # LLM's reasoning before this tool call
                 })
 
                 # Record tool success/failure metrics
@@ -468,11 +578,46 @@ class AgentLoop:
                                 category=failure_cat,
                                 task_context=user_input[:300] if user_input else "",
                                 execution_chain=list(self._execution_chain),
+                                task_id=self._current_task_id,
                             )
                         else:
                             self._memory_mgr.add_tool_success(tool_name, args)
                     except Exception as rec_err:
                         logger.warning("Failed to record tool result: %s", rec_err)
+
+                # Auto-advance plan step on successful tool execution
+                is_success = isinstance(result, dict) and result.get("status") == "success"
+                if is_success and self._planner:
+                    try:
+                        plans = self._planner.list_plans(status="in_progress")
+                        if plans:
+                            plan = plans[0]
+                            for step in plan.get("steps", []):
+                                if step.get("status") == "in_progress":
+                                    self._planner.update(
+                                        plan["id"], step["id"], "done",
+                                        f"tool {tool_name} completed",
+                                    )
+                                    break  # only one in_progress at a time
+                    except Exception:
+                        pass  # best-effort, never block the loop
+
+                # Auto-record self-modification to memory store
+                if is_success and tool_name in ("self_improve", "apply_patch",
+                                                 "self_code_review", "reload_module"):
+                    try:
+                        desc = (result.get("description") or result.get("msg") or
+                                f"{tool_name} executed successfully")
+                        patch_info = result.get('patch_id', '')
+                        text = f"[自修改] {desc}"
+                        if patch_info:
+                            text += f" ({patch_info})"
+                        if self._memory_store:
+                            self._memory_store.add(
+                                text, mem_type="event", source="agent",
+                            )
+                    except Exception:
+                        pass  # best-effort
 
                 # Auto-detect missing modules for code tools → suggest pip install
                 if tool_name in ("code_run", "code_exec") and isinstance(result, dict) and result.get("status") == "error":
@@ -559,8 +704,8 @@ class AgentLoop:
                             timeout=_LLM_TIMEOUT,
                         )
                         if inner_resp.tool_calls:
-                            # LLM may adjust the plan based on this step's result
-                            pending = list(inner_resp.tool_calls)
+                            # LLM may adjust the plan — prepend new calls, keep remaining originals
+                            pending = list(inner_resp.tool_calls) + pending
                     except Exception:
                         logger.warning("LLM call failed during step continuation, continuing with remaining tools")
 
@@ -569,7 +714,11 @@ class AgentLoop:
 
         yield {"type": "done", "content": "Max turns exceeded."}
 
+    def _pacer(self, turn: int, user_input: str) -> str:
+        return ""
+
     def _build_turn_messages(self, messages: list, content: str,
+
                               tool_calls: list, tool_result_entries: list,
                               thinking: str = "") -> list:
         """Build messages for this turn: assistant msg with tool_calls + tool results."""

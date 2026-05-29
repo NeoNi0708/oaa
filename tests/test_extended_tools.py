@@ -119,7 +119,7 @@ async def test_extended_tools_email_permission():
         pm = PermissionsManager(config)
         et = ExtendedTools(tmp, permissions=pm)
 
-        result = await et.do_email_send({"to": "test@test.com", "subject": "Test"})
+        result = await et.do_email_send({"to": "test@test.com", "subject": "Test", "body": "Test body"})
         # Without a confirm callback, confirm_operation returns False
         assert result["status"] == "error"
         assert "not permitted" in result.get("msg", "")

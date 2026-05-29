@@ -1,5 +1,5 @@
 <template>
-  <div class="view-container">
+  <div class="view-container" style="position:relative">
     <div class="view-header">
       <h2>定时任务</h2>
       <p class="view-subtitle">管理定时任务与提醒</p>
@@ -11,7 +11,7 @@
         v-for="tab in subTabs"
         :key="tab.id"
         :class="['tab-btn', { active: activeSubTab === tab.id }]"
-        @click="activeSubTab = tab.id"
+        @click="activeSubTab = tab.id; if (tab.id === 'done') loadExecutionHistory()"
       >
         <span class="tab-icon">{{ tab.icon }}</span>
         <span>{{ tab.label }}</span>
@@ -58,28 +58,30 @@
       </div>
     </div>
 
-    <!-- 已完成 -->
+    <!-- 已完成 — 执行历史 -->
     <div v-if="activeSubTab === 'done'" class="tab-content">
       <div class="section-header-inline">
-        <h3>已完成任务</h3>
+        <h3>执行历史</h3>
       </div>
-      <div v-if="completedTasks.length === 0" class="empty-state">
-        <p>暂无已完成任务</p>
+      <div v-if="historyLoading" class="empty-state">
+        <span class="task-spinner"></span>
+        <p>加载中...</p>
+      </div>
+      <div v-else-if="executionHistory.length === 0" class="empty-state">
+        <p>暂无执行记录，任务执行后将自动显示在这里</p>
       </div>
       <div v-else class="task-list">
-        <div v-for="task in completedTasks" :key="task.id" class="task-card done">
+        <div v-for="rec in executionHistory" :key="rec.timestamp" class="task-card done">
           <div class="task-card-header">
-            <span class="task-type-badge" :class="task.type === 'reminder' ? 'type-reminder' : 'type-fixed'">
-              {{ task.type === 'reminder' ? '提醒' : '固定' }}
+            <span class="task-type-badge type-reminder">{{ rec.task_name }}</span>
+            <span :class="['done-mark', rec.status === 'success' ? 'text-success' : 'text-error']">
+              {{ rec.status === 'success' ? '✅ 成功' : '❌ 失败' }}
             </span>
-            <span class="done-mark">✅ 已完成</span>
           </div>
-          <div class="task-card-title">{{ task.name }}</div>
-          <div class="task-card-desc">{{ task.description }}</div>
           <div class="task-card-meta">
-            <span>🔄 {{ cycleLabel(task) }}</span>
-            <span>⏰ {{ padZero(task.startHour) }}:{{ padZero(task.startMinute) }}</span>
+            <span>🕐 {{ formatTime(rec.timestamp) }}</span>
           </div>
+          <div v-if="rec.summary" class="task-card-desc">{{ rec.summary }}</div>
         </div>
       </div>
     </div>
@@ -284,6 +286,29 @@ function toBackendTask(task: ScheduledTask): Record<string, unknown> {
 
 const { sendRequest, tasksUpdated } = useWebSocket()
 
+const historyLoading = ref(false)
+const executionHistory = ref<any[]>([])
+
+async function loadExecutionHistory() {
+  if (historyLoading.value) return
+  historyLoading.value = true
+  try {
+    const resp = await Promise.race([
+      sendRequest('get_task_history'),
+      new Promise<any>(resolve => setTimeout(() => resolve(null), 5000)),
+    ])
+    if (resp && resp.ok && Array.isArray(resp.history)) {
+      executionHistory.value = resp.history
+    } else {
+      executionHistory.value = []
+    }
+  } catch {
+    executionHistory.value = []
+  } finally {
+    historyLoading.value = false
+  }
+}
+
 const weekDays = [
   { value: 1, label: '一' },
   { value: 2, label: '二' },
@@ -310,7 +335,7 @@ function channelLabel(ch: Channel) { return channelLabels[ch] }
 
 const subTabs = [
   { id: 'active', icon: '📋', label: '已有任务' },
-  { id: 'done', icon: '✅', label: '已完成' },
+  { id: 'done', icon: '✅', label: '任务记录' },
 ]
 
 const activeSubTab = ref('active')
@@ -360,10 +385,18 @@ async function loadTasksFromBackend() {
 onMounted(async () => {
   await loadTasksFromBackend()
   loading.value = false
+  if (activeSubTab.value === 'done') {
+    await loadExecutionHistory()
+  }
 })
 
 // Auto-reload when backend pushes task updates
-watch(tasksUpdated, () => { loadTasksFromBackend() })
+watch(tasksUpdated, () => {
+  loadTasksFromBackend()
+  if (activeSubTab.value === 'done') {
+    loadExecutionHistory()
+  }
+})
 
 const activeTasks = computed(() => tasks.value.filter(t => t.status === 'active'))
 const completedTasks = computed(() => tasks.value.filter(t => t.status === 'completed'))
@@ -375,6 +408,15 @@ function cycleLabel(task: ScheduledTask) {
 }
 
 function padZero(n: number) { return n.toString().padStart(2, '0') }
+
+function formatTime(ts: string) {
+  try {
+    const d = new Date(ts)
+    return `${d.getFullYear()}-${padZero(d.getMonth()+1)}-${padZero(d.getDate())} ${padZero(d.getHours())}:${padZero(d.getMinutes())}`
+  } catch {
+    return ts
+  }
+}
 
 // ------------------------------------------------------------------
 // CRUD

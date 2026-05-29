@@ -185,9 +185,9 @@ class WeChatILinkAdapter:
         if not self.is_authenticated:
             return {"status": "error", "msg": "Not authenticated"}
 
+        # Auto-recover: reset upload_available flag if it was disabled
         if not self._upload_available:
-            return {"status": "error", "ret": self.UPLOAD_RET_REJECTED,
-                    "msg": "文件上传功能不可用，请重新扫码登录"}
+            self._upload_available = True
 
         import hashlib, os, secrets
         from wechatbot import encrypt_aes_ecb
@@ -240,10 +240,12 @@ class WeChatILinkAdapter:
                 aeskey=encode_aes_key_hex(aes_key),
             )
         except ApiError as e:
-            if e.errcode == self.UPLOAD_RET_REJECTED:
+            # ret=-1: token/session expired, needs re-login
+            # ret=-2: upload rejected by server, needs re-login
+            if e.errcode == self.UPLOAD_RET_REJECTED or e.errcode == -1:
                 self._upload_available = False
                 return {"status": "error", "ret": e.errcode,
-                        "msg": f"微信上传接口拒绝(ret={e.errcode})，文件上传功能不可用，请重新扫码登录"}
+                        "msg": f"微信上传接口异常(ret={e.errcode})，文件上传功能不可用，请重新扫码登录"}
             return {"status": "error", "msg": f"获取上传URL失败: {e}"}
         except Exception as e:
             return {"status": "error", "msg": f"获取上传URL失败: {e}"}

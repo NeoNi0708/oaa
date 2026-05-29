@@ -1,7 +1,9 @@
 """Unified AI search router — Tavily / Exa / AnySearch with auto-routing."""
 
+import asyncio
 import json
 import logging
+import os
 import re
 from typing import Optional
 
@@ -253,6 +255,25 @@ class AiSearchTools(BaseHandler):
         if not query.strip():
             return {"status": "error", "msg": "query is required"}
 
+        # Reload API keys from config on each call (handles runtime updates)
+        try:
+            _cfg_path = os.path.expanduser("~/OAA/config.json")
+            if os.path.exists(_cfg_path):
+                with open(_cfg_path, "r", encoding="utf-8") as _f:
+                    _cfg = json.loads(_f.read())
+                _sc = _cfg.get("search", {})
+                for _k in ("tavily", "exa", "anysearch"):
+                    _v = _sc.get(f"{_k}_api_key", "")
+                    if _v:
+                        self._keys[_k] = _v
+                # Also check top-level keys
+                for _k in ("tavily", "exa", "anysearch"):
+                    _tk = f"{_k}_api_key"
+                    if _cfg.get(_tk) and not self._keys.get(_k):
+                        self._keys[_k] = _cfg[_tk]
+        except Exception:
+            pass
+
         max_results = max(1, min(max_results, 50))
 
         # Step 1: resolve intent and region
@@ -282,6 +303,26 @@ class AiSearchTools(BaseHandler):
                     fb_engine, query, max_results, resolved_region, domain, fb_params,
                 )
                 fallback_history.append(f"fallback to {fb_engine}")
+
+        # Step 4: all API-key engines exhausted — fall back to web_scan
+        if result["status"] == "error":
+            fallback_history.append(f"API engines exhausted, trying web_scan")
+            logger.warning("ai_search: all API engines failed, falling back to web_scan")
+            scan_result = await self._fallback_web_scan(query, resolved_region)
+            if scan_result["status"] == "success":
+                result = scan_result
+                fallback_history.append("web_scan succeeded")
+            else:
+                fallback_history.append(f"web_scan also failed: {scan_result.get('msg', '')}")
+                # Final suggestion: use Python requests
+                result = {
+                    "status": "error",
+                    "msg": (
+                        f"所有搜索方式均失败（{'; '.join(fallback_history)}）。"
+                        "建议用 Python requests/urllib 直接写代码抓取搜索结果页面。"
+                        "你是云端大模型，能对话就说明网络正常——不要因为搜索工具失败就认为'网络不通'。"
+                    ),
+                }
 
         result["intent"] = resolved_intent
         result["region"] = resolved_region
@@ -331,3 +372,44 @@ class AiSearchTools(BaseHandler):
         except Exception as exc:
             logger.exception("ai_search: %s unexpected error", engine)
             return {"status": "error", "msg": f"{engine} 异常: {exc}"}
+
+    async def _fallback_web_scan(self, query: str, region: str = "intl") -> dict:
+        """Fallback: search via web_scan on common search engines when all API keys are missing."""
+        import urllib.parse
+        encoded = urllib.parse.quote(query, safe="")
+        # Try Bing first (more accessible from China), then Google
+        urls = [
+            ("Bing", f"https://www.bing.com/search?q={encoded}&setlang=zh-cn"),
+            ("Google", f"https://www.google.com/search?q={encoded}"),
+        ]
+        if region == "cn":
+            urls.insert(0, ("Baidu", f"https://www.baidu.com/s?wd={encoded}"))
+
+        for engine_name, url in urls:
+            try:
+                resp = requests.get(url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                  "Chrome/125.0.0.0 Safari/537.36"
+                }, timeout=15)
+                if resp.status_code == 200 and len(resp.text) > 500:
+                    # Quick extraction: grab text snippets around query terms
+                    from .browser_tools import _fetch_url as _web_scan_fetch
+                    try:
+                        scan = await asyncio.to_thread(_web_scan_fetch, url, 15)
+                        return {
+                            "status": "success",
+                            "engine": f"web_scan({engine_name})",
+                            "results": [{"title": f"来自 {engine_name} 的搜索结果",
+                                         "url": url,
+                                         "content": scan[:8000],
+                                         "score": 0.8}],
+                            "total": 1,
+                            "fallback_used": f"web_scan via {engine_name}",
+                        }
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+
+        return {"status": "error", "msg": "web_scan 回退也失败了"}

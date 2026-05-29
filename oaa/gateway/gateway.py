@@ -63,7 +63,6 @@ class Gateway:
         try:
             async for chunk in self.agent.process_message(
                 msg.content, history=history,
-                route_override=msg.metadata.get("route_override"),
                 source=msg.source, user_id=msg.user_id,
             ):
                 if chunk["type"] == "done":

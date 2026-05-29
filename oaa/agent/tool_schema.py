@@ -207,10 +207,10 @@ WECHAT_TOOLS_SCHEMA = [
     }},
     {"type": "function", "function": {
         "name": "wechat_send_file",
-        "description": "Send a local file to a WeChat contact via CDN upload. Supports images, documents, videos. 用户在微信中说「发文件给我」时 to 可留空，工具自动填入当前用户。",
+        "description": "Send a LOCAL file to a WeChat contact via CDN upload. Supports images (.png/.jpg/.gif), documents (.pdf/.doc/.xls/.txt), videos (.mp4). 用户在微信中说「发文件给我」「发图片」「发文档」时用此工具。文件路径必须是 agent 本地可访问的绝对路径。收件人 wxid 可通过 wechat_contacts 查询，或用户在微信中要求发给他自己时 to 可留空自动填入。",
         "parameters": {"type": "object", "properties": {
-            "to": {"type": "string", "description": "Recipient wxid. 用户在微信中要求发给他自己时可留空"},
-            "file_path": {"type": "string", "description": "Absolute path to the local file"},
+            "to": {"type": "string", "description": "Recipient wxid. 用户在微信中要求发给他自己时可留空自动填入"},
+            "file_path": {"type": "string", "description": "Absolute path to the local file to send"},
         }, "required": ["file_path"]}
     }},
 ]
@@ -395,18 +395,6 @@ EXTENDED_TOOLS_SCHEMA = [
         "parameters": {"type": "object", "properties": {
             "args": {"type": "string", "description": "Raw CLI arguments, e.g. 'chat message send --user user123 --text hello'"},
         }, "required": ["args"]}
-    }},
-    {"type": "function", "function": {
-        "name": "generate_image",
-        "description": "Generate an image using AI image generation model (sensenova-u1-fast / DALL-E compatible). 需要先在设置页面→图片生成中配置 API Key，或传入 api_key 参数。支持 1024x1024、1536x1024、1024x1536、2752x1536 等尺寸。",
-        "parameters": {"type": "object", "properties": {
-            "prompt": {"type": "string", "description": "Image description (中文/English), be detailed for best results"},
-            "size": {"type": "string", "description": "Image size, e.g. 1024x1024, 1536x1024, 1024x1536, 2752x1536 (default: 1024x1024)"},
-            "n": {"type": "integer", "description": "Number of images to generate (1-4, default: 1)"},
-            "api_key": {"type": "string", "description": "Optional: override API key. 留空则使用设置中配置的 Key"},
-            "base_url": {"type": "string", "description": "Optional: override API base URL (default: https://token.sensenova.cn/v1)"},
-            "model": {"type": "string", "description": "Optional: override model name (default: sensenova-u1-fast)"},
-        }, "required": ["prompt"]}
     }},
 ]
 

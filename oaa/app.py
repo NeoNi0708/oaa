@@ -13,6 +13,8 @@ if _BUNDLED_NODE.is_dir():
         os.environ["PATH"] = _node_path + os.pathsep + os.environ.get("PATH", "")
 
 from .agent.oaa_agent import OAAAgent
+from .agent.patch_loader import load_all as load_patches
+from .agent.patch_manager import PatchManager
 from .agent.worker import WorkerAgent
 from .auth.permissions import PermissionsManager
 from .config import AppConfig
@@ -37,9 +39,15 @@ class OAAApp:
 
         # First-run wizard if no config file exists
         if not os.path.exists(config_path):
-            wizard = SetupWizard()
-            self.config = wizard.run_text()
-            config_path = AppConfig.DEFAULT_CONFIG_PATH
+            if os.environ.get("OAA_GUI_MODE") == "1":
+                # GUI mode: create skeleton config; the GUI SetupWizard handles it
+                self.config = AppConfig()
+                self.config.data_dir = os.path.expanduser("~/OAA")
+                self.config._save_sync()
+            else:
+                wizard = SetupWizard()
+                self.config = wizard.run_text()
+                config_path = AppConfig.DEFAULT_CONFIG_PATH
         else:
             self.config = AppConfig.load(config_path)
 
@@ -95,6 +103,10 @@ class OAAApp:
         # Wire worker agent for background task execution
         self.desktop._worker = self.worker
 
+        # Runtime patch system (runtime function overrides in data_dir/patches/)
+        patches_dir = os.path.join(self.config.data_dir, "patches")
+        self._patch_mgr = PatchManager(patches_dir)
+
         # Wire management handler for non-chat WebSocket operations
         mgmt = ManagementHandler(
             config=self.config,
@@ -103,6 +115,7 @@ class OAAApp:
             evolution=self.evolution,
             channel_adapters=self.channel_adapters,
             agent=self.agent,
+            patch_mgr=self._patch_mgr,
         )
         self._mgmt = mgmt
         self.desktop.set_management_handler(mgmt)
@@ -120,6 +133,12 @@ class OAAApp:
 
         # Wire user-confirmation callback so that ask_user reaches the GUI
         self.permissions.set_confirm_callback(self.desktop.create_confirm_callback())
+
+        # Share PatchManager with agent for do_apply_patch/do_remove_patch tools
+        self.agent.set_patch_manager(self._patch_mgr)
+
+        # Apply startup patches (runtime overrides from data_dir/patches/)
+        load_patches(patches_dir)
 
     def _register_channels(self):
         """Register channel adapters. Channels are enabled whenever credentials are present."""
@@ -217,7 +236,7 @@ class OAAApp:
                     wechat = self.channel_adapters.get("wechat")
                     if wechat and wechat.is_authenticated:
                         if wechat._bot_user_id:
-                            summary = (report[:500] + "……") if len(report) > 500 else report
+                            summary = (report[:2000] + "……") if len(report) > 2000 else report
                             await wechat.send_message(wechat._bot_user_id,
                                 f"📋 [{name}] 执行完成：\n\n{summary}")
                         else:
@@ -225,8 +244,10 @@ class OAAApp:
                     else:
                         logger.warning("WeChat delivery skipped: adapter not authenticated")
                 logger.info("Scheduled task '%s' executed successfully", name)
+                self.scheduler.record_execution(task.get("id", ""), name, "success", report[:200])
             except Exception as exc:
                 logger.error("Scheduled task '%s' execution failed: %s", name, exc)
+                self.scheduler.record_execution(task.get("id", ""), name, "failed", str(exc)[:200])
                 if "chat" in delivery:
                     await self.desktop.notify_all(f"\n\n❌ 任务执行失败：{exc}", msg_type="llm_output")
                     await self.desktop.notify_all("", msg_type="done")
@@ -243,8 +264,8 @@ class OAAApp:
                     import re as _re
                     simple = _re.sub(r"[🔍🔬🔧💡📊📝⏳]", "", proposal)
                     simple = simple.replace("**", "").replace("``", "")
-                    if len(simple) > 600:
-                        simple = simple[:600] + "\n\n（消息过长已截断，请在聊天页面查看完整内容）"
+                    if len(simple) > 2000:
+                        simple = simple[:2000] + "\n\n（消息过长已截断，请在聊天页面查看完整内容）"
                     await wechat.send_message(wechat._bot_user_id,
                         f"💡 空闲巡检发现优化项：\n\n{simple}")
                 except Exception as exc:
@@ -287,12 +308,14 @@ class OAAApp:
             return
 
         try:
+            import datetime as _dt
+            now_str = _dt.datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
             startup_prompt = (
-                "【系统通知】服务已全部启动，所有通道就绪。"
+                f"【系统通知】服务已全部启动，所有通道就绪（当前时间：{now_str}）。"
                 "请检查当前各通道的状态，然后主动向用户打招呼，"
                 "用你平常的语气介绍你的身份、当前各通道的连接状态，"
                 "告诉用户可以通过哪些方式给你布置工作。"
-                "要热情自然，就像刚睡醒伸了个懒腰那样。"
+                "注意：问候语要符合当前时间（如早上/下午/晚上）。"
             )
             async for chunk in self.agent.process_message(startup_prompt, history=[]):
                 if chunk["type"] == "llm_output":

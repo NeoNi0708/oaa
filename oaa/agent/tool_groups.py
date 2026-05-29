@@ -28,11 +28,11 @@ def _reg(group: str, *names: str):
 
 # --- Core (always loaded) — anything NOT listed below defaults to core ---
 
-# --- WeChat (8 tools) ---
+# --- WeChat (7 tools — send_file is core so always available) ---
 _reg("wechat",
      "wechat_sessions", "wechat_history", "wechat_search",
      "wechat_contacts", "wechat_unread", "wechat_send_text",
-     "wechat_send_typing", "wechat_send_file",
+     "wechat_send_typing",
 )
 
 # --- Feishu (18 tools) ---

@@ -301,22 +301,90 @@
     </div>
 
     <!-- ================================ -->
-    <!-- 用户偏好 -->
+    <!-- 用户画像 -->
     <!-- ================================ -->
-    <div v-if="activeTab === 'prefs'" key="prefs" class="tab-content">
+        <!-- 记忆库 -->
+    <div v-if="activeTab === 'memory'" key="memory" class="tab-content">
+      <div v-if="memoryLoading" class="loading-row"><span>加载记忆库...</span></div>
+      <template v-else>
+        <div v-if="memoryStats.total > 0" class="stats-row" style="margin-bottom: 16px;">
+          <div class="stat-card"><span class="stat-value">{{ memoryStats.total }}</span><span class="stat-label">总条数</span></div>
+          <div v-for="(cnt, typ) in memoryStats.by_type" :key="typ" class="stat-card stat-card-sm">
+            <span class="stat-value">{{ cnt }}</span><span class="stat-label">{{ typeLabel(typ) }}</span>
+          </div>
+        </div>
+        <div v-if="memories.length === 0" class="empty-state">
+          <div class="empty-icon">🧠</div>
+          <p class="empty-text">暂无记忆数据</p>
+          <p class="empty-hint">Agent 会在对话和工作中自动积累语义记忆</p>
+        </div>
+        <div v-else class="pref-list">
+          <div v-for="mem in memories" :key="mem.id" class="oaa-card pref-card">
+            <div class="pref-row">
+              <div class="pref-info">
+                <span class="pref-cat-label">{{ typeLabel(mem.mem_type) }}</span>
+              </div>
+              <div class="pref-actions">
+                <span class="pref-date">重要度 {{ mem.importance }}</span>
+                <button class="oaa-btn oaa-btn--ghost oaa-btn--xs" style="color:var(--oaa-red-400)" @click="deleteMemory(mem.id)" title="删除">✕</button>
+              </div>
+            </div>
+            <div class="pref-row" style="margin-top: 4px;"><span class="mem-text">{{ mem.text }}</span></div>
+            <div class="pref-meta"><span class="pref-date">{{ formatDate(mem.created_at) }} | 引用 {{ mem.ref_count }} 次</span></div>
+          </div>
+        </div>
+      </template>
+    </div>
+
+<div v-if="activeTab === 'prefs'" key="prefs" class="tab-content">
       <div v-if="prefsLoading" class="loading-row">
         <span class="loading-spinner"></span>
-        <span>加载用户偏好...</span>
+        <span>加载用户画像...</span>
       </div>
 
       <template v-else>
-        <!-- Add new preference -->
+        <!-- Add preference — semantic categories -->
         <div class="pref-add-card oaa-card">
+          <p class="form-hint" style="margin-bottom: 8px;">完善您的画像，Agent 将据此调整工作方式</p>
           <div class="pref-add-row">
-            <input v-model="newPrefKey" class="oaa-input pref-input-sm" placeholder="Key" @keyup.enter="addPreference" />
-            <input v-model="newPrefVal" class="oaa-input pref-input-sm" placeholder="Value" @keyup.enter="addPreference" />
-            <input v-model="newPrefDesc" class="oaa-input pref-input-lg" placeholder="Description (可选)" @keyup.enter="addPreference" />
-            <button class="oaa-btn oaa-btn--primary oaa-btn--sm" @click="addPreference" :disabled="!newPrefKey || !newPrefVal">添加</button>
+            <select v-model="newPrefCat" class="oaa-input pref-input-lg" @change="onPrefCatChange">
+              <option value="">选择偏好类型...</option>
+              <option value="style.conversation">对话风格</option>
+              <option value="style.doc_preference">工作习惯</option>
+              <option value="domain.interests">关注领域</option>
+              <option value="channel.preference">沟通渠道偏好</option>
+            </select>
+            <select v-if="newPrefCat === 'style.conversation'" v-model="newPrefVal" class="oaa-input pref-input-lg">
+              <option value="">选择风格...</option>
+              <option value="简洁直接">简洁直接 — 不废话，直接说重点</option>
+              <option value="详细周全">详细周全 — 充分解释，考虑各种情况</option>
+              <option value="幽默风趣">幽默风趣 — 轻松活泼的对话方式</option>
+            </select>
+            <div v-else-if="newPrefCat === 'style.doc_preference'" class="pref-checkboxes">
+              <label v-for="d in docTypes" :key="d" class="checkbox-label">
+                <input type="checkbox" :value="d" v-model="newPrefChecks" class="checkbox-input" />
+                <span class="checkbox-custom"></span>
+                <span class="checkbox-text">{{ d }}</span>
+              </label>
+            </div>
+            <select v-else-if="newPrefCat === 'domain.interests'" v-model="newPrefVal" class="oaa-input pref-input-lg">
+              <option value="">选择领域...</option>
+              <option value="科技">科技</option>
+              <option value="外贸">外贸</option>
+              <option value="金融">金融</option>
+              <option value="制造业">制造业</option>
+              <option value="医疗">医疗</option>
+              <option value="教育">教育</option>
+            </select>
+            <select v-else-if="newPrefCat === 'channel.preference'" v-model="newPrefVal" class="oaa-input pref-input-lg">
+              <option value="">选择渠道...</option>
+              <option value="桌面">桌面 GUI</option>
+              <option value="微信">微信</option>
+              <option value="钉钉">钉钉</option>
+              <option value="飞书">飞书</option>
+            </select>
+            <button class="oaa-btn oaa-btn--primary oaa-btn--sm" @click="addPreference"
+              :disabled="!newPrefCat || (!newPrefVal && newPrefChecks.length === 0)">保存偏好</button>
           </div>
         </div>
 
@@ -327,18 +395,19 @@
               <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
             </svg>
           </div>
-          <p class="empty-text">暂无用户偏好</p>
-          <p class="empty-hint">Agent 会自动学习您的偏好，您也可以手动添加</p>
+          <p class="empty-text">暂无用户画像数据</p>
+          <p class="empty-hint">Agent 会从对话中逐渐了解您，形成用户画像。您也可以在此手动补充</p>
         </div>
 
-        <!-- Preference list -->
+        <!-- Preference list — categorized display -->
         <div v-else class="pref-list">
-          <div v-for="pref in preferences" :key="pref.key" class="oaa-card pref-card">
+          <div v-for="pref in categorizedPreferences" :key="pref.key" class="oaa-card pref-card">
             <div class="pref-row">
               <div class="pref-info">
-                <span class="pref-key">{{ pref.key }}</span>
-                <span v-if="pref.source === 'user_override'" class="pref-source-tag">用户设定</span>
-                <span v-else class="pref-source-tag pref-source-agent">Agent 学习</span>
+                <span class="pref-cat-label">{{ pref.categoryLabel }}</span>
+                <span class="pref-value-display">{{ pref.displayValue }}</span>
+                <span v-if="pref.source === 'user_override'" class="pref-source-tag">手动补充</span>
+                <span v-else class="pref-source-tag pref-source-agent">自动学习</span>
               </div>
               <div class="pref-actions">
                 <button class="oaa-btn oaa-btn--ghost oaa-btn--xs" :title="pref.enabled ? '点击禁用' : '点击启用'"
@@ -346,13 +415,8 @@
                   <span v-if="pref.enabled" style="color:var(--oaa-green-400)">●</span>
                   <span v-else style="color:var(--oaa-color-disabled)">○</span>
                 </button>
-                <button class="oaa-btn oaa-btn--ghost oaa-btn--xs" style="color:var(--oaa-red-400)" @click="deletePreference(pref.key)" :title="'删除 ' + pref.key">✕</button>
+                <button class="oaa-btn oaa-btn--ghost oaa-btn--xs" style="color:var(--oaa-red-400)" @click="deletePreference(pref.key)" :title="'删除'">✕</button>
               </div>
-            </div>
-            <div class="pref-row">
-              <input v-model="pref._editVal" class="oaa-input pref-input-val" :placeholder="pref.value"
-                @blur="savePreference(pref)" @keyup.enter="savePreference(pref)" />
-              <span v-if="pref.description" class="pref-desc">{{ pref.description }}</span>
             </div>
             <div class="pref-meta">
               <span class="pref-date">{{ formatDate(pref.updated_at) }}</span>
@@ -384,7 +448,8 @@ const toast = ref({ show: false, type: 'success', message: '' })
 const tabs = [
   { id: 'pending', icon: '📋', label: '待处理提案' },
   { id: 'history', icon: '📜', label: '执行历史' },
-  { id: 'prefs', icon: '⚙️', label: '用户偏好' },
+  { id: 'memory', icon: '🧠', label: '记忆' },
+  { id: 'prefs', icon: '👤', label: '用户画像' },
   { id: 'stats', icon: '📊', label: '统计' },
 ]
 
@@ -524,6 +589,7 @@ watch(proposalAdded, () => { loadProposals(); loadStats(); loadMetrics() })
 
 watch(activeTab, (tab) => {
   if (tab === 'prefs') loadPreferences()
+  if (tab === 'memory') loadMemories()
   if (tab === 'stats') {
     if (!statsData.value) loadStats()
     loadMetrics()
@@ -533,9 +599,32 @@ watch(activeTab, (tab) => {
 // ---- Preferences tab ----
 const prefsLoading = ref(false)
 const preferences = ref<any[]>([])
-const newPrefKey = ref('')
+const newPrefCat = ref('')
 const newPrefVal = ref('')
-const newPrefDesc = ref('')
+const newPrefChecks = ref<string[]>([])
+const docTypes = ['常用 Excel', '常用 Word', '常用 PPT', '常用 PDF']
+
+const categoryLabels: Record<string, string> = {
+  'style.conversation': '对话风格', 'style.doc_preference': '工作习惯',
+  'domain.interests': '关注领域', 'channel.preference': '沟通渠道偏好',
+}
+
+function onPrefCatChange() {
+  newPrefVal.value = ''
+  newPrefChecks.value = []
+}
+
+const categorizedPreferences = computed(() => {
+  return preferences.value.map((p: any) => {
+    const catLabel = categoryLabels[p.key] || p.key
+    let displayValue = p.value
+    // Translate boolean for doc preferences
+    if (p.key === 'style.doc_preference') {
+      try { const arr = JSON.parse(p.value); displayValue = arr.join('、') } catch { displayValue = p.value }
+    }
+    return { ...p, categoryLabel: catLabel, displayValue }
+  })
+})
 
 async function loadPreferences() {
   prefsLoading.value = true
@@ -549,22 +638,29 @@ async function loadPreferences() {
 }
 
 async function addPreference() {
-  const key = newPrefKey.value.trim()
-  const val = newPrefVal.value.trim()
-  if (!key || !val) return
+  const cat = newPrefCat.value
+  let val = newPrefVal.value.trim()
+  if (cat === 'style.doc_preference') {
+    val = JSON.stringify(newPrefChecks.value)
+  }
+  if (!cat || !val) return
+  const descMap: Record<string, string> = {
+    'style.conversation': '对话风格偏好', 'style.doc_preference': '常用文档类型',
+    'domain.interests': '关注领域', 'channel.preference': '首选沟通渠道',
+  }
   try {
-    const resp = await updatePreference(key, val, newPrefDesc.value.trim())
+    const resp = await updatePreference(cat, val, descMap[cat] || '')
     if (resp.ok) {
-      showToast(`偏好已添加: ${key}`)
-      newPrefKey.value = ''
+      showToast('偏好已保存')
+      newPrefCat.value = ''
       newPrefVal.value = ''
-      newPrefDesc.value = ''
+      newPrefChecks.value = []
       await loadPreferences()
     } else {
-      showToast(resp.error || '添加失败', 'error')
+      showToast(resp.error || '保存失败', 'error')
     }
   } catch (e: any) {
-    showToast('添加失败: ' + (e.message || e), 'error')
+    showToast('保存失败: ' + (e.message || e), 'error')
   }
 }
 
@@ -620,6 +716,12 @@ const typeLabels: Record<string, string> = {
   sop_optimize: 'SOP 优化',
   skill_crystallize: '技能固化',
   config_change: '配置变更',
+  // Memory types
+  fact: '事实',
+  event: '事件',
+  pattern: '模式',
+  decision: '决策',
+  knowledge: '知识',
 }
 
 function typeLabel(type: string): string {
@@ -680,6 +782,31 @@ function formatResult(resultStr: string): string {
   }
 }
 
+// ---- Memory tab ----
+const memoryLoading = ref(false)
+const memories = ref<any[]>([])
+const memoryStats = ref({total: 0, by_type: {}, by_status: {}})
+
+async function loadMemories() {
+  memoryLoading.value = true
+  try {
+    const [list, stats] = await Promise.all([
+      sendRequest('list_memories'),
+      sendRequest('get_memory_stats'),
+    ])
+    if (list.ok) memories.value = list.memories || []
+    if (stats.ok) memoryStats.value = stats.stats || {total: 0, by_type: {}, by_status: {}}
+  } catch {}
+  memoryLoading.value = false
+}
+
+async function deleteMemory(id: string) {
+  const resp = await sendRequest('delete_memory', { id })
+  if (resp.ok) { await loadMemories(); showToast('\u8bb0\u5fc6\u5df2\u5220\u9664') }
+  else { showToast(resp.error || '\u5220\u9664\u5931\u8d25', 'error') }
+}
+
+
 function showToast(message: string, type: 'success' | 'error' = 'success') {
   toast.value = { show: true, type, message }
   setTimeout(() => { toast.value.show = false }, 3000)
@@ -734,6 +861,9 @@ async function ignoreProposal(id: string, permanent: boolean) {
 onMounted(() => {
   loadProposals()
 })
+
+
+
 </script>
 
 <style scoped>

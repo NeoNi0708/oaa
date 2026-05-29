@@ -1118,4 +1118,45 @@ setTimeout(() => loadEmails(), 100)
   from { transform: translateY(20px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
 }
+
+/* ------------------------------------------------------------------ */
+/* Light theme — 暖米白                                                 */
+/* ------------------------------------------------------------------ */
+[data-theme="light"] .connections-view {
+  background: var(--oaa-bg-app);
+}
+
+[data-theme="light"] .channel-card {
+  background: var(--oaa-bg-surface);
+}
+
+[data-theme="light"] .channel-card-inner {
+  background: var(--oaa-bg-surface);
+}
+
+[data-theme="light"] .email-item {
+  background: var(--oaa-bg-surface);
+}
+
+[data-theme="light"] .email-item:hover {
+  background: var(--oaa-bg-surface-hover);
+}
+
+[data-theme="light"] .modal-overlay {
+  background: rgba(247, 243, 238, 0.7);
+}
+
+[data-theme="light"] .modal-panel {
+  background: var(--oaa-bg-surface);
+}
+
+[data-theme="light"] .toast.success {
+  background: #dcfce7;
+  color: #166534;
+}
+
+[data-theme="light"] .toast.error {
+  background: #fef2f2;
+  color: #991b1b;
+}
 </style>

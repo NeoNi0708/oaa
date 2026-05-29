@@ -87,11 +87,27 @@ function createTray() {
   tray.on('double-click', () => mainWindow?.show())
 }
 
-function startPythonBackend() {
+async function startPythonBackend() {
+  // Skip if backend is already running
+  try {
+    const net = require('net')
+    const alive = await new Promise<boolean>((resolve) => {
+      const s = new net.Socket()
+      s.on('connect', () => { s.destroy(); resolve(true) })
+      s.on('error', () => resolve(false))
+      s.connect(9765, '127.0.0.1')
+    })
+    if (alive) {
+      console.log('[main] OAA backend already running, skipping spawn')
+      return
+    }
+  } catch { /* proceed to spawn */ }
+
   try {
     pythonProcess = spawn('python', ['-m', 'oaa', '--config', CONFIG_PATH], {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
+      env: { ...process.env, OAA_GUI_MODE: '1' },
     })
 
     pythonProcess.stdout?.on('data', (data: Buffer) => {

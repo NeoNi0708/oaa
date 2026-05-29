@@ -32,10 +32,44 @@ class TaskScheduler:
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self._tasks_file = self.tasks_dir / "tasks.json"
         self._tasks: list[dict] = self._load()
+        self._history_file = self.tasks_dir / "task_history.json"
+        self._history: list[dict] = self._load_history()
         self._running = False
         self._due_callback = None  # async callable(task_dict) for auto-execution
         self._last_check_min: int = -1  # prevent double-fire within same minute
         self._notify_callback: Callable[[str, dict], None] | None = None  # push notification
+
+    def _load_history(self) -> list[dict]:
+        try:
+            if self._history_file.exists():
+                return json.loads(self._history_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Failed to load task history: %s", exc)
+        return []
+
+    def _save_history(self):
+        try:
+            self._history_file.write_text(
+                json.dumps(self._history[-200:], ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning("Failed to save task history: %s", exc)
+
+    def record_execution(self, task_id: str, task_name: str, status: str, summary: str = ""):
+        """Record a task execution result (success or failure) to history."""
+        self._history.append({
+            "task_id": task_id,
+            "task_name": task_name,
+            "timestamp": datetime.now().isoformat(),
+            "status": status,
+            "summary": summary[:500],
+        })
+        self._save_history()
+
+    def get_execution_history(self, limit: int = 50) -> list[dict]:
+        """Return the most recent *limit* execution records, newest first."""
+        return list(reversed(self._history[-limit:]))
 
     def set_notify_callback(self, callback: Callable[[str, dict], None]):
         """Register a callback for real-time UI push notifications."""

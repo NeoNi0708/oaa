@@ -167,3 +167,26 @@ class Planner:
     def get(self, plan_id: str) -> Optional[dict]:
         """Get a single plan by ID."""
         return self._load_plan(plan_id)
+
+    def get_active_plan_text(self) -> str:
+        """Return the latest in_progress plan as system-prompt injection text."""
+        plans = self.list_plans(status="in_progress")
+        if not plans:
+            return ""
+        plan = plans[0]
+        lines = ["# 📐 当前计划", ""]
+        lines.append(f"**{plan['goal']}** (ID: {plan['id']})")
+        lines.append("")
+        status_icons = {
+            "pending": "⬜", "ready": "⏳", "in_progress": "🔄",
+            "done": "✅", "failed": "❌", "blocked": "🚫",
+        }
+        for step in plan.get("steps", []):
+            icon = status_icons.get(step.get("status", "pending"), "⬜")
+            lines.append(f"{icon} **步骤 {step.get('id')}**: {step.get('task', step.get('title', ''))}")
+            if step.get("depends_on"):
+                deps = step["depends_on"] if isinstance(step["depends_on"], list) else [step["depends_on"]]
+                lines.append(f"   ↳ 依赖: {', '.join(map(str, deps))}")
+        lines.append("")
+        lines.append("以上是你之前制定的计划。执行时参考它，完成后更新步骤状态。")
+        return "\n".join(lines)

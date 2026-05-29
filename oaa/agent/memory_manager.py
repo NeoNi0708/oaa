@@ -81,8 +81,8 @@ class MemoryManager:
         if len(lines) <= _HOT_MAX_LINES:
             return
 
-        keep = lines[: _HOT_MAX_LINES // 2 * -1]
-        demote = lines[_HOT_MAX_LINES // 2 * -1 :]
+        keep = lines[_HOT_MAX_LINES // 2 * -1:]   # last N/2 lines (newest)
+        demote = lines[: _HOT_MAX_LINES // 2 * -1]  # first N-N/2 lines (oldest)
 
         await async_write(path, "\n".join(keep) + "\n")
 
@@ -277,12 +277,40 @@ class MemoryManager:
 
     _FAILURE_CATEGORIES = frozenset({
         "tool_bug", "llm_error", "parameter_error", "infra_error", "unknown",
+        "strategy_error",
     })
+
+    @staticmethod
+    def _compress_chain(chain: list) -> list:
+        """Merge consecutive same-tool entries, preserving args and error details.
+
+        Input:  [shell_run(ok), shell_run(ok), file_read(ok), shell_run(err)]
+        Output: [shell_run×2(ok), file_read(ok), shell_run(err)]
+        """
+        if not chain:
+            return []
+        compressed: list = []
+        for entry in chain:
+            tool = entry.get("tool", "?")
+            status = entry.get("status", "?")
+            if compressed and compressed[-1]["tool"] == tool and compressed[-1]["status"] == status:
+                compressed[-1]["count"] += 1
+                if entry.get("error"):
+                    compressed[-1]["error"] = entry["error"]
+            else:
+                compressed.append({
+                    "tool": tool,
+                    "status": status,
+                    "count": 1,
+                    "error": entry.get("error", ""),
+                })
+        return compressed
 
     def add_tool_failure(self, tool_name: str, args: dict, error_msg: str,
                          category: str = "unknown",
                          task_context: str = "",
-                         execution_chain: list | None = None) -> dict:
+                         execution_chain: list | None = None,
+                         task_id: str = "") -> dict:
         """Record a tool execution failure to tool_failures.md.
 
         Args:
@@ -290,17 +318,20 @@ class MemoryManager:
                       ``llm_error`` (wrong tool/args chosen by LLM),
                       ``parameter_error`` (valid args but bad content),
                       ``infra_error`` (network/auth/permission transient),
+                      ``strategy_error`` (agent chose wrong approach),
                       or ``unknown`` (needs LLM analysis).
             task_context: what the agent was trying to do.
             execution_chain: recent tool calls leading to this failure,
                              each as ``{"tool": str, "args": dict, "status": str}``.
+            task_id: unique identifier for the task this failure belongs to.
         """
         if category not in self._FAILURE_CATEGORIES:
             category = "unknown"
         import json
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         args_str = json.dumps(args, ensure_ascii=False)[:200]
-        chain_str = json.dumps(execution_chain or [], ensure_ascii=False)[:800]
+        compressed = self._compress_chain(execution_chain or [])
+        chain_str = json.dumps(compressed, ensure_ascii=False)
         entry = (
             f"\n## {timestamp}\n"
             f"- **tool**: {tool_name}\n"
@@ -308,6 +339,8 @@ class MemoryManager:
             f"- **args**: {args_str}\n"
             f"- **category**: {category}\n"
         )
+        if task_id:
+            entry += f"- **task_id**: {task_id}\n"
         if task_context:
             entry += f"- **context**: {task_context[:300]}\n"
         if execution_chain:
@@ -356,6 +389,8 @@ class MemoryManager:
                     entry["context"] = val
                 elif key_part == "chain":
                     entry["chain"] = val
+                elif key_part == "task_id":
+                    entry["task_id"] = val
             entries.append(entry)
         return entries[-limit:]
 

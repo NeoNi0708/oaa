@@ -119,6 +119,17 @@
     <!-- Work panel -->
     <WorkPanel :workEntries="workEntries" :streaming="streaming" />
 
+    <!-- Survey form -->
+    <SurveyForm
+      v-if="pendingSurvey"
+      :surveyId="pendingSurvey.surveyId"
+      :title="pendingSurvey.title"
+      :description="pendingSurvey.description"
+      :questions="pendingSurvey.questions"
+      :sendRequest="sendRequest"
+      @submitted="pendingSurvey = null"
+    />
+
     <!-- Confirmation dialog -->
     <div v-if="confirmRequest" class="confirm-overlay" @click.self="respondToConfirm(false)">
       <div class="confirm-dialog">
@@ -150,15 +161,6 @@
 
     <!-- Input -->
     <div class="input-area">
-      <!-- Route toggle -->
-      <div class="route-toggle" title="路由选择">
-        <button
-          v-for="opt in routeOptions"
-          :key="opt.value"
-          :class="['route-toggle-btn', { active: routeOverride === opt.value }]"
-          @click="routeOverride = opt.value"
-        >{{ opt.label }}</button>
-      </div>
       <button class="attach-btn" @click="triggerAttach" title="附件">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
@@ -171,8 +173,8 @@
       <input ref="fileInput" type="file" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv,.json,.py,.js,.ts,.vue,.html,.css,.md" @change="handleFiles" style="display:none" />
       <textarea
         v-model="input"
-        @keydown.enter.prevent="sendMsg"
-        placeholder="输入消息，Enter 发送"
+        @keydown.enter.prevent="sendMsg($event)"
+        placeholder="输入消息，Enter 发送，Shift+Enter 换行"
         rows="1"
         class="input-field"
         @input="autoResize"
@@ -198,6 +200,7 @@ import { useWebSocket, type ChatMessage } from '../composables/useWebSocket'
 import { useAgentStatus } from '../composables/useAgentStatus'
 import WorkPanel from '../components/WorkPanel.vue'
 import ChatBubble from '../components/ChatBubble.vue'
+import SurveyForm from '../components/SurveyForm.vue'
 
 interface ModelInfo {
   name: string
@@ -240,11 +243,6 @@ const msgContainer = ref<HTMLElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 
 // Route override toggle
-const routeOverride = ref<'auto' | 'cloud'>('auto')
-const routeOptions = [
-  { value: 'auto', label: '自动' },
-  { value: 'cloud', label: '大哥' },
-]
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024  // 10 MB
 
@@ -325,6 +323,7 @@ const activeModelId = ref('')
 const showModelMenu = ref(false)
 const activeModelLabel = ref('')
 
+// route removed
 const activeModelKey = computed(() => `${activeProvider.value}::${activeModelId.value}`)
 
 /** Flatten provider→entries into a single sorted list for the dropdown. */
@@ -449,10 +448,16 @@ function opLabel(operation: string) {
   return opLabels[operation] || operation
 }
 
-function sendMsg() {
+function sendMsg(event?: KeyboardEvent) {
+  if (event?.shiftKey) {
+    // Shift+Enter: insert newline, don't send
+    input.value += '\n'
+    event.preventDefault()
+    return
+  }
   if (!input.value.trim()) return
   loading.value = true
-  send(input.value.trim(), routeOverride.value)
+  send(input.value.trim())
   input.value = ''
   nextTick(() => scrollToBottom())
 }

@@ -108,6 +108,14 @@ const navItems = [
     label: '进化工厂',
   },
   {
+    id: 'patches',
+    icon: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="16 18 22 12 16 6"/>
+      <polyline points="8 6 2 12 8 18"/>
+    </svg>`,
+    label: '演进',
+  },
+  {
     id: 'files',
     icon: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
@@ -389,5 +397,43 @@ const navItems = [
   color: var(--oaa-color-muted);
   font-family: var(--oaa-font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------ */
+/* Light theme — Kenya Hara 东方极简 · 暖米白                           */
+/* ------------------------------------------------------------------ */
+[data-theme="light"] .sidebar {
+  background: #f0ece7;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-right-color: rgba(0, 0, 0, 0.04);
+}
+
+[data-theme="light"] .sidebar::before {
+  display: none;
+}
+
+[data-theme="light"] .sidebar-header {
+  border-bottom-color: rgba(0, 0, 0, 0.04);
+}
+
+[data-theme="light"] .nav-item:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+[data-theme="light"] .nav-item.active {
+  background: rgba(184, 74, 58, 0.08);
+  box-shadow: inset 3px 0 0 var(--oaa-blue-500);
+}
+
+[data-theme="light"] .sidebar-footer {
+  border-top-color: rgba(0, 0, 0, 0.04);
+}
+
+[data-theme="light"] .sidebar-logo {
+  background: linear-gradient(135deg, var(--oaa-blue-500), #b84a3a);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 </style>

@@ -23,9 +23,11 @@ logger = get_logger("evolution")
 class EvolutionEngine:
     """Tracks task execution patterns and drives self-evolution."""
 
-    def __init__(self, data_dir: str, llm: Optional["LLMClient"] = None):
+    def __init__(self, data_dir: str, llm: Optional["LLMClient"] = None,
+                 skill_manager=None):
         self.data_dir = data_dir
         self._llm = llm
+        self._skill_mgr = skill_manager
         self._stats_path = os.path.join(data_dir, "memory", "evolution_stats.json")
         self._trajectory_dir = os.path.join(data_dir, "memory", "trajectories")
         Path(self._trajectory_dir).mkdir(parents=True, exist_ok=True)
@@ -56,6 +58,10 @@ class EvolutionEngine:
     def set_llm(self, llm: "LLMClient"):
         """Inject or replace the LLM client (e.g. wired after agent init)."""
         self._llm = llm
+
+    def set_skill_manager(self, skill_manager):
+        """Inject SkillManager so crystallized skills are discovered immediately."""
+        self._skill_mgr = skill_manager
 
     async def record_skill_usage(self, skill_name: str):
         """Level 1: Track how often each skill is used.
@@ -280,4 +286,6 @@ class EvolutionEngine:
             "created": datetime.now().isoformat(),
         })
         await self._save_stats()
+        if self._skill_mgr:
+            self._skill_mgr.discover()
         return str(target)
