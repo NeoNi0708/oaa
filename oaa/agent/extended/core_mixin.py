@@ -104,8 +104,7 @@ class CoreMixin:
             "        - type: 'single', 'multiple', or 'text'\n"
             "        - label (string)\n"
             "        - options (array, required for single/multiple)\n"
-            "        - condition (object, optional) — question-level condition\n"
-            "        - options_condition (object, optional) — reserved for future\n\n"
+            "        - condition (object, optional) — question-level condition\n\n"
 
             "Condition expression (recursive):\n"
             '- Simple: {"depends_on": "q_id", "equals": "value"} or {"depends_on": "q_id", "in": ["A","B"]}\n'
@@ -174,6 +173,7 @@ class CoreMixin:
             "status": "success",
             "questionnaire_id": qnr_id,
             "section_count": len(sections),
+            "_questionnaire_data": qnr,
         }
 
     @agent_tool(
