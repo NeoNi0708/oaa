@@ -228,10 +228,14 @@ class EvolutionMixin:
                 return False, "无法验证：context 缺少 tool_name"
             try:
                 memory = getattr(agent_ref, 'memory', None)
-                if memory and hasattr(memory, 'get_tool_failures'):
-                    recent = memory.get_tool_failures(tool_name, limit=1)
-                    if recent:
-                        return False, f"{tool_name} 仍有失败记录: {recent[0].get('error', 'unknown')[:100]}"
+                if memory and hasattr(memory, 'load_tool_failures'):
+                    recent = memory.load_tool_failures(limit=5)
+                    recent_for_tool = [
+                        f for f in recent
+                        if f.get("tool", "") == tool_name
+                    ]
+                    if recent_for_tool:
+                        return False, f"{tool_name} 仍有失败记录: {recent_for_tool[0].get('error', 'unknown')[:100]}"
             except Exception as exc:
                 logger.warning("Tool-failure verifier failed for %s: %s", tool_name, exc)
             return True, f"已确认 {tool_name} 无新失败记录"

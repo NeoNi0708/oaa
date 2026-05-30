@@ -2826,3 +2826,34 @@ oaa/agent/tools/
 
 两层 `except` 把错误吞干净，导致每次切模型静默失败，`self._agent.llm` 始终是启动时的旧客户端。用户切到有额度的模型后实际请求仍走旧模型 API → 429。`except Exception` 全局审计发现 12 处类似问题，全部升级到 `logger.warning`。
 
+## 本次会话（2026-05-30）— RepairLoop 接入自愈闭环
+
+### 背景
+
+自愈系统有三条路径但闭环断裂：Path A（管理触发）裸调 `process_message` 无验证无回滚，Path B（IdleInspector）检测到故障仅通知需 GUI 批准，Path C（RepairLoop）完整实现却无人调用。
+
+### 修复的 9 项改动
+
+| # | 文件 | 改动 | 效果 |
+|---|------|------|------|
+| 1 | `gateway/mgmt/evolution_mixin.py` | 验证器 `get_tool_failures` → `load_tool_failures(5)` + 按 tool 过滤 | 真实验证而非恒 True |
+| 2 | `agent/repair_loop.py` | 新增 `ptype == "diagnostic"` 分支传递 `raw_prompt` | 支持预格式化诊断文本 |
+| 3 | `agent/idle_inspector.py` | `pause/resume` 改为计数，防止嵌套 RepairLoop 提前恢复 | 安全嵌套 |
+| 4 | `gateway/mgmt/core_mixin.py` | `_heal_callback` 签名 `str→dict` | 传递结构化 problem_context |
+| 5 | `gateway/mgmt/email_mixin.py` | 传递 dict 含 `type/diagnostic_subtype/raw_prompt/account_*`，不含凭证 | 结构化诊断 + 避免泄露 |
+| 6 | `app.py` | `_agent_heal` 重写为 RepairLoop，注册 subtype 感知验证器 | 获得验证+重试+回滚+inspector pause |
+| 7 | `agent/idle_inspector.py` | 新增 `_auto_heal_callback` + setter + `_is_high_confidence_failure` + `_create_tool_fix_proposal` | 高置信度故障自动触发修复 |
+| 8 | `app.py` | `start()` 中注册 `_auto_heal` 回调到 IdleInspector | 路径 B 自动闭环 |
+| 9 | `gateway/mgmt/tool_failure_verifier.py` | 标记弃用，实际验证器已迁至 evolution_mixin/app.py | 消除误导性存根 |
+
+### 闭环恢复状态
+
+| 路径 | 触发方式 | 验证 | 重试 | 回滚 | Inspector pause | 自动/手动 |
+|------|----------|------|------|------|----------------|-----------|
+| Path A | email_mixin 测试失败 | ✅ 重测邮箱/检查失败记录 | ✅ 3次 | ✅ | ✅ | 自动 |
+| Path B | IdleInspector ≥3次tool_bug/LLM确认 | ✅ load_tool_failures过滤 | ✅ 3次 | ✅ | ✅ | 自动 |
+| Path C | GUI 进化工厂批准 | ✅ load_tool_failures过滤 | ✅ 3次 | ✅ | ✅ | 手动 |
+
+### 新增文件
+- `self_healing_closed_loop.png` — 闭环架构示意图
+

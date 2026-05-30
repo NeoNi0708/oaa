@@ -121,9 +121,9 @@ class OAAApp:
         self.desktop.set_management_handler(mgmt)
 
         # Wire self-healing: when a management operation fails, route the
-        # diagnostic prompt to the agent so it can read + fix its own code.
+        # diagnostic context dict through RepairLoop (with verify+retry+rollback).
         mgmt.set_heal_callback(
-            lambda prompt: asyncio.create_task(self._agent_heal(prompt))
+            lambda ctx: asyncio.create_task(self._agent_heal(ctx))
         )
 
 # Wire real-time push notifications for scheduler and proposal store
@@ -275,6 +275,73 @@ class OAAApp:
         self.agent._idle_inspector.set_executor_callback(_executor_run)
         await self.agent._idle_inspector.start_background()
 
+        # Auto-heal callback — IdleInspector triggers RepairLoop for high-confidence tool failures
+        async def _auto_heal(prop_id: str, problem_context: dict):
+            """Auto-execute a tool-fix proposal through RepairLoop (no GUI approval needed)."""
+            logger.info("Auto-heal triggered for proposal %s", prop_id)
+            from .agent.repair_loop import RepairLoop, RepairPlan
+
+            store = self.agent._proposal_store
+            if not store:
+                return
+
+            proposal = store.get(prop_id)
+            if proposal and proposal.get("status") != "pending":
+                logger.info("Proposal %s already %s — skipping auto-heal", prop_id, proposal["status"])
+                return
+
+            await store.update_status(prop_id, "running")
+            plan = RepairPlan(
+                proposal_id=prop_id,
+                problem_context=problem_context,
+            )
+            loop_obj = RepairLoop(data_dir=self.config.data_dir)
+            agent_ref = self.agent
+
+            async def _tool_verifier(ctx: dict) -> tuple[bool, str]:
+                tool_name = ctx.get("tool_name", "")
+                if not tool_name:
+                    affected = ctx.get("affected_tools", "")
+                    if affected:
+                        tool_name = affected.split("、")[0]
+                if not tool_name:
+                    return False, "无法验证：缺少 tool_name"
+                try:
+                    memory = getattr(agent_ref, 'memory', None)
+                    if memory and hasattr(memory, 'load_tool_failures'):
+                        recent = memory.load_tool_failures(limit=5)
+                        recent_for_tool = [f for f in recent if f.get("tool", "") == tool_name]
+                        if recent_for_tool:
+                            return False, f"{tool_name} 仍有失败记录: {recent_for_tool[0].get('error','')[:80]}"
+                except Exception as exc:
+                    logger.warning("Auto-heal verifier failed for %s: %s", tool_name, exc)
+                return True, f"已确认 {tool_name} 无新失败记录"
+
+            loop_obj.register_verifier("tool_failure", _tool_verifier)
+            result = await loop_obj.run(
+                plan, self.agent,
+                inspector=getattr(self.agent, '_idle_inspector', None),
+            )
+
+            new_status = "done" if result["status"] == "done" else "failed"
+            await store.update_status(
+                prop_id, new_status,
+                executed_at=time.time(),
+                result=result.get("message", ""),
+                error=None if result["status"] == "done" else result.get("message"),
+            )
+
+            if self._mgmt:
+                self._mgmt._push_notification("proposal_completed", {
+                    "proposal_id": prop_id,
+                    "proposal_status": new_status,
+                    "result": result.get("message", ""),
+                })
+            logger.info("Auto-heal for proposal %s: %s (attempts=%d)",
+                        prop_id, result["status"], result.get("attempts", 0))
+
+        self.agent._idle_inspector.set_auto_heal_callback(_auto_heal)
+
         # Phase 4: Start weekly reflection scheduler (background, non-blocking)
         asyncio.create_task(self.reflection.start())
 
@@ -370,23 +437,81 @@ class OAAApp:
         except Exception as exc:
             logger.warning("Agent welcome for channel %s failed: %s", channel, exc)
 
-    async def _agent_heal(self, diagnostic_prompt: str):
-        """Self-healing: fire a diagnostic prompt at the agent in background.
-        The agent uses read_own_source + self_improve to diagnose and fix
-        application code issues reported by management operations."""
-        logger.info("Self-healing triggered")
+    async def _agent_heal(self, problem_context: dict):
+        """Self-healing through RepairLoop (verify + retry + rollback + inspector pause).
+
+        Receives a structured problem_context dict from management operations
+        (e.g. email_mixin) and runs RepairLoop with a subtype-aware verifier.
+        """
+        logger.info("Self-healing triggered (RepairLoop path A)")
+        from .agent.repair_loop import RepairLoop, RepairPlan
+
+        plan = RepairPlan(
+            proposal_id=f"heal_{int(time.time())}",
+            problem_context=problem_context,
+        )
+        loop_obj = RepairLoop(data_dir=self.config.data_dir)
+        agent_ref = self.agent
+        mgmt = self._mgmt
+
+        async def _diagnostic_verifier(ctx: dict) -> tuple[bool, str]:
+            subtype = ctx.get("diagnostic_subtype", "")
+            if subtype == "email_test" and mgmt:
+                username = ctx.get("account_username", "")
+                if username and hasattr(mgmt, '_email_manager') and mgmt._email_manager:
+                    try:
+                        accounts = mgmt._email_manager.list_accounts()
+                        acct = next((a for a in accounts if a.get("username") == username), None)
+                        if acct:
+                            retest = await mgmt._email_manager.test_connection(acct)
+                            if retest.get("ok"):
+                                return True, "重测通过：邮箱连接正常"
+                            err = retest.get("imap_error") or retest.get("smtp_error") or "未知错误"
+                            return False, f"重测失败：{err}"
+                    except Exception as exc:
+                        logger.warning("Email retest verifier failed: %s", exc)
+            # Generic fallback: check for recent tool failures
+            memory = getattr(agent_ref, 'memory', None)
+            if memory and hasattr(memory, 'load_tool_failures'):
+                recent = memory.load_tool_failures(limit=5)
+                for f in recent:
+                    ts = f.get("timestamp", "")
+                    if ts:
+                        from datetime import datetime
+                        try:
+                            ft = datetime.strptime(ts, "%Y-%m-%d %H:%M")
+                            if (datetime.now() - ft).total_seconds() < 30:
+                                return False, f"最新失败 ({f.get('tool','?')}): {f.get('error','')[:80]}"
+                        except ValueError:
+                            pass
+            return True, "诊断完成，无新失败"
+
+        loop_obj.register_verifier("diagnostic", _diagnostic_verifier)
+
         try:
-            async for chunk in self.agent.process_message(diagnostic_prompt, history=[]):
-                if chunk["type"] == "llm_output":
-                    await self.desktop.notify_all(chunk["content"])
+            result = await loop_obj.run(
+                plan, self.agent,
+                inspector=getattr(self.agent, '_idle_inspector', None),
+            )
+
+            # Notify GUI of result
+            msg = result.get("message", "")
+            if result["status"] == "done":
+                await self.desktop.notify_all(f"✅ 自愈完成: {msg}"[:600], msg_type="llm_output")
+            else:
+                await self.desktop.notify_all(f"❌ 自愈失败: {msg}"[:600], msg_type="llm_output")
             await self.desktop.notify_all("", msg_type="done")
-            # After healing, clear cached managers so fixes take effect
-            # without requiring a full app restart.
-            if hasattr(self, '_mgmt') and self._mgmt:
-                self._mgmt._email_cfg = None
-            logger.info("Self-healing agent task completed — caches cleared")
+
+            # Clear cached managers so fixes take effect without restart
+            if mgmt:
+                mgmt._email_cfg = None
+
+            logger.info("Self-healing completed: status=%s attempts=%d",
+                        result["status"], result.get("attempts", 0))
         except Exception as exc:
-            logger.warning("Self-healing agent task failed: %s", exc)
+            logger.warning("Self-healing RepairLoop failed: %s", exc)
+            await self.desktop.notify_all(f"❌ 自愈异常: {exc}"[:600], msg_type="llm_output")
+            await self.desktop.notify_all("", msg_type="done")
 
     async def _startup_check(self):
         """Wait for Desktop GUI client, then trigger agent-driven startup reports."""

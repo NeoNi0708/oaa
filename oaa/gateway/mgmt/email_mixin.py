@@ -57,7 +57,7 @@ class EmailMixin:
             imap_err = result.get("imap_error") or ""
             smtp_err = result.get("smtp_error") or ""
             detail = imap_err or smtp_err or str(result.get("errors", []))
-            diagnostic = (
+            diagnostic_text = (
                 f"【自愈触发】邮箱连接测试失败\n\n"
                 f"提供商: {provider}\n"
                 f"服务器: {account.get('imap_server', '?')}:{account.get('imap_port', '?')}\n"
@@ -69,8 +69,18 @@ class EmailMixin:
                 f"4. 用 self_improve 修复代码（用旧字符串替换为新字符串）\n"
                 f"5. 修复后告知用户已修复，请重新测试"
             )
+            ctx = {
+                "type": "diagnostic",
+                "diagnostic_subtype": "email_test",
+                "raw_prompt": diagnostic_text,
+                "error_detail": detail,
+                "account_username": account.get("username", ""),
+                "account_provider": provider,
+                "account_imap_server": account.get("imap_server", ""),
+                "account_imap_port": account.get("imap_port", ""),
+            }
             try:
-                self._heal_callback(diagnostic)
+                self._heal_callback(ctx)
             except Exception:
                 pass
 

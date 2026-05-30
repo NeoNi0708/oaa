@@ -153,6 +153,12 @@ class RepairLoop:
                 ),
                 "最后错误：{}".format(ctx.get("last_error", "")),
             ])
+        elif ptype == "diagnostic":
+            raw = ctx.get("raw_prompt", "")
+            if raw:
+                parts.append(raw)
+            else:
+                parts.append(json.dumps(ctx, ensure_ascii=False, indent=2))
         else:
             parts.append(json.dumps(ctx, ensure_ascii=False, indent=2))
 

@@ -100,17 +100,17 @@ class CoreMixin:
 
         # Self-healing callback — fired when a management operation fails
         # and the Agent should diagnose + fix the root cause.
-        # Receives a diagnostic prompt string.
-        self._heal_callback: Callable[[str], None] | None = None
+        # Receives a diagnostic context dict.
+        self._heal_callback: Callable[[dict], None] | None = None
 
         # Processed action IDs for chat bubble button idempotency
         self._processed_actions_path = os.path.join(self._config.data_dir, "processed_actions.json")
         self._processed_actions: set[str] = set()
         self._load_processed_actions()
 
-    def set_heal_callback(self, callback: Callable[[str], None]):
+    def set_heal_callback(self, callback: Callable[[dict], None]):
         """Register a callback to trigger agent self-healing on operation failures.
-        The callback receives a Chinese diagnostic prompt string for the agent."""
+        The callback receives a diagnostic context dict for the agent."""
         self._heal_callback = callback
 
     def on_push_notification(self, callback: Callable[[str, dict], None]):

@@ -115,6 +115,7 @@ class IdleInspector:
         self._background_task: asyncio.Task | None = None
         self._notify_callback: Callable[[str], Coroutine] | None = None
         self._executor_callback: Callable[[dict], Coroutine] | None = None
+        self._auto_heal_callback: Callable[[str, dict], Coroutine] | None = None
         # Dedup tracking: proposal_hash → send_count
         self._proposal_tracker: dict[str, int] = {}
         self._dedup_path = ""  # set by set_memory_path or inferred from memory_mgr
@@ -124,6 +125,7 @@ class IdleInspector:
         self._load_ignore_list()
         # Pause flag — set by repair_loop to prevent nested inspection during self-healing
         self._paused: bool = False
+        self._pause_count: int = 0
 
     def reset_cooldown(self):
         """Reset the cooldown timer so next check runs immediately."""
@@ -218,16 +220,33 @@ class IdleInspector:
         """
         self._executor_callback = callback
 
+    def set_auto_heal_callback(self, callback: Callable[[str, dict], Coroutine] | None):
+        """Register a callback for auto-healing high-confidence tool failures.
+
+        The callback receives ``(proposal_id, problem_context)`` and should
+        run RepairLoop without requiring GUI approval.
+        """
+        self._auto_heal_callback = callback
+
     def pause(self):
-        """Temporarily suppress all inspections (e.g. during repair_loop)."""
+        """Temporarily suppress all inspections (e.g. during repair_loop).
+
+        Uses a counter so nested pause/resume pairs don't prematurely resume.
+        """
+        self._pause_count += 1
         self._paused = True
-        logger.info("IdleInspector paused")
+        logger.info("IdleInspector paused (count=%d)", self._pause_count)
 
     def resume(self):
-        """Resume normal inspection after a pause."""
-        self._paused = False
-        self._last_check = time.time()  # reset cooldown so next check is fresh
-        logger.info("IdleInspector resumed")
+        """Resume normal inspection after a pause (counter-balanced)."""
+        self._pause_count -= 1
+        if self._pause_count <= 0:
+            self._pause_count = 0
+            self._paused = False
+            self._last_check = time.time()  # reset cooldown so next check is fresh
+            logger.info("IdleInspector resumed")
+        else:
+            logger.info("IdleInspector resume skipped (count=%d)", self._pause_count)
 
     def is_paused(self) -> bool:
         return self._paused
@@ -849,17 +868,13 @@ class IdleInspector:
                 "analysis": "执行链中检测到代码异常 — 需检查源码修复",
             }
             if self._proposal_store:
-                from .proposal import Proposal, TYPE_TOOL_FIX
-                prop = Proposal(
-                    type=TYPE_TOOL_FIX,
+                await self._create_tool_fix_proposal(
                     title=f"任务链工具异常: {tool_list}",
                     problem=f"任务「{task_context}」执行链中 {tool_list} 失败 {cats.get('tool_bug', 0)} 次。链: {chain_summary}",
                     benefit="修复后相关工具可正常使用",
                     target=tool_list,
-                    actions=None,
                     problem_context=problem_context,
                 )
-                await self._proposal_store.add(prop)
             return (
                 "🔧 空闲诊断：发现任务执行链存在代码异常\n\n"
                 "  - 任务: {}\n"
@@ -929,16 +944,13 @@ class IdleInspector:
                         "analysis": f"LLM 链分析: {reasoning}",
                     }
                     if self._proposal_store:
-                        from .proposal import Proposal, TYPE_TOOL_FIX
-                        await self._proposal_store.add(Proposal(
-                            type=TYPE_TOOL_FIX,
+                        await self._create_tool_fix_proposal(
                             title=f"执行链异常需修复: {task_key[:40]}",
                             problem=f"任务「{task_context}」执行链异常。LLM 分析: {reasoning}",
                             benefit="修复后任务可正常执行",
                             target=task_context[:40],
-                            actions=None,
                             problem_context=problem_context,
-                        ))
+                        )
                     return (
                         "🔧 空闲诊断：任务执行链检测到工具异常\n\n"
                         "  - 任务: {}\n"
@@ -988,16 +1000,13 @@ class IdleInspector:
                 "analysis": f"工具 {worst_tool} 潜在异常（无 LLM 分析）",
             }
             if self._proposal_store:
-                from .proposal import Proposal, TYPE_TOOL_FIX
-                await self._proposal_store.add(Proposal(
-                    type=TYPE_TOOL_FIX,
+                await self._create_tool_fix_proposal(
                     title=f"{worst_tool} 可能有异常需检查",
                     problem=f"任务「{task_context}」中 {worst_tool} 多次失败，无法自动分析根因。链: {chain_summary}",
                     benefit=f"修复后 {worst_tool} 可正常使用",
                     target=worst_tool,
-                    actions=None,
                     problem_context=problem_context,
-                ))
+                )
             return (
                 "🔧 空闲诊断：工具 **{}** 可能异常（无法自动分析根因）\n\n"
                 "  - 任务: {}\n"
@@ -1038,16 +1047,13 @@ class IdleInspector:
                 "代码异常 — 需检查源码修复",
             )
             if self._proposal_store:
-                from .proposal import Proposal, TYPE_TOOL_FIX
-                await self._proposal_store.add(Proposal(
-                    type=TYPE_TOOL_FIX,
+                await self._create_tool_fix_proposal(
                     title=f"{tool} 失败 {total} 次需修复（无任务上下文）",
                     problem=f"工具 {tool} 累计失败 {total} 次。最后错误: {error_snippet}",
                     benefit=f"修复后 {tool} 可正常使用",
                     target=tool,
-                    actions=None,
                     problem_context=problem_context,
-                ))
+                )
             return (
                 "🔧 空闲诊断：发现工具 **{}** 代码异常（失败 {} 次）\n\n"
                 "  - 最后错误: {}\n"
@@ -1094,16 +1100,13 @@ class IdleInspector:
                         f"LLM 分析: {reasoning}",
                     )
                     if self._proposal_store:
-                        from .proposal import Proposal, TYPE_TOOL_FIX
-                        await self._proposal_store.add(Proposal(
-                            type=TYPE_TOOL_FIX,
+                        await self._create_tool_fix_proposal(
                             title=f"{tool} 失败 {total} 次需修复",
                             problem=f"工具 {tool} 失败 {total} 次。LLM 分析: {reasoning}",
                             benefit=f"修复后 {tool} 可正常使用",
                             target=tool,
-                            actions=None,
                             problem_context=problem_context,
-                        ))
+                        )
                     return (
                         "🔧 空闲诊断：发现工具 **{}** 异常（失败 {} 次）\n\n"
                         "  - 最后错误: {}\n"
@@ -1128,16 +1131,13 @@ class IdleInspector:
             "无法确定根因（无 LLM 分析）— 按潜在工具异常处理",
         )
         if self._proposal_store:
-            from .proposal import Proposal, TYPE_TOOL_FIX
-            await self._proposal_store.add(Proposal(
-                type=TYPE_TOOL_FIX,
+            await self._create_tool_fix_proposal(
                 title=f"{tool} 失败 {total} 次需检查",
                 problem=f"工具 {tool} 累计失败 {total} 次，无法自动分析根因。最后错误: {error_snippet}",
                 benefit=f"修复后 {tool} 可正常使用",
                 target=tool,
-                actions=None,
                 problem_context=problem_context,
-            ))
+            )
         return (
             "🔧 空闲诊断：工具 **{}** 失败 {} 次（无法自动分析根因）\n\n"
             "  - 最后错误: {}\n"
@@ -1145,6 +1145,50 @@ class IdleInspector:
             "  - 已生成提案，请在进化工厂查看\n\n"
             "在进化工厂页面点击「批准执行」或「忽略」"
         ).format(tool, total, error_snippet, chain_summary)
+
+    # ------------------------------------------------------------------
+    # Auto-heal support — high-confidence tool failure auto-repair
+    # ------------------------------------------------------------------
+
+    def _is_high_confidence_failure(self, problem_context: dict) -> bool:
+        """Determine whether a tool failure should auto-trigger RepairLoop.
+
+        Returns True when:
+        - tool_bug category >= 3 (high-confidence code defect)
+        - LLM confirmed tool_bug with at least 1 tool_bug hit
+        """
+        if problem_context.get("type") != "tool_failure":
+            return False
+        categories = problem_context.get("categories", {})
+        analysis = problem_context.get("analysis", "")
+        # tool_bug >= 3 = high confidence
+        if categories.get("tool_bug", 0) >= 3:
+            return True
+        # LLM-confirmed analysis with at least one tool_bug
+        if analysis.startswith("LLM") and categories.get("tool_bug", 0) >= 1:
+            return True
+        return False
+
+    async def _create_tool_fix_proposal(self, title: str, problem: str, benefit: str,
+                                         target: str, problem_context: dict) -> str | None:
+        """Create a TYPE_TOOL_FIX proposal and optionally auto-trigger repair.
+
+        Returns the proposal ID if stored successfully, None otherwise.
+        """
+        if not self._proposal_store:
+            return None
+        from .proposal import Proposal, TYPE_TOOL_FIX
+        prop = Proposal(
+            type=TYPE_TOOL_FIX,
+            title=title, problem=problem, benefit=benefit,
+            target=target, actions=None,
+            problem_context=problem_context,
+        )
+        prop_id = await self._proposal_store.add(prop)
+        if self._auto_heal_callback and self._is_high_confidence_failure(problem_context):
+            logger.info("Auto-heal triggered for proposal %s — high-confidence tool fix", prop_id)
+            asyncio.create_task(self._auto_heal_callback(prop_id, problem_context))
+        return prop_id
 
     async def _llm_analyze_task_chain(self, task_context: str, task_fails: list[dict],
                                        chain_summary: str, cats: Counter) -> dict | None:
