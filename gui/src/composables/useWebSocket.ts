@@ -8,6 +8,7 @@ export interface ChatMessage {
   result?: string
   route?: 'local' | 'cloud'
   survey?: any
+  questionnaire?: any
   chartOption?: any
   filePreview?: any
   taskboard?: any
@@ -255,6 +256,19 @@ export function useWebSocket() {
                 title: p.title,
                 description: p.description,
                 questions: p.questions,
+              },
+            })
+            break
+          }
+          case 'questionnaire': {
+            messages.value.push({
+              role: 'assistant',
+              content: '',
+              questionnaire: {
+                id: p.id,
+                title: p.title,
+                description: p.description,
+                sections: p.sections,
               },
             })
             break
