@@ -173,6 +173,8 @@ class OAAAgent:
         self._pending_chart = None
         # Pending survey for create_survey tool
         self._pending_survey = None
+        # Pending questionnaire for create_questionnaire tool
+        self._pending_questionnaire = None
         # Pending file for show_file tool
         self._pending_file = None
         # Pending taskboard for update_taskboard tool

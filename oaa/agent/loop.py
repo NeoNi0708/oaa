@@ -541,6 +541,13 @@ class AgentLoop:
                         yield {"type": "survey", **survey_data}
                         self._agent._pending_survey = None
 
+                # If create_questionnaire was called, yield questionnaire chunk
+                if tool_name == "create_questionnaire" and self._agent:
+                    qnr = getattr(self._agent, "_pending_questionnaire", None)
+                    if qnr:
+                        yield {"type": "questionnaire", **qnr}
+                        self._agent._pending_questionnaire = None
+
                 # If display_chart was called, yield chart chunk for frontend rendering
                 if tool_name == "display_chart" and self._agent:
                     chart_data = getattr(self._agent, "_pending_chart", None)

@@ -85,6 +85,98 @@ class CoreMixin:
         }
 
     @agent_tool(
+        name="create_questionnaire",
+        description=(
+            "Create a multi-page interactive questionnaire with conditional logic. "
+            "Use this when you need to collect information across multiple form pages "
+            "with branching/filtering logic.\n\n"
+
+            "Parameters:\n"
+            "- title (string, required) — questionnaire title\n"
+            "- description (string, optional) — overall instruction text\n"
+            "- sections (array, required) — array of page definitions, each:\n"
+            "    - id (string, required) — unique section identifier\n"
+            "    - title (string, required) — page heading\n"
+            "    - description (string, optional) — page-level instruction\n"
+            "    - condition (object, optional) — condition expression (see below)\n"
+            "    - questions (array, required) — questions on this page. Each question:\n"
+            "        - id (string, required)\n"
+            "        - type: 'single', 'multiple', or 'text'\n"
+            "        - label (string)\n"
+            "        - options (array, required for single/multiple)\n"
+            "        - condition (object, optional) — question-level condition\n"
+            "        - options_condition (object, optional) — reserved for future\n\n"
+
+            "Condition expression (recursive):\n"
+            '- Simple: {"depends_on": "q_id", "equals": "value"} or {"depends_on": "q_id", "in": ["A","B"]}\n'
+            '- Compound: {"and": [cond1, cond2]} or {"or": [cond1, cond2]}\n\n'
+
+            "Constraints:\n"
+            "- All question_id referenced in conditions must appear in an earlier section "
+            "or an earlier question in the same section (no forward references)\n"
+            "- LLM must ensure all ids are unique within the questionnaire\n\n"
+
+            "Example:\n"
+            'create_questionnaire(\n'
+            '  title="需求调研",\n'
+            '  description="请根据您的实际情况完成以下问卷",\n'
+            '  sections=[\n'
+            '    {\n'
+            '      "id": "sec_1",\n'
+            '      "title": "基本信息",\n'
+            '      "questions": [\n'
+            '        {"id": "q_role", "type": "single", '
+            '"label": "您的身份？", "options": ["选项A", "选项B", "选项C"]}\n'
+            '      ]\n'
+            '    },\n'
+            '    {\n'
+            '      "id": "sec_2",\n'
+            '      "title": "详细信息",\n'
+            '      "condition": {"depends_on": "q_role", "equals": "选项A"},\n'
+            '      "questions": [\n'
+            '        {"id": "q_detail", "type": "multiple", '
+            '"label": "感兴趣的方向", "options": ["方向X", "方向Y", "方向Z"]}\n'
+            '      ]\n'
+            '    },\n'
+            '    {\n'
+            '      "id": "sec_3",\n'
+            '      "title": "其他需求",\n'
+            '      "condition": {"depends_on": "q_role", "in": ["选项B", "选项C"]},\n'
+            '      "questions": [\n'
+            '        {"id": "q_other", "type": "text", '
+            '"label": "请描述您的需求"},\n'
+            '        {"id": "q_budget", "type": "single", '
+            '"label": "预算范围", "options": ["<1万", "1-5万", "5万+"]}\n'
+            '      ]\n'
+            '    }\n'
+            '  ]\n'
+            ')'
+        )
+    )
+    async def do_create_questionnaire(self, title: str, sections: list,
+                                        description: str = "") -> dict:
+        """Create a multi-page interactive questionnaire."""
+        if not title or not sections:
+            return {"status": "error", "msg": "title and sections are required"}
+        import time, uuid
+        qnr_id = uuid.uuid4().hex[:12]
+        qnr = {
+            "id": qnr_id,
+            "title": title,
+            "description": description,
+            "sections": sections,
+            "created_at": time.time(),
+        }
+        agent = getattr(self, '_oaa_agent', None)
+        if agent:
+            agent._pending_questionnaire = qnr
+        return {
+            "status": "success",
+            "questionnaire_id": qnr_id,
+            "section_count": len(sections),
+        }
+
+    @agent_tool(
         name="update_taskboard",
         description="Display a visual task board in the chat showing current task progress. "
                     "Call this after creating or updating your todo list. "
