@@ -23,7 +23,7 @@
     </div>
 
     <!-- Current Section Questions -->
-    <div class="qnr-section">
+    <div class="qnr-section" :class="{ 'qnr-section--disabled': formDisabled }">
       <h4 class="qnr-section-title">{{ currentSection.title }}</h4>
       <p v-if="currentSection.description" class="qnr-section-desc">{{ currentSection.description }}</p>
 
@@ -31,29 +31,32 @@
         <label class="qnr-q-label">{{ q.label }}</label>
 
         <!-- single -->
-        <div v-if="q.type === 'single'" class="qnr-options">
+        <div v-if="q.type === 'single'" class="qnr-options" :class="{ 'qnr-options--disabled': formDisabled }">
           <label v-for="opt in q.options" :key="opt" class="qnr-option-row">
             <input type="radio" :name="sectionAnswersKey(currentSection.id) + '_' + q.id"
               :value="opt"
               :checked="getAnswer(currentSection.id, q.id) === opt"
-              @change="setAnswer(currentSection.id, q.id, opt)" class="qnr-radio" />
+              @change="setAnswer(currentSection.id, q.id, opt)"
+              :disabled="formDisabled" class="qnr-radio" />
             <span class="qnr-option-text">{{ opt }}</span>
           </label>
         </div>
 
         <!-- multiple -->
-        <div v-else-if="q.type === 'multiple'" class="qnr-options">
+        <div v-else-if="q.type === 'multiple'" class="qnr-options" :class="{ 'qnr-options--disabled': formDisabled }">
           <label v-for="opt in q.options" :key="opt" class="qnr-option-row">
             <input type="checkbox" :value="opt"
               :checked="getAnswer(currentSection.id, q.id)?.includes(opt)"
-              @change="toggleMulti(currentSection.id, q.id, opt)" class="qnr-checkbox" />
+              @change="toggleMulti(currentSection.id, q.id, opt)"
+              :disabled="formDisabled" class="qnr-checkbox" />
             <span class="qnr-option-text">{{ opt }}</span>
           </label>
         </div>
 
         <!-- text -->
         <input v-else-if="q.type === 'text'" v-model="textInputs[currentSection.id + '_' + q.id]"
-          type="text" class="qnr-text-input" placeholder="请输入..."
+          type="text" class="qnr-text-input" :class="{ 'qnr-text-input--disabled': formDisabled }"
+          placeholder="请输入..." :disabled="formDisabled"
           @input="setAnswer(currentSection.id, q.id, textInputs[currentSection.id + '_' + q.id])" />
       </div>
     </div>
@@ -61,8 +64,11 @@
     <!-- Error message -->
     <div v-if="errorMsg" class="qnr-error">{{ errorMsg }}</div>
 
+    <!-- Completed banner -->
+    <div v-if="done" class="qnr-done-banner">问卷已提交</div>
+
     <!-- Navigation -->
-    <div class="qnr-nav">
+    <div v-if="!done" class="qnr-nav">
       <button v-if="!isFirstStep" class="qnr-nav-btn qnr-nav-btn--prev" @click="prevPage" :disabled="submitting">
         ← 上一步
       </button>
@@ -101,8 +107,11 @@ const currentStep = ref(0)
 const answers = reactive<Record<string, Record<string, any>>>({})
 const textInputs = reactive<Record<string, string>>({})
 const submitting = ref(false)
+const done = ref(false)
 const errorMsg = ref('')
 const submittedSections = ref<Set<string>>(new Set())
+
+const formDisabled = computed(() => submitting.value || done.value)
 
 // ── Condition Engine ──
 function evaluateCondition(cond: Condition | null | undefined, ctxAnswers: Record<string, any>): boolean {
@@ -259,6 +268,7 @@ async function submitAll() {
       questionnaire_id: props.questionnaire.id,
     })
     if (resp.ok) {
+      done.value = true
       emit('completed')
     } else {
       errorMsg.value = resp.error || '提交失败'
@@ -377,4 +387,20 @@ async function submitAll() {
 .qnr-nav-btn--submit { background: var(--oaa-primary, #3b82f6); color: #fff; }
 .qnr-nav-btn--submit:hover { background: var(--oaa-primary-hover, #2563eb); }
 .qnr-nav-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Disabled / done state */
+.qnr-section--disabled { opacity: 0.55; pointer-events: none; }
+.qnr-options--disabled { opacity: 0.6; }
+.qnr-text-input--disabled { opacity: 0.5; }
+.qnr-done-banner {
+  text-align: center;
+  padding: 12px;
+  margin-top: 12px;
+  border-radius: 8px;
+  background: var(--oaa-primary-light, rgba(59,130,246,0.12));
+  border: 1px solid var(--oaa-primary, #3b82f6);
+  color: var(--oaa-color-primary, #f8fafc);
+  font-size: 14px;
+  font-weight: 500;
+}
 </style>
