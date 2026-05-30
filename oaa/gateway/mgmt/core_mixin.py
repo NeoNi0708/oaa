@@ -324,9 +324,8 @@ class CoreMixin:
                 display = ", ".join(val) if isinstance(val, list) else str(val)
                 parts.append(f"  {q_id}: {display}")
 
-        self._qnr_cache.drop(qnr_id)
-
         if self._agent:
+            self._qnr_cache.drop(qnr_id)
             return {"ok": True, "status": "forwarded_to_agent",
                     "user_message": "\n".join(parts)}
         return {"ok": False, "error": "Agent not available"}

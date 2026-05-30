@@ -74,6 +74,8 @@ _MANAGEMENT_TYPES = {
     "get_memory_stats",
     "submit_survey",
     "submit_choice",
+    "submit_section",
+    "submit_questionnaire",
 }
 
 
@@ -271,7 +273,7 @@ class DesktopAdapter:
 
         # If a management action was forwarded to the agent, process it as a chat message
         if (msg_type in ("chat_action", "submit_survey", "submit_choice",
-                 "submit_section", "submit_questionnaire")
+                         "submit_section", "submit_questionnaire")
                 and isinstance(result, dict)
                 and result.get("status") == "forwarded_to_agent"
                 and result.get("user_message")):
