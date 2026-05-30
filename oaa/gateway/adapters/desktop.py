@@ -387,6 +387,7 @@ class DesktopAdapter:
         elif msg_type == "survey":
             payload = {"type": "survey", "payload": {k: v for k, v in chunk.items() if k != "type"}}
         elif msg_type == "questionnaire":
+            logger.info("[DEBUG] Sending questionnaire chunk: id=%s", chunk.get("id", "?"))
             payload = {"type": "questionnaire", "payload": {k: v for k, v in chunk.items() if k != "type"}}
         else:
             return
