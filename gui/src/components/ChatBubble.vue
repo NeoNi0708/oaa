@@ -19,6 +19,12 @@
       :sendRequest="sendRequest"
       @submitted="onSurveySubmitted"
     />
+    <QuestionnaireWizard
+      v-if="message.questionnaire"
+      :questionnaire="message.questionnaire"
+      :sendRequest="sendRequest"
+      @completed="onQuestionnaireCompleted"
+    />
     <FilePreview
       v-if="message.filePreview"
       :path="message.filePreview.path"
@@ -50,6 +56,7 @@ import SurveyForm from './SurveyForm.vue'
 import FilePreview from './FilePreview.vue'
 import TaskBoard from './TaskBoard.vue'
 import ChoicesForm from './ChoicesForm.vue'
+import QuestionnaireWizard from './QuestionnaireWizard.vue'
 
 const props = defineProps<{
   message: ChatMessage
@@ -57,12 +64,19 @@ const props = defineProps<{
   sendRequest: (type: string, payload?: Record<string, unknown>, timeout?: number) => Promise<any>
 }>()
 
-const emit = defineEmits<{ (e: 'survey-submitted', surveyId: string, answers: any): void; (e: 'choice-selected', value: string, question: string): void }>()
+const emit = defineEmits<{
+  (e: 'survey-submitted', surveyId: string, answers: any): void
+  (e: 'questionnaire-completed'): void
+  (e: 'choice-selected', value: string, question: string): void
+}>()
 
 const segments = computed(() => parseContent(props.message.content || ''))
 
 function onSurveySubmitted(answers: any) {
   emit('survey-submitted', props.message.survey?.surveyId || '', answers)
+}
+function onQuestionnaireCompleted() {
+  emit('questionnaire-completed')
 }
 function onChoiceSelected(value: string, question: string) {
   emit('choice-selected', value, question)
