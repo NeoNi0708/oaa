@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from ...scheduler import TaskScheduler
 
 from ...logging_config import get_logger
+from .questionnaire_cache import QuestionnaireCache
 
 logger = get_logger("gateway.management")
 
@@ -59,6 +60,9 @@ VALID_TYPES = {
     # Survey
     "submit_survey",
     "submit_choice",
+    # Questionnaire
+    "submit_section",
+    "submit_questionnaire",
 }
 _ = VALID_TYPES  # prevent import-stripping
 
@@ -107,6 +111,9 @@ class CoreMixin:
         self._processed_actions_path = os.path.join(self._config.data_dir, "processed_actions.json")
         self._processed_actions: set[str] = set()
         self._load_processed_actions()
+
+        # Questionnaire partial submission cache
+        self._qnr_cache = QuestionnaireCache()
 
     def set_heal_callback(self, callback: Callable[[dict], None]):
         """Register a callback to trigger agent self-healing on operation failures.
@@ -290,6 +297,38 @@ class CoreMixin:
         user_msg = f"[问卷提交] 问卷 {survey_id} 的答案：{summary}"
         if self._agent:
             return {"ok": True, "status": "forwarded_to_agent", "user_message": user_msg}
+        return {"ok": False, "error": "Agent not available"}
+
+    def _handle_submit_section(self, payload: dict) -> dict:
+        qnr_id = payload.get("questionnaire_id", "")
+        section_id = payload.get("section_id", "")
+        answers = payload.get("answers", {})
+        if not qnr_id or not section_id:
+            return {"ok": False, "error": "questionnaire_id and section_id required"}
+        self._qnr_cache.save_section(qnr_id, section_id, answers)
+        return {"ok": True, "status": "cached"}
+
+    def _handle_submit_questionnaire(self, payload: dict) -> dict:
+        qnr_id = payload.get("questionnaire_id", "")
+        if not qnr_id:
+            return {"ok": False, "error": "questionnaire_id required"}
+
+        all_answers = self._qnr_cache.get_all_answers(qnr_id)
+        if not all_answers:
+            return {"ok": False, "error": "no answers found"}
+
+        parts = ["[问卷提交]"]
+        for sec_id, sec_answers in all_answers.items():
+            parts.append(f"--- {sec_id} ---")
+            for q_id, val in sec_answers.items():
+                display = ", ".join(val) if isinstance(val, list) else str(val)
+                parts.append(f"  {q_id}: {display}")
+
+        self._qnr_cache.drop(qnr_id)
+
+        if self._agent:
+            return {"ok": True, "status": "forwarded_to_agent",
+                    "user_message": "\n".join(parts)}
         return {"ok": False, "error": "Agent not available"}
 
     def _get_memory_store(self):

@@ -270,7 +270,8 @@ class DesktopAdapter:
         await self._send_response(websocket, msg_type, request_id, result)
 
         # If a management action was forwarded to the agent, process it as a chat message
-        if (msg_type in ("chat_action", "submit_survey", "submit_choice")
+        if (msg_type in ("chat_action", "submit_survey", "submit_choice",
+                 "submit_section", "submit_questionnaire")
                 and isinstance(result, dict)
                 and result.get("status") == "forwarded_to_agent"
                 and result.get("user_message")):
@@ -383,6 +384,8 @@ class DesktopAdapter:
             payload = {"type": "qr_code", "payload": {"url": chunk.get("url", ""), "channel": chunk.get("channel", ""), "state": chunk.get("state", "")}}
         elif msg_type == "survey":
             payload = {"type": "survey", "payload": {k: v for k, v in chunk.items() if k != "type"}}
+        elif msg_type == "questionnaire":
+            payload = {"type": "questionnaire", "payload": {k: v for k, v in chunk.items() if k != "type"}}
         else:
             return
         try:
