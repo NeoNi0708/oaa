@@ -2,7 +2,9 @@
 
 # OAA — Open AI Agent
 
-**一个基于 GenericAgent 的通用 AI 代理框架，支持多通道、多模型、自我进化**
+**一个基于 GenericAgent 的通用 AI 代理框架，支持多通道、多模型、自我进化、自愈系统**
+
+> ⚠️ **当前版本仅支持 Windows 10/11。** Linux / macOS 版本开发中。
 
 </div>
 
@@ -17,6 +19,7 @@ OAA（Open AI Agent）是一款通用 AI 代理框架，以 [GenericAgent](https
 - **多通道接入** — 支持桌面 GUI（Vue + Electron）、钉钉、飞书、微信同时接入，对话不中断
 - **多模型支持** — OpenAI / Anthropic Claude 双 API，支持运行时热切换
 - **自我进化** — 每次任务执行后自动结晶经验为技能，能力持续增长
+- **自愈系统** — OAA 能够读取、分析和修改自己的源代码。当检测到异常或低效代码时，可自主生成补丁并热加载修复，无需人工干预
 - **语义记忆系统** — Chroma 向量数据库 + SQLite 元数据，三层认知加工（存储→检索→消化）
 - **技能系统** — 预置业务技能，支持动态加载与热更新
 - **管理 API** — WebSocket 管理通道，支持通道管理、技能管理、参数调节、健康检查
@@ -41,6 +44,8 @@ OAA（Open AI Agent）是一款通用 AI 代理框架，以 [GenericAgent](https
 ---
 
 ## 快速开始
+
+> ⚠️ 目前仅支持 **Windows 10/11**。Linux / macOS 支持开发中。
 
 ```bash
 # 安装依赖
