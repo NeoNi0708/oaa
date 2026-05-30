@@ -1,6 +1,62 @@
-node_modules/
-dist/
-*.pyc
+# Python
 __pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+
+# Node
+node_modules/
+
+# Build / Dist
+dist/
+dist-electron/
+
+# Environment
 .env
+.env.local
+.venv
+venv/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+
+# Project specific tooling / artifacts
 .gstack/
+.claude/
+.codegraph/
+.rtk/
+.vite/
+.agents/
+oaa.egg-info/
+
+# Runtime data
+data/
+db/
+memory/
+workspace/
+_temp/
+debug/
+fix/
+scenario/
+test_screenshots/
+
+# Predict (architecture analysis reports)
+predict/
+
+# Skills (evolved skills managed separately)
+skills/
+
+# Standalone temp test files
+test_*.py
+verify_*.py
+fixed_code.py
+error_code.py
