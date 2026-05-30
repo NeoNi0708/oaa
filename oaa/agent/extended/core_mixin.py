@@ -46,9 +46,8 @@ class CoreMixin:
 
     @agent_tool(
         name="create_survey",
-        description="Create an interactive survey/questionnaire for the user. "
-                    "Use this when you need to collect multiple pieces of information "
-                    "from the user (e.g. report parameters, data sources, formatting preferences). "
+        description="Create a simple single-page survey/form for the user. "
+                    "Use ONLY for small, single-page forms (1-5 questions). "
                     "The survey appears as a form in the chat. The user fills it out and submits "
                     "all answers at once. "
                     "Parameters: title (survey title), description (optional instruction text), "
@@ -59,6 +58,9 @@ class CoreMixin:
                     "questions=[{id:\"time\",type:\"single\",label:\"Time range?\","
                     "options:[\"1 month\",\"3 months\",\"1 year\"]}, "
                     "{id:\"format\",type:\"single\",label:\"Format?\",options:[\"Word\",\"PDF\"]}])"
+                    "IMPORTANT: For questionnaires with 6+ questions, multiple pages, "
+                    "conditional logic, or any survey spanning multiple topics, "
+                    "use 'create_questionnaire' instead."
     )
     async def do_create_survey(self, title: str, questions: list,
                                 description: str = "") -> dict:
